@@ -20,8 +20,12 @@ KeyboardHub::KeyboardHub() {
 }  // Initializes every source and queue counter to a deterministic empty state.
 
 void KeyboardHub::reset() {
-    memset(queue_, 0, sizeof(queue_));
-    memset(states_, 0, sizeof(states_));
+    for (KeyEvent& event : queue_) {
+        event = KeyEvent{};
+    }
+    for (SourceState& state : states_) {
+        state = SourceState{};
+    }
     head_ = 0;
     tail_ = 0;
     count_ = 0;
