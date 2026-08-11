@@ -1,0 +1,47 @@
+name: Stage FNK upstream sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 11 * * 1"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  stage-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Tab5 main with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Merge the latest FNK main into the staging branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream-fnk https://github.com/AELovelace/Doll-OS-FNK0104.git
+          git fetch upstream-fnk main
+          git switch -C automation/upstream-fnk origin/main
+
+          if git merge-base --is-ancestor upstream-fnk/main HEAD; then
+            echo "Tab5 already contains the latest FNK main."
+            exit 0
+          fi
+
+          git merge --no-ff upstream-fnk/main -m "Merge FNK upstream into Tab5 staging"
+          git push --force-with-lease origin HEAD:automation/upstream-fnk
+
+          if gh pr view automation/upstream-fnk --json number >/dev/null 2>&1; then
+            gh pr edit automation/upstream-fnk --title "Merge current FNK main"
+          else
+            gh pr create --draft --base main --head automation/upstream-fnk \
+              --title "Merge current FNK main" \
+              --body "Automated staging merge from AELovelace/Doll-OS-FNK0104 main. Resolve any hardware-boundary conflicts and run the Tab5 build and smoke tests before marking this ready."
+          fi
