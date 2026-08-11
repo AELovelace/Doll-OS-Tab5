@@ -6,3 +6,4 @@ dapper/dist/
 .pio-generated/
 sdkconfig.tab5
 /*.piobuildtab5firmware.map
+managed_components/
