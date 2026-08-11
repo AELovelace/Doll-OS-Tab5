@@ -1,20 +1,17 @@
 //   global.h
-//   shared state used across DOLL-OS -- the telnet-interface port of DOLL-OS.
+// Shared state used across the Tab5-exclusive DOLL-OS fork.
 //
-//   Telnet is the sole *input* path (this is what the user asked to replace
-//   DOLL-OS's physical keyboard with), but this board's TFT panel is driven as a
-//   mirror of the telnet session -- "a second screen for the cardputer" -- so it
-//   still needs DOLL-OS's pixel-wrapped terminal history/ANSI-filter machinery.
+// The Tab5 panel mirrors one shell session. Telnet and each local keyboard
+// backend are equivalent producers for the same line editor and history view.
 //   That machinery lives here for the same reason DOLL-OS kept it in global.h:
 //   it's used by hoisted function prototypes and by subclasses declared in files
 //   further down the concatenated sketch.
 #pragma once
 
 #include <WiFi.h>
-#ifdef FNK0104N_3P5_320x480_ST77922
-    #include "DollST77922.h"
-#endif
-#include <TFT_eSPI.h>
+#include <LittleFS.h>
+#include <SD_MMC.h>
+#include <M5Unified.h>
 #include <ArduinoJson.h>
 //   Pulled in here (not just in Radio.ino) so the ESP32-audioI2S `Audio` class is
 //   declared before the Arduino sketch builder's auto-generated function
@@ -22,21 +19,17 @@
 //   prototype hoisted to the top of the concatenated sketch, above Radio.ino's
 //   own `#include "Audio.h"`; without Audio visible that early the prototype
 //   fails to parse ("'Audio' has not been declared"). global.h is included first
-//   from DS.ino, so declaring it here fixes the ordering -- the same reason every
+//   from Doll-OS-Tab5.ino, so declaring it here fixes the ordering -- the same reason every
 //   other cross-file type lives in this file.
 #include "Audio.h"
 
-//   Rear WS2812 RGB LED for app/runtime effects. Pin defaults match Freenove's
-//   FNK0104 RGB examples: GPIO42 on the AB/S variants, GPIO40 on the N variant.
-//   Set REAR_RGB_LED_PIN in config.h to override, or -1 to disable LED control.
+// Tab5 does not expose the inherited FNK rear WS2812. Keep the API disabled so
+// shared apps and activity calls remain safe no-ops.
 #ifndef REAR_RGB_LED_PIN
     #define REAR_RGB_LED_PIN DOLL_REAR_RGB_LED_PIN
 #endif
 #ifndef REAR_RGB_LED_BRIGHTNESS
     #define REAR_RGB_LED_BRIGHTNESS 255
-#endif
-#ifndef DOLL_DISPLAY_UPSIDE_DOWN
-    #define DOLL_DISPLAY_UPSIDE_DOWN 0
 #endif
 
 //   Shared rear-LED API for native modules (.ino/.cpp) and AppRunner opcodes.
@@ -74,25 +67,14 @@ void ledSetAppOverrideRgbLong(long red, long green, long blue);
 void ledClearAppOverride();
 void ledPrepareForSleep();
 
-//   Manual paired-board sleep path. DS-Slave sends the request over its private
-//   UART controls; Power.ino owns light sleep while Display.ino owns panel power.
+// Power.ino owns light sleep while Display.ino owns panel power. The official
+// keyboard interrupt is the reserved local wake source.
 void enterSystemLightSleep();
 void displaySetSleeping(bool sleeping);
 
-//   Display panel geometry, keyed off the same FNK0104* board-variant macro
-//   config.h already defines for SD_MMC/battery pins. Native panel resolution is
-//   portrait; the display runs rotated to landscape (see Display.ino), hence
-//   width/height are swapped from the driver's native W x H here.
-#ifdef FNK0104N_3P5_320x480_ST77922
-    const int DISPLAY_WIDTH = 480;
-    const int DISPLAY_HEIGHT = 320;
-#elif defined(FNK0104S_4P0_320x480_ST7796)
-    const int DISPLAY_WIDTH = 480;
-    const int DISPLAY_HEIGHT = 320;
-#else
-    const int DISPLAY_WIDTH = 320;
-    const int DISPLAY_HEIGHT = 240;
-#endif
+// Tab5 runs its MIPI-DSI display in native landscape orientation.
+const int DISPLAY_WIDTH = 1280;
+const int DISPLAY_HEIGHT = 720;
 
 //   Telnet server + the one connected client. DOLL-OS permits a single interactive
 //   session at a time, same as the original scaffold -- DOLL-OS's whole keyboard/
@@ -118,7 +100,7 @@ enum LineInputResult { LINE_NO_INPUT, LINE_EDITING, LINE_SUBMITTED };
 //per-input-source line-edit state (escape/CSI parsing + CRLF pairing). DOLL-OS had a
 //single physical keyboard, so this was implicit module state in one place. DOLL-OS now has
 //two sources feeding the same line editor -- the telnet client (TelnetServer.ino) and
-//the BLE-keyboard UART bridge (KeyboardSerial.ino) -- so each keeps its own copy: a
+//the official Tab5 Keyboard (KeyboardSerial.ino) -- so each keeps its own copy: a
 //half-finished escape sequence arriving on one source can't corrupt the other's parse.
 enum UserEscState { UESC_NONE, UESC_GOT_ESC, UESC_GOT_CSI };
 struct LineEditState {
@@ -321,7 +303,7 @@ struct DappKeyState {
 };
 
 //shared helpers used across app/file command tabs
-#define DOLL_BOARD_ID "fnk0104"
+#define DOLL_BOARD_ID "m5stack-tab5"
 #define DAPP_RUNTIME_VERSION "1.9.0"
 
 //Runtime-owned PCM synth used by the .dapp WAVE/WAVESTOP opcodes. It borrows
@@ -456,26 +438,9 @@ extern String motokoInputBuffer;
 extern WiFiClient remoteTelnetClient;   //outbound socket for the "telnet" client command (TelnetClient.ino) --
                                          //named distinctly from telnetClient (our server's connected user) above
 
-//   Display mirror (Display.ino). The TFT panel isn't a second *input* device --
-//   telnet remains the only way to control DOLL-OS -- it just shows the same session a
-//   connected telnet client sees, the way the user asked: "as if it was a second
-//   screen for the cardputer." That means reviving DOLL-OS's pixel-wrapped
-//   history/ANSI-filter machinery, just retargeted from an M5GFX sprite to a
-//   TFT_eSPI one.
-//
-//   The N-variant panel (ST77922, QSPI) pushes its whole frame in one call through
-//   a different object than the other two panels' plain TFT_eSPI, so tft/tft_qspi/
-//   tft_st77922 are all declared conditionally -- but every panel draws onto the
-//   same single full-screen frameSprite, so Display.ino's drawing code itself
-//   doesn't need to branch per panel, only the final "push this frame" step does.
-#ifdef FNK0104N_3P5_320x480_ST77922
-    TFT_eSPI tft_qspi = TFT_eSPI();
-    TFT_eSprite frameSprite = TFT_eSprite(&tft_qspi);
-    DollST77922 tft_st77922 = DollST77922();
-#else
-    TFT_eSPI tft = TFT_eSPI();
-    TFT_eSprite frameSprite = TFT_eSprite(&tft);
-#endif
+// M5Canvas preserves the sprite API used by the inherited terminal renderer.
+auto& tft = M5.Display;
+M5Canvas frameSprite(&M5.Display);
 
 const int DISPLAY_STATUS_BAR_HEIGHT = 16;
 const int DISPLAY_COMMAND_BAR_HEIGHT = 20;

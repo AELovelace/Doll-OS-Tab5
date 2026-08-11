@@ -1,5 +1,5 @@
 //   Power.ino
-//   Paired low-power mode initiated by DS-Slave's rotary Settings menu. The main
+//   Tab5 low-power compatibility path. The main
 //   board keeps RAM and execution state in light sleep; the slave performs a full
 //   deep-sleep reset and wakes this board by driving the keyboard UART RX line low.
 
@@ -11,7 +11,7 @@ void enterSystemLightSleep() {
     }
     systemLightSleepActive = true;
 
-    const gpio_num_t wakePin = gpio_num_t(KEYBOARD_SERIAL_RX_PIN);
+    const gpio_num_t wakePin = gpio_num_t(TAB5_KEYBOARD_INTERRUPT_PIN);
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);  // Give this manual sleep one wake owner.
     const esp_err_t pinResult = gpio_wakeup_enable(wakePin, GPIO_INTR_LOW_LEVEL);
     const esp_err_t sourceResult = pinResult == ESP_OK
@@ -19,7 +19,7 @@ void enterSystemLightSleep() {
         : pinResult;
     if (sourceResult != ESP_OK) {
         Serial.printf("[sleep] GPIO%d wake setup failed: %d\n",
-                      KEYBOARD_SERIAL_RX_PIN, int(sourceResult));
+                      TAB5_KEYBOARD_INTERRUPT_PIN, int(sourceResult));
         gpio_wakeup_disable(wakePin);
         systemLightSleepActive = false;
         return;
@@ -33,9 +33,6 @@ void enterSystemLightSleep() {
     WiFi.mode(WIFI_OFF);                           // Manual light sleep cannot retain the Wi-Fi association.
     ledSetWifiConnected(false);
 
-    const int ampWasEnabled = digitalRead(AUDIO_AMP_ENABLE_PIN);
-    pinMode(AUDIO_AMP_ENABLE_PIN, OUTPUT);
-    digitalWrite(AUDIO_AMP_ENABLE_PIN, LOW);       // Mute the speaker amplifier throughout light sleep.
     ledPrepareForSleep();                          // Darken the rear RGB status indicator.
     displaySetSleeping(true);                      // Sleep the TFT controller and switch off its backlight.
 
@@ -44,8 +41,6 @@ void enterSystemLightSleep() {
     gpio_wakeup_disable(wakePin);                  // Stop ordinary keyboard traffic becoming a wake source.
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
     displaySetSleeping(false);                     // Restore the preserved frame before network reconnect work.
-    digitalWrite(AUDIO_AMP_ENABLE_PIN, ampWasEnabled ? HIGH : LOW);
-
     WiFi.mode(WIFI_STA);                           // Restart STA without blocking the newly restored screen.
     WiFi.setAutoReconnect(false);
     WiFi.reconnect();                              // Existing maintenance logic handles a slow association.

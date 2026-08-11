@@ -1,8 +1,8 @@
 # DOLL-OS for M5Stack Tab5
 
-> **Port status:** foundation work is in progress. The committed FNK application
-> is preserved as the upstream baseline while the Tab5 display, storage, audio,
-> power, and keyboard backends are brought up. See
+> **Port status:** the complete inherited application now builds as an Arduino
+> sketch for Tab5. Display, power, storage, and the official Tab5 Keyboard are
+> integrated; hardware testing and the BLE/USB HID backends come next. See
 > [the Tab5 port plan](docs/TAB5_PORT_PLAN.md) and
 > [the upstream-sync policy](docs/UPSTREAM_SYNC.md).
 
@@ -10,8 +10,8 @@ This fork targets only the M5Stack Tab5. Its local interface is the official
 Tab5 Keyboard, with BLE HID and USB HID keyboards joining the same input hub.
 Touchscreen input is intentionally disabled for the initial releases.
 
-The text below documents the inherited FNK baseline and will be revised as each
-Tab5 milestone becomes functional.
+The command set is inherited from DOLL-OS-FNK. Features that still depend on
+FNK-only hardware are called out below instead of being presented as complete.
 
 ## Inherited FNK baseline
 
@@ -46,13 +46,15 @@ usable with no network.
 - **Editor** — full-screen text editor (`edit`)
 - **Networking** — telnet server + client, SSH client, FTP server, ping/ARP
   sweep, IP tools, MQTT (`motoko`)
-- **Radio** — MP3 stream playback over I²S (ES8311 codec)
+- **Radio** — inherited MP3 playback UI; the Tab5 ES8388 audio backend still
+  needs hardware validation
 - **Music library** — full-screen local MP3 player with recursive `/sd/music`
   scanning, ID3 metadata, search, and PSRAM-backed catalog storage
-- **Game Boy emulator** — `gb`, gnuboy port, gamepad via DS-Slave
+- **Game Boy emulator** — `gb`, gnuboy port; keyboard game controls are being
+  adapted to the shared Tab5 input hub
 - **ASUKA** — local LLM chat with tool calling (search / weather / URL fetch / time)
-- **BLE input bridge** — DS-Slave connects keyboard + gamepad at once and merges
-  them into one UART stream
+- **Input hub** — the official Tab5 Keyboard is active now; BLE HID and USB HID
+  keyboards are planned as additional producers for the same event queue
 
 ---
 
@@ -60,12 +62,19 @@ usable with no network.
 
 | | |
 |---|---|
-| Board | Freenove FNK0104-series ESP32-S3 display kit |
-| Panel | 2.8" 240×320 ILI9341, 3.5" 320×480 ST77922 QSPI, or 4.0" ST7796 |
-| Flash / PSRAM | 16MB flash, OPI PSRAM (required) |
+| Board | M5Stack Tab5 (ESP32-P4 + ESP32-C6) |
+| Panel | 5" 1280×720, managed by M5Unified/M5GFX |
+| Flash / PSRAM | 16MB flash, 32MB PSRAM |
 | Storage | SD_MMC card slot + LittleFS |
-| Audio | ES8311 codec over I²S |
-| Companion | second ESP32-S3 running `DS-Slave` (BLE HID → UART) |
+| Audio | onboard ES8388/ES7210; backend port pending hardware validation |
+| Local input | official Tab5 Keyboard over its expansion connector |
+| Future input | Bluetooth and USB host keyboards through the shared input hub |
+
+Touch input is deliberately ignored. The USB-A host port is powered at startup
+so its HID backend can be added without changing application-level input code.
+
+<details>
+<summary>Inherited FNK hardware history</summary>
 
 DS-Slave always uses GPIO17 TX and GPIO18 RX on its end. On DOLL-OS, connect
 RX/TX to GPIO21/2 for FNK0104AB/S or GPIO46/45 for FNK0104N. The N move keeps
@@ -89,11 +98,39 @@ Recommended build:
 https://store.freenove.com/products/fnk0104
 https://lonelybinary.com/en-us/products/esp32-s3-ipex?variant=43699253706909
 
-NOTE: THIS VERSION OF DOLL-OS REQUIRES A 16R8, AND IS NOT GUARANTEED TO WORK ON ANYTHING OTHER THAN
-AN S3
+The FNK hardware notes above are retained only as upstream history; this fork
+targets the ESP32-P4-based Tab5 exclusively.
+
+</details>
+
 ---
 
-## Getting started
+## Getting started with Arduino IDE
+
+1. Install Arduino IDE 2 and Espressif's `esp32` board package version 3.2.1.
+2. Install `ESP32Ping` 1.6 from its GitHub release. The remaining exact library
+   versions are declared in `sketch.yaml` and Arduino resolves them for the
+   `tab5` profile.
+3. Copy `config.h.example` to `config.h`, then add private Wi-Fi credentials,
+   passwords, and API keys. `config.h` is ignored by Git.
+4. Open `Doll-OS-Tab5.ino` in Arduino IDE and select the `tab5` sketch profile.
+5. Connect the Tab5 over USB-C, click Verify, then Upload.
+
+The profile selects the ESP32-P4 target, 16MB flash, 32MB PSRAM, the custom
+partition table, hardware USB CDC/JTAG, M5Unified/M5GFX, and the official Tab5
+Keyboard library. Touch is initialized only as part of display detection and is
+never read or submitted to DOLL-OS input.
+
+To build the same project outside the IDE:
+
+```powershell
+arduino-cli compile --profile tab5 .
+```
+
+## Inherited FNK setup notes (not used by this fork)
+
+<details>
+<summary>Show the old FNK build and DS-Slave instructions</summary>
 
 ### 1. Configure
 
@@ -167,6 +204,8 @@ flash using these settings:
 - **USB MSC On Boot:** `Disabled`
 - **USB DFU On Boot:** `Disabled`
 
+</details>
+
 ## Commands
 
 Run `help` on the device for the live list.
@@ -194,7 +233,7 @@ Run `help` on the device for the live list.
 | `reboot` | restart |
 | `run` | run a `.dapp` app |
 | `settings` | view/set/unset runtime overrides for config.h defaults (FTP, MQTT, radio, ASUKA), stored in `/system/conf/settings.dsys` |
-| `slave` | talk to DS-Slave |
+| `slave` | legacy compatibility command; DS-Slave is not used on Tab5 |
 | `ssh` | SSH client |
 | `status` | Wi-Fi status |
 | `telnet` | telnet client |
@@ -233,7 +272,7 @@ EXIT
 > TODO: prune to what a newcomer actually needs to find.
 
 ```text
-DS.ino               entry point, setup/loop
+Doll-OS-Tab5.ino     Arduino IDE entry point, setup/loop
 CommandProcessor.ino tokenizing, history, dispatch table
 Display.ino          TFT panel mirror
 Storage.ino          LittleFS + SD unified namespace
@@ -243,8 +282,8 @@ Gameboy.ino          gnuboy port
 Music.ino            PSRAM-backed local MP3 library/player
 Radio.ino            audio streaming
 Asuka.ino            LLM chat        AsukaTools.ino  its tool calls
-SlaveLink.ino        outbound channel to DS-Slave
-KeyboardSerial.ino   inbound keystrokes from DS-Slave
+SlaveLink.ino        no-op compatibility layer for inherited commands
+KeyboardSerial.ino   official Tab5 Keyboard HID backend
 global.h  config.h   shared state / local secrets
 sketch.yaml          board profile + pinned libraries
 apps/                bundled .dapp sources

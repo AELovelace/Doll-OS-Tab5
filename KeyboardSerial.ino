@@ -1,137 +1,169 @@
-//   KeyboardSerial.ino
-//   Second UART that receives keystrokes from DS-Slave -- the companion ESP32-S3 that
-//   bridges a BLE HID keyboard to a serial line (see ../DS-Slave/DS-Slave.ino). DS-Slave
-//   decodes each BLE key report into a plain byte stream: printable ASCII, CR for Enter,
-//   0x08 for Backspace, and ESC/CSI sequences for the arrows/Home/End/Delete/function
-//   keys. That is exactly the vocabulary DOLL-OS's telnet line editor already speaks, so the
-//   received bytes are fed straight into the shared processLineEditByte() (TelnetServer.ino)
-//   -- the BLE keyboard becomes a second way to drive the shell, working with or without
-//   a telnet client attached.
-//   DS-Slave can also send private out-of-band controls: 0xF4 = volume up,
-//   0xF5 = volume down, 0xF6 = paired sleep, and 0xF7 = wake beacon. Those are
-//   consumed here before line editing/raw forwarding.
-//
-//   Wiring (this board <-> DS-Slave):
-//     DOLL-OS RX = KEYBOARD_SERIAL_RX_PIN <- DS-Slave TX = GPIO17
-//     DOLL-OS TX = SLAVE_LINK_TX_PIN      -> DS-Slave RX = GPIO18
-//     DOLL-OS GND          <-> DS-Slave GND           (shared ground -- carried by the power pair below)
-//     DOLL-OS 5V/VIN       ->  DS-Slave 5V/VIN        (DOLL-OS powers DS-Slave; see the current note in setup)
-//   BoardPins.h selects GPIO21/2 on AB/S and GPIO46/45 on N; the N's GPIO21/2
-//   are occupied by audio WS and SD D2. Both ends run 115200 8N1.
+// KeyboardSerial.ino
+// The filename is retained to keep inherited callers stable while its backend
+// now reads the official Tab5 Keyboard instead of a DS-Slave UART.
 
-//UART peripheral 1 -- UART0 backs the USB serial console (Serial), so the keyboard link
-//gets its own peripheral. UART1 is full-duplex: RX carries keystrokes from DS-Slave and
-//TX carries commands back to it. Using the hardware transmitter is important at 115200;
-//software bit timing was vulnerable to cache/interrupt stalls and produced corrupt commands.
-HardwareSerial KeyboardSerial(1);
+#include <M5UnitUnified.h>
+#include <M5UnitUnifiedKEYBOARD.h>
+#include <Wire.h>
 
-static const uint32_t KEYBOARD_SERIAL_BAUD = 115200;
-static const uint8_t KEYBOARD_LINK_VOLUME_UP = 0xF4;
-static const uint8_t KEYBOARD_LINK_VOLUME_DOWN = 0xF5;
-static const uint8_t KEYBOARD_LINK_SYSTEM_SLEEP = 0xF6;
-static const uint8_t KEYBOARD_LINK_SYSTEM_WAKE = 0xF7;
+#include <DollInput.h>
 
-//own line-edit parse state (see LineEditState in global.h) so a mid-escape keystroke
-//can't tangle with the telnet client's in-progress parse
+using doll::input::HidTerminalCodec;
+using doll::input::KeyboardHub;
+using doll::input::KeyboardSource;
+using doll::input::KeyEvent;
+
+static m5::unit::UnitUnified tab5KeyboardUnits;
+static m5::unit::UnitTab5Keyboard tab5Keyboard;
+static KeyboardHub keyboardHub;
+static HidTerminalCodec keyboardCodec;
+static bool tab5KeyboardReady = false;
+
+static constexpr size_t KEYBOARD_BYTE_QUEUE_SIZE = 192;
+static uint8_t keyboardByteQueue[KEYBOARD_BYTE_QUEUE_SIZE]{};
+static size_t keyboardByteHead = 0;
+static size_t keyboardByteTail = 0;
+static size_t keyboardByteCount = 0;
+
+// Each input source keeps its own line-edit state so an incomplete escape
+// sequence can never interfere with a telnet client's parser.
 static LineEditState keyboardLineState;
 
-static bool handleKeyboardLinkControl(uint8_t ch) {
-    if (ch == KEYBOARD_LINK_VOLUME_UP) {
-        radioAdjustVolume(1);
-        ledPulseInput();
-        return true;
+static bool keyboardQueuePush(uint8_t value) {
+    if (keyboardByteCount >= KEYBOARD_BYTE_QUEUE_SIZE) {
+        return false;
     }
-    if (ch == KEYBOARD_LINK_VOLUME_DOWN) {
-        radioAdjustVolume(-1);
-        ledPulseInput();
-        return true;
-    }
-    if (ch == KEYBOARD_LINK_SYSTEM_SLEEP) {
-        enterSystemLightSleep();                   // Preserve DOLL-OS state until the slave restarts.
-        return true;
-    }
-    if (ch == KEYBOARD_LINK_SYSTEM_WAKE) {
-        return true;                               // Consume redundant wake bytes after GPIO wakeup.
-    }
-    return false;
-}
+    keyboardByteQueue[keyboardByteTail] = value;
+    keyboardByteTail = (keyboardByteTail + 1U) % KEYBOARD_BYTE_QUEUE_SIZE;
+    ++keyboardByteCount;
+    return true;
+}  // Appends one translated byte without allocating in the input service.
 
-static int keyboardReadUserByte() {
-    while (KeyboardSerial.available() > 0) {
-        uint8_t ch = (uint8_t)KeyboardSerial.read();
-        if (handleKeyboardLinkControl(ch)) {
+static int keyboardQueuePop() {
+    if (keyboardByteCount == 0) {
+        return -1;
+    }
+    const uint8_t value = keyboardByteQueue[keyboardByteHead];
+    keyboardByteHead = (keyboardByteHead + 1U) % KEYBOARD_BYTE_QUEUE_SIZE;
+    --keyboardByteCount;
+    return value;
+}  // Removes the oldest terminal byte for inherited shell consumers.
+
+static int keyboardQueuePeek() {
+    return keyboardByteCount == 0 ? -1 : keyboardByteQueue[keyboardByteHead];
+}  // Observes the next byte without stealing it from an app or editor.
+
+static void keyboardEncodePendingEvents() {
+    KeyEvent event;
+    while (keyboardHub.next(event)) {
+        uint8_t encoded[HidTerminalCodec::kMaxEncodedBytes]{};
+        const size_t count = keyboardCodec.encode(event, encoded, sizeof(encoded));
+        for (size_t i = 0; i < count; ++i) {
+            if (!keyboardQueuePush(encoded[i])) {
+                Serial.println("[input] terminal byte queue full");
+                ledPulseError();
+                return;
+            }
+        }
+        if (count != 0) {
+            ledPulseInput();
+        }
+    }
+}  // Converts normalized HID transitions into DOLL-OS terminal bytes.
+
+static void keyboardPumpHardware() {
+    if (!tab5KeyboardReady) {
+        return;
+    }
+
+    tab5KeyboardUnits.update();
+    while (!tab5Keyboard.empty()) {
+        const auto event = tab5Keyboard.oldest();
+        tab5Keyboard.discard();
+        if (event.type != m5::unit::tab5_keyboard::EventType::Hid) {
             continue;
         }
-        ledPulseInput();
-        return ch;
+
+        uint8_t usages[KeyboardHub::kBootReportKeyCount]{};
+        usages[0] = event.hid.keycode;             // A zero keycode is the device's release report.
+        if (!keyboardHub.submitBootReport(KeyboardSource::Tab5,
+                                          event.modifier, usages,
+                                          KeyboardHub::kBootReportKeyCount)) {
+            Serial.println("[input] normalized event queue full");
+            ledPulseError();
+        }
     }
-    return -1;
-}
+    keyboardEncodePendingEvents();
+}  // Drains the I2C keyboard and services the shared input hub on the main task.
 
 void initKeyboardSerial() {
-    KeyboardSerial.begin(KEYBOARD_SERIAL_BAUD, SERIAL_8N1,
-                         KEYBOARD_SERIAL_RX_PIN, SLAVE_LINK_TX_PIN);
-    ledSetKeyboardActive(true);
-    Serial.printf("[boot] keyboard UART RX=%d TX=%d baud=%lu\n",
-                  KEYBOARD_SERIAL_RX_PIN, SLAVE_LINK_TX_PIN,
-                  (unsigned long)KEYBOARD_SERIAL_BAUD);
-}
+    keyboardByteHead = 0;
+    keyboardByteTail = 0;
+    keyboardByteCount = 0;
+    keyboardHub.reset();
+    keyboardCodec.reset();
 
-//drains whatever DS-Slave has sent this tick, feeding each byte through the same line
-//editor the telnet client uses. Both edit the one shared currentCommand buffer -- DOLL-OS is
-//a single-user shell (global.h), so the keyboard and a telnet client are just two ways in
-//for the same user. Mirrors the submit/reprompt dance of readTelnetClient().
+    auto config = tab5Keyboard.config();
+    config.mode = m5::unit::tab5_keyboard::Mode::HID;
+    config.start_periodic = true;
+    config.irq_pin = TAB5_KEYBOARD_INTERRUPT_PIN;
+    tab5Keyboard.config(config);
+
+    Wire.end();
+    Wire.begin(TAB5_KEYBOARD_SDA_PIN, TAB5_KEYBOARD_SCL_PIN,
+               tab5Keyboard.component_config().clock);
+    tab5KeyboardReady = tab5KeyboardUnits.add(tab5Keyboard, Wire)
+        && tab5KeyboardUnits.begin();
+    keyboardHub.setConnected(KeyboardSource::Tab5, tab5KeyboardReady);
+    ledSetKeyboardActive(tab5KeyboardReady);
+
+    if (tab5KeyboardReady) {
+        Serial.printf("[boot] Tab5 Keyboard ready: firmware=%02X SDA=%d SCL=%d IRQ=%d\n",
+                      tab5Keyboard.firmwareVersion(), TAB5_KEYBOARD_SDA_PIN,
+                      TAB5_KEYBOARD_SCL_PIN, TAB5_KEYBOARD_INTERRUPT_PIN);
+    } else {
+        Serial.println("[boot] Tab5 Keyboard initialization failed");
+        ledPulseError();
+    }
+}  // Initializes the official keyboard directly from the Arduino sketch.
+
+static int keyboardReadUserByte() {
+    keyboardPumpHardware();
+    return keyboardQueuePop();
+}  // Supplies one translated local-keyboard byte to inherited input paths.
+
 void readKeyboardSerial() {
     while (true) {
-        int raw = keyboardReadUserByte();
+        const int raw = keyboardReadUserByte();
         if (raw < 0) {
             break;
         }
-        uint8_t ch = (uint8_t)raw;
-        LineInputResult r = processLineEditByte(currentCommand, ch, keyboardLineState, false);
-        if (r == LINE_NO_INPUT) {
+        LineInputResult result = processLineEditByte(
+            currentCommand, static_cast<uint8_t>(raw), keyboardLineState, false);
+        if (result == LINE_NO_INPUT) {
             continue;
         }
         setActiveInput(shellPrompt(), currentCommand, false);
-        if (r == LINE_SUBMITTED) {
+        if (result == LINE_SUBMITTED) {
             commandProcessor(currentCommand);
-            setActiveInput(shellPrompt(), currentCommand, false);   //commandProcessor() clears the buffer, and a
-                                                                     //"cd" just moved the prompt -- reflect both
+            setActiveInput(shellPrompt(), currentCommand, false);
             printPrompt();
         }
     }
-}
+}  // Feeds the Tab5 keyboard into the ordinary single-user shell editor.
 
-//reads and applies one keyboard-bridge byte to a line-edited buffer, mirroring
-//readLineEditedInput() (TelnetServer.ino) but sourced from the DS-Slave UART and never
-//echoing CRLF (there's no telnet client to echo to). readKeyboardSerial() above can't be
-//reused for this: the modal input phases that need it (ssh's password prompt) block loop(),
-//so they poll one source at a time themselves rather than running the whole shell reader.
 LineInputResult readKeyboardLineEditedInput(String& text) {
-    int raw = keyboardReadUserByte();
-    if (raw < 0) {
-        return LINE_NO_INPUT;
-    }
-    return processLineEditByte(text, (uint8_t)raw, keyboardLineState, false);
-}
+    const int raw = keyboardReadUserByte();
+    return raw < 0
+        ? LINE_NO_INPUT
+        : processLineEditByte(text, static_cast<uint8_t>(raw), keyboardLineState, false);
+}  // Services modal password and prompt editors while the main loop is blocked.
 
-//reads one raw keyboard-bridge byte for the RemoteSession raw-passthrough phase, or -1 if
-//none is waiting. No line editing here -- the raw session classifies/forwards bytes itself
-//(see readRawUserBytes, RemoteSession.ino), exactly as it does for raw telnet bytes.
 int keyboardReadRawByte() {
     return keyboardReadUserByte();
-}
+}  // Provides terminal bytes to raw SSH, telnet, and application sessions.
 
-//looks at the next keyboard-bridge byte without consuming it, or -1 if none is waiting.
-//Used by the .dapp runtime's abort check (AppRunner.ino appPollAbortChord), which must
-//not steal bytes the app's own KEY/INPUT reads are about to consume.
 int keyboardPeekRawByte() {
-    while (KeyboardSerial.available() > 0) {
-        uint8_t ch = (uint8_t)KeyboardSerial.peek();
-        if (!handleKeyboardLinkControl(ch)) {
-            return ch;
-        }
-        KeyboardSerial.read();
-    }
-    return -1;
-}
+    keyboardPumpHardware();
+    return keyboardQueuePeek();
+}  // Lets an application inspect abort input without consuming its next key.

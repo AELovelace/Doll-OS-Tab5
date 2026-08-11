@@ -1,2 +1,4 @@
 config.h
 dapper/dist/
+.pio/
+.arduino-build/

@@ -18,7 +18,7 @@ narrow backends and avoid unrelated formatting changes. During a sync:
 
 1. Resolve shared-logic conflicts in favor of the new FNK behavior.
 2. Reapply the Tab5 behavior at the hardware boundary.
-3. Build the Tab5 firmware and run input/storage smoke tests.
+3. Compile the root `tab5` Arduino profile and run input/storage smoke tests.
 4. Record any intentionally omitted FNK feature in the pull request.
 5. Merge the pull request with a merge commit so the next merge base is clear.
 

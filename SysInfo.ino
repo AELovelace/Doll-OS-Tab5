@@ -98,30 +98,16 @@ void reportPsramStatus() {
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
 
-static bool batteryAdcInitialized = false;
-
-static void ensureBatteryAdc() {
-    if (batteryAdcInitialized) {
-        return;
-    }
-    pinMode(BATTERY_ADC_PIN, INPUT);
-    batteryAdcInitialized = true;
-}
-
 float readBatteryVoltage() {
-    ensureBatteryAdc();
-    return analogReadMilliVolts(BATTERY_ADC_PIN) * BATTERY_ADC_DIVIDER / 1000.0f;
+    return M5.Power.getBatteryVoltage() / 1000.0f;
 }
 
 //rough linear estimate between the configured empty/full voltage points --
 //there's no fuel-gauge chip on this board, just a divided ADC pin, so this is an
 //approximation the same way DOLL-OS's own M5Cardputer battery percent was
 int readBatteryPercent() {
-    float v = readBatteryVoltage();
-    float pct = (v - BATTERY_VOLTAGE_EMPTY) / (BATTERY_VOLTAGE_FULL - BATTERY_VOLTAGE_EMPTY) * 100.0f;
-    if (pct < 0) pct = 0;
-    if (pct > 100) pct = 100;
-    return (int)(pct + 0.5f);
+    const int level = M5.Power.getBatteryLevel();
+    return level < 0 ? 0 : min(level, 100);
 }
 
 void handleBatteryCommand(const String parts[], int partCount) {
