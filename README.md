@@ -1,4 +1,19 @@
-# DOLL-OS (Freenove ESP32-S3 fork)
+# DOLL-OS for M5Stack Tab5
+
+> **Port status:** foundation work is in progress. The committed FNK application
+> is preserved as the upstream baseline while the Tab5 display, storage, audio,
+> power, and keyboard backends are brought up. See
+> [the Tab5 port plan](docs/TAB5_PORT_PLAN.md) and
+> [the upstream-sync policy](docs/UPSTREAM_SYNC.md).
+
+This fork targets only the M5Stack Tab5. Its local interface is the official
+Tab5 Keyboard, with BLE HID and USB HID keyboards joining the same input hub.
+Touchscreen input is intentionally disabled for the initial releases.
+
+The text below documents the inherited FNK baseline and will be revised as each
+Tab5 milestone becomes functional.
+
+## Inherited FNK baseline
 
 DOLL-OS is my attempt at making my dream OS for the ESP32. It features many useful
 commands and features you'd expect from a desktop operating system, while booting 

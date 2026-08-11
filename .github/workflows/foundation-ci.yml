@@ -1,0 +1,35 @@
+name: Tab5 foundation checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "agent/**"
+
+jobs:
+  input-library:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile the transport-neutral input tests
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            -I libraries/DollInput/src \
+            libraries/DollInput/src/DollInput.cpp \
+            tests/doll_input_test.cpp \
+            -o /tmp/doll_input_test
+      - name: Run the input tests
+        run: /tmp/doll_input_test
+
+  tab5-bringup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PlatformIO Core
+        run: python -m pip install --disable-pip-version-check platformio==6.1.18
+      - name: Compile the ESP32-P4 bring-up firmware
+        run: pio run --project-dir examples/Tab5Bringup
