@@ -19,14 +19,30 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_TASK_WDT_EN=y
 # CONFIG_ESP_TASK_WDT_INIT is not set
 
-# These four settings are the display-bandwidth fix used by M5Stack's UserDemo
+# These settings are the display-bandwidth fix used by M5Stack's UserDemo
 # and recommended by Espressif for PSRAM-backed MIPI-DSI scanout.
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_SPIRAM_XIP_FROM_PSRAM=y
-CONFIG_CACHE_L2_CACHE_256KB=y
+# The L2 cache is carved out of internal SRAM, not added to it:
+# esp_system/ld/esp32p4/memory.ld.in defines SRAM_HIGH_SIZE as
+# 0x80000 - CONFIG_CACHE_L2_CACHE_SIZE. The former 256KB setting therefore spent
+# 128KB of the scarce internal pool that this firmware needs for hosted WiFi,
+# mbedTLS and the USB host. Back to IDF's 128KB default, keeping the 128-byte
+# line so PSRAM scanout still refills in wide bursts.
+CONFIG_CACHE_L2_CACHE_128KB=y
 CONFIG_CACHE_L2_CACHE_LINE_128B=y
+
+# Push the network stack's long-lived buffers and task stacks out of internal
+# SRAM. The hosted-WiFi mempool and lwIP pbufs are the largest runtime internal
+# consumers on this board, and neither needs internal-only or DMA-capable memory.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
+CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM=y
+# Half the default internal reservation: PSRAM now serves the allocations that
+# were competing for it, so a smaller emergency pool is enough.
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=16384
 
 # Arduino's NetworkClientSecure requires at least one PSK exchange mode.
 CONFIG_MBEDTLS_PSK_MODES=y

@@ -134,9 +134,15 @@ def verify_tab5_sdkconfig(source, target, env) -> None:
         "#define CONFIG_COMPILER_OPTIMIZATION_PERF 1",
         "#define CONFIG_SPIRAM_SPEED_200M 1",
         "#define CONFIG_SPIRAM_XIP_FROM_PSRAM 1",
-        "#define CONFIG_CACHE_L2_CACHE_256KB 1",
+        #128KB, not 256KB: the L2 cache is subtracted from internal SRAM by
+        #memory.ld.in, and the larger cache cost 128KB of the pool this firmware
+        #needs at runtime. The 128-byte line is what keeps scanout refills wide.
+        "#define CONFIG_CACHE_L2_CACHE_128KB 1",
         "#define CONFIG_CACHE_L2_CACHE_LINE_128B 1",
         "#define CONFIG_ESP_TASK_WDT_EN 1",
+        #Keeps the network stack from silently drifting back into internal SRAM.
+        "#define CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP 1",
+        "#define CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM 1",
     )
     missing = [setting for setting in required if setting not in config]
     if missing:
