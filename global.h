@@ -307,7 +307,7 @@ struct DappKeyState {
 #define DAPP_RUNTIME_VERSION "1.9.0"
 
 //Runtime-owned PCM synth used by the .dapp WAVE/WAVESTOP opcodes. It borrows
-//the same ES8311/I2S output surface as Game Boy and releases it on app exit.
+//the same ES8388/I2S output surface as Game Boy and releases it on app exit.
 enum DappWaveType : uint8_t {
   DAPP_WAVE_OFF = 0,
   DAPP_WAVE_SINE,
@@ -377,7 +377,7 @@ const int C_CYAN    = 36;
 const int C_PINK    = 95;   //bright magenta stands in for DOLL-OS's PINK accent color
 
 //   Radio (Radio.ino) -- background ICY/MP3 stream player on the board's onboard
-//   ES8311 codec, ported from the standalone sgcrelay firmware. Runs in its own
+//   ES8388 codec. Runs in its own
 //   FreeRTOS task so playback survives modal sessions (ssh, outbound telnet) and
 //   display pushes. The enum lives here rather than Radio.ino for the same
 //   hoisted-prototype reason as LineInputResult above.
@@ -393,8 +393,8 @@ const int RADIO_VOLUME_MAX = 21;
 //one-slot command mailbox kinds, shell -> radio task (also here for hoisting: the
 //poster/consumer function signatures use it)
 //RADIO_CMD_RELEASE is the Game Boy emulator's: it stops the stream and tears the
-//radio's I2S controllers back down so src/AudioOut.cpp can claim one (the S3 has
-//exactly two, and a playing radio holds both). See radioReleaseAudio().
+//radio's I2S controller back down so src/AudioOut.cpp can claim it. See
+//radioReleaseAudio().
 enum RadioCommandKind {
     RADIO_CMD_NONE,
     RADIO_CMD_PLAY,
@@ -442,9 +442,11 @@ extern WiFiClient remoteTelnetClient;   //outbound socket for the "telnet" clien
 auto& tft = M5.Display;
 M5Canvas frameSprite(&M5.Display);
 
-const int DISPLAY_STATUS_BAR_HEIGHT = 16;
-const int DISPLAY_COMMAND_BAR_HEIGHT = 20;
-const int DISPLAY_PADDING = 4;
+const int DISPLAY_TEXT_SIZE = 2;
+const int DISPLAY_TERMINAL_LINE_HEIGHT = 24;
+const int DISPLAY_STATUS_BAR_HEIGHT = 32;
+const int DISPLAY_COMMAND_BAR_HEIGHT = 40;
+const int DISPLAY_PADDING = 8;
 //   .dapp canvas (AppRunner.ino) -- a fixed character grid a script can address by cell
 //   instead of appending scrolling lines, which is what a game needs. While
 //   dappCanvasActive is set, drawDisplayFrame() paints this grid over the terminal

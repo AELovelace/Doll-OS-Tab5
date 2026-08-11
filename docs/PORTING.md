@@ -151,10 +151,10 @@ the row-diff partial-update optimization remains available on every variant.
 
 `Radio.ino` is a port of the standalone sgcrelay firmware (`../sgcrelay/`) into this fork
 as a background task: `radio play [url]` streams ICY/MP3 (default: the SGCRelay
-Pi's relay, `config.h`) through the board's onboard ES8311 codec + speaker, with
-`pause`/`stop`/`vol 0..21`/`status` subcommands. The codec driver
-(`es8311.cpp/.h/es8311_reg.h`) came over verbatim -- already `Wire`-based, so no
-legacy-I2C-driver conflict. sgcrelay's LovyanGFX touch UI, Wi-Fi handling, and
+Pi's relay, `config.h`) through the board's onboard ES8388 codec + speaker, with
+`pause`/`stop`/`vol 0..21`/`status` subcommands. The Tab5 backend programs the
+codec and PI4IO-controlled amplifier over M5Unified's internal I2C bus.
+sgcrelay's LovyanGFX touch UI, Wi-Fi handling, and
 LED/button controls were dropped (Display.ino owns the panel, WiFiManager.ino
 owns STA, the shell replaces the physical controls).
 
@@ -276,7 +276,7 @@ The `.dapp` runner remains separate from ASUKA. AppRunner 1.4 adds bounded
 `HTTPGET`/`HTTPPOST`, scoped request headers, and small JSON escape/path helpers
 for ordinary request/response apps. Persistent LLM sockets, SSE streaming, and
 tool routing remain native. It also adds raw byte file I/O and the three-channel
-`WAVE` synthesizer; those reuse the existing filesystem, network, ES8311, and
+`WAVE` synthesizer; those reuse the existing filesystem, network, ES8388, and
 I2S ownership surfaces rather than creating parallel ones.
 
 ## Known constraints worth flagging

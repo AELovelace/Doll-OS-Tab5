@@ -1,7 +1,7 @@
 //   Music.ino
 //   Native, full-screen MP3 library/player for /sd/music. The catalog and its
 //   filtered index live entirely in PSRAM; playback reuses Radio.ino's one Audio
-//   engine, task, ES8311 setup, DMA ring, and volume state.
+//   engine, task, ES8388 setup, DMA ring, and volume state.
 
 #include <SD_MMC.h>
 #include <esp_heap_caps.h>
@@ -500,12 +500,12 @@ static void musicDrawTft(int selected, bool searching, const String& note) {
                              liveArtist, sizeof(liveArtist), liveAlbum, sizeof(liveAlbum),
                              current, duration);
 
-    const int left = 10;
+    const int left = 20;
     const int width = DISPLAY_WIDTH - left * 2;
-    const int top = 8;
-    const int listTop = 34;
-    const int infoTop = DISPLAY_HEIGHT - 78;
-    const int rowHeight = 16;
+    const int top = 16;
+    const int listTop = 68;
+    const int infoTop = DISPLAY_HEIGHT - 156;
+    const int rowHeight = 32;
     int visibleRows = max(3, (infoTop - listTop - 2) / rowHeight);
     int first = selected - visibleRows / 2;
     if (first < 0) first = 0;
@@ -513,7 +513,7 @@ static void musicDrawTft(int selected, bool searching, const String& note) {
     if (first < 0) first = 0;
 
     frameSprite.fillSprite(TFT_BLACK);
-    frameSprite.setTextSize(1);
+    frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
     frameSprite.setTextDatum(TL_DATUM);
     frameSprite.setTextColor(TFT_PINK, TFT_BLACK);
     frameSprite.drawString("DOLL-OS MUSIC", left, top);
@@ -522,12 +522,12 @@ static void musicDrawTft(int selected, bool searching, const String& note) {
     char line[256];
     snprintf(line, sizeof(line), "%d/%d  VOL %d", musicFilteredCount, musicTrackCount, radioGetVolume());
     frameSprite.drawString(line, DISPLAY_WIDTH - left, top);
-    frameSprite.drawFastHLine(left, top + 15, width, TFT_PINK);
+    frameSprite.drawFastHLine(left, top + 30, width, TFT_PINK);
     frameSprite.setTextDatum(TL_DATUM);
 
     if (musicFilteredCount == 0) {
         frameSprite.setTextColor(TFT_YELLOW, TFT_BLACK);
-        frameSprite.drawString("No tracks match this search", left, listTop + 8);
+        frameSprite.drawString("No tracks match this search", left, listTop + 16);
     } else {
         for (int row = 0; row < visibleRows && first + row < musicFilteredCount; row++) {
             int position = first + row;
@@ -539,8 +539,8 @@ static void musicDrawTft(int selected, bool searching, const String& note) {
             frameSprite.setTextColor(on ? TFT_YELLOW : (playing ? TFT_CYAN : TFT_WHITE), TFT_BLACK);
             frameSprite.drawString(on ? ">" : (playing ? "*" : " "), left, y);
             musicTrackLabel(track, line, sizeof(line));
-            musicFitBuffer(line, width - 18);
-            frameSprite.drawString(line, left + 12, y);
+            musicFitBuffer(line, width - 36);
+            frameSprite.drawString(line, left + 24, y);
         }
     }
 
@@ -552,7 +552,7 @@ static void musicDrawTft(int selected, bool searching, const String& note) {
     }
     snprintf(line, sizeof(line), "[%s] %s", musicPlaybackStateName(state, local), nowTitle);
     musicFitBuffer(line, width);
-    frameSprite.drawString(line, left, infoTop + 5);
+    frameSprite.drawString(line, left, infoTop + 10);
 
     line[0] = '\0';
     if (local && musicCurrentTrack >= 0 && musicCurrentTrack < musicTrackCount) {
@@ -564,33 +564,33 @@ static void musicDrawTft(int selected, bool searching, const String& note) {
     }
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
     musicFitBuffer(line, width);
-    frameSprite.drawString(line, left, infoTop + 19);
+    frameSprite.drawString(line, left, infoTop + 38);
 
     char currentText[12], durationText[12];
     musicFormatTime(current, currentText, sizeof(currentText));
     musicFormatTime(duration, durationText, sizeof(durationText));
-    const int timeWidth = 72;
+    const int timeWidth = 144;
     const int barX = left;
-    const int barY = infoTop + 36;
+    const int barY = infoTop + 72;
     const int barWidth = max(20, width - timeWidth);
-    frameSprite.drawRect(barX, barY, barWidth, 8, TFT_DARKGREY);
+    frameSprite.drawRect(barX, barY, barWidth, 16, TFT_DARKGREY);
     int filled = duration ? (int)(((uint64_t)(barWidth - 2) * min(current, duration)) / duration) : 0;
-    if (filled > 0) frameSprite.fillRect(barX + 1, barY + 1, filled, 6, TFT_PINK);
+    if (filled > 0) frameSprite.fillRect(barX + 1, barY + 1, filled, 14, TFT_PINK);
     frameSprite.setTextDatum(TR_DATUM);
     snprintf(line, sizeof(line), "%s/%s", currentText, durationText);
-    frameSprite.drawString(line, DISPLAY_WIDTH - left, barY - 1);
+    frameSprite.drawString(line, DISPLAY_WIDTH - left, barY - 2);
     frameSprite.setTextDatum(TL_DATUM);
 
     frameSprite.setTextColor(searching ? TFT_YELLOW : TFT_DARKGREY, TFT_BLACK);
     if (searching) snprintf(line, sizeof(line), "Search: %s_", musicFilter.c_str());
     else snprintf(line, sizeof(line), "Enter play  Space pause  <-/-> seek  +/- vol");
     musicFitBuffer(line, width);
-    frameSprite.drawString(line, left, DISPLAY_HEIGHT - 25);
+    frameSprite.drawString(line, left, DISPLAY_HEIGHT - 50);
     frameSprite.setTextColor(note.length() ? TFT_YELLOW : TFT_DARKGREY, TFT_BLACK);
     snprintf(line, sizeof(line), "%s", note.length() ? note.c_str()
                                                        : "J/K move  N/P track  / find  R rescan  Q leave");
     musicFitBuffer(line, width);
-    frameSprite.drawString(line, left, DISPLAY_HEIGHT - 12);
+    frameSprite.drawString(line, left, DISPLAY_HEIGHT - 24);
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
     pushDisplayFrame();
 }

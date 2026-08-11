@@ -2,3 +2,7 @@ config.h
 dapper/dist/
 .pio/
 .arduino-build/
+.pio-preprocess/
+.pio-generated/
+sdkconfig.tab5
+/*.piobuildtab5firmware.map

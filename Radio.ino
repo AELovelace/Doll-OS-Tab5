@@ -1,5 +1,5 @@
 //   Radio.ino
-//   Background internet-radio player on the board's onboard ES8311 codec + speaker,
+//   Background internet-radio player on the board's onboard ES8388 codec + speaker,
 //   ported from the standalone sgcrelay firmware (../sgcrelay/sgcrelay.ino). What
 //   carried over: the codec/I2S bring-up sequence (verbatim from Freenove's
 //   Sketch_07.1_Music via sgcrelay), the ESP32-audioI2S streaming, and the
@@ -23,13 +23,10 @@
 //   values come through BoardPins.h so every audio owner uses the same map.
 
 #include "Audio.h"
-#include "ESP_I2S.h"
 #include <SD_MMC.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <Wire.h>
 #include <new>   //std::nothrow -- radioEnsureCodec heap-constructs the Audio engine
-#include "es8311.h"
 
 //RADIO_VOLUME_MAX lives in global.h -- Gameboy.ino's settings menu shows the level
 //too, and the .ino files concatenate alphabetically, so Gameboy.ino is compiled
@@ -110,12 +107,7 @@ static TaskHandle_t radioTaskHandle = NULL;
 //   cost is only paid after WiFi is up,
 //   and only if the radio is actually used.
 static Audio* radioAudio = nullptr;
-static I2SClass radioI2s;
 static bool radioCodecReady = false;
-static bool radioI2sReady = false;           //radioI2s.begin() has claimed its I2S controller -- must
-                                              //only ever happen once: the S3 has two controllers total
-                                              //(one for this bootstrap channel, one for Audio), and a
-                                              //re-begin on a retry would leak a fresh one, starving Audio
 static volatile bool radioReleased = false;  //set by the task once RADIO_CMD_RELEASE has torn the
                                               //I2S controllers down -- radioReleaseAudio() waits on it
 static bool radioWantPlaying = false;        //user intent: keep the stream up (drives auto-reconnect)
@@ -143,89 +135,95 @@ static void radioSetState(RadioState s) {
     ledSetRadioState(s);
 }
 
-//quick bus census so a codec failure says *why* on the serial log: prints every ACKing
-//address. The FT6336U touch (0x38) shares this PCB-routed bus, so its presence/absence
-//splits the diagnosis -- 0x38 answering but no 0x18/0x19 means the bus is fine and the
-//codec specifically isn't responding; a silent bus points at wiring/pull-ups/pin conflict.
-static void radioScanI2cBus() {
-    Serial.printf("[radio] I2C scan (SDA=%d SCL=%d):\n",
-                  AUDIO_I2C_SDA_PIN, AUDIO_I2C_SCL_PIN);
-    int found = 0;
-    esp_log_level_set("i2c.master", ESP_LOG_NONE);   //~100 expected NACKs -- don't let the driver's
-                                                      //error spam bury the scan's own output
-    for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
-        Wire.beginTransmission(addr);
-        if (Wire.endTransmission() == 0) {
-            Serial.printf("[radio]   device ACK at 0x%02X\n", addr);
-            found++;
+static constexpr uint8_t TAB5_ES8388_ADDRESS = 0x10;
+static constexpr uint8_t TAB5_PI4IO1_ADDRESS = 0x43;
+
+struct AudioCodecRegister {
+    uint8_t reg;
+    uint8_t value;
+};
+
+static bool audioCodecWrite(uint8_t reg, uint8_t value) {
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (M5.In_I2C.writeRegister8(TAB5_ES8388_ADDRESS, reg, value, AUDIO_I2C_SPEED)) {
+            return true;
         }
+        delay(1);
     }
-    esp_log_level_set("i2c.master", ESP_LOG_ERROR);
-    if (found == 0) {
-        Serial.println("[radio]   no devices ACKed -- bus dead? (wiring, pull-ups, pin conflict)");
-    }
-}
+    Serial.printf("[audio] ES8388 write failed at register 0x%02X\n", reg);
+    return false;
+}  // Writes one codec register with short retries for a busy shared internal bus.
 
-//Amp + I2C + ES8311 register programming, once. Split out of radioEnsureCodec so the
-//Game Boy emulator's audio path (src/AudioOut.cpp) can reuse it: that path brings up
-//its own I2S TX channel but needs the same codec configured behind it, and calling
-//es8311_codec_init() twice would leak a handle. es8311.cpp's register helpers use Wire
-//(see the driver_ng note there), so Wire.begin below is the only prerequisite --
-//nothing else in DOLL-OS touches I2C.
-//
-//Caller must already have clocks on the I2S pins: the codec is a slave and wants MCLK
-//running while its dividers are programmed. Not static -- AudioOut.cpp declares it.
-bool audioCodecEnsure() {
+static bool audioCodecSetAmp(bool enabled) {
+    bool ok = enabled
+        ? M5.In_I2C.bitOn(TAB5_PI4IO1_ADDRESS, 0x05, 0b00000010, AUDIO_I2C_SPEED)
+        : M5.In_I2C.bitOff(TAB5_PI4IO1_ADDRESS, 0x05, 0b00000010, AUDIO_I2C_SPEED);
+    if (!ok) {
+        Serial.println("[audio] Tab5 speaker amplifier control failed");
+    }
+    return ok;
+}  // Controls the Tab5 speaker amp through its onboard PI4IO expander.
+
+void audioCodecSetOutputEnabled(bool enabled) {
+    audioCodecSetAmp(enabled);
+}  // Lets emulator/synth owners mute the amp before releasing their I2S clocks.
+
+//Programs the Tab5 ES8388 once, then selects the clock ratio for the current I2S
+//owner. ESP32-audioI2S uses 384x while Game Boy's dedicated sink uses 128x, so the
+//ratio register must be refreshed whenever ownership changes. Caller already has MCLK
+//running because the ES8388 operates as an I2S slave. Not static: AudioOut.cpp reuses it.
+bool audioCodecEnsure(uint16_t mclkMultiple) {
     static bool codecRegsReady = false;
-    if (codecRegsReady) {
-        return true;
+    static uint16_t configuredMclkMultiple = 0;
+    static constexpr AudioCodecRegister initRegisters[] = {
+        {0, 0x80}, {0, 0x00}, {0, 0x00}, {0, 0x0E},
+        {1, 0x00}, {2, 0x0A}, {3, 0xFF}, {4, 0x3C},
+        {5, 0x00}, {6, 0x00}, {7, 0x7C}, {8, 0x00},
+        {23, 0x18}, {25, 0x20}, {26, 0x00}, {27, 0x00},
+        {28, 0x08}, {29, 0x00}, {38, 0x00}, {39, 0xB8},
+        {42, 0xB8}, {43, 0x08}, {45, 0x00}, {46, 0x21},
+        {47, 0x21}, {48, 0x21}, {49, 0x21},
+    };
+
+    if (!codecRegsReady) {
+        for (const AudioCodecRegister& setting : initRegisters) {
+            if (!audioCodecWrite(setting.reg, setting.value)) {
+                Serial.println("[audio] ES8388 codec init failed (expected at I2C 0x10)");
+                return false;
+            }
+        }
+        codecRegsReady = true;
+        Serial.println("[audio] ES8388 codec up");
     }
 
-    // Tab5 amplifier power is managed by M5Unified through its I/O expander.
-
-    if (!Wire.begin(AUDIO_I2C_SDA_PIN, AUDIO_I2C_SCL_PIN, AUDIO_I2C_SPEED)) {
-        Serial.println("[audio] I2C init failed");
+    uint8_t ratioRegister = 0;
+    if (mclkMultiple == 128) {
+        ratioRegister = 0x00;
+    } else if (mclkMultiple == 384) {
+        ratioRegister = 0x06;
+    } else {
+        Serial.printf("[audio] unsupported ES8388 MCLK multiple: %u\n", mclkMultiple);
         return false;
     }
-
-    if (es8311_codec_init() != ESP_OK) {
-        radioScanI2cBus();   //serial-only: says whether anything at all answers on the bus
-        Serial.println("[audio] ES8311 codec init failed");
-        return false;
+    if (configuredMclkMultiple != mclkMultiple) {
+        if (!audioCodecWrite(24, ratioRegister)) {
+            return false;
+        }
+        configuredMclkMultiple = mclkMultiple;
     }
-
-    codecRegsReady = true;
-    Serial.println("[audio] ES8311 codec up");
-    return true;
+    return audioCodecSetAmp(true);
 }
 
-//codec + I2S bring-up, once, lazily on the first "radio play" -- the exact sequence
-//sgcrelay's driver_es8311_init()/setup() ran, minus the parts DOLL-OS already owns.
+//Codec + I2S bring-up, once, lazily on the first "radio play".
 static bool radioEnsureCodec() {
     if (radioCodecReady) {
         return true;
     }
 
-    if (!radioI2sReady) {
-        radioI2s.setPins(AUDIO_I2S_BCLK_PIN, AUDIO_I2S_WS_PIN, AUDIO_I2S_DOUT_PIN,
-                         AUDIO_I2S_DIN_PIN, AUDIO_I2S_MCLK_PIN);
-        if (!radioI2s.begin(I2S_MODE_STD, 44100, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_LEFT)) {
-            radioAnnounce("radio: I2S init failed", C_RED);
-            return false;
-        }
-        radioI2sReady = true;
-    }
-
-    if (!audioCodecEnsure()) {
-        radioAnnounce("radio: ES8311 codec init failed (see serial log)", C_RED);
-        return false;
-    }
-
     if (radioAudio == nullptr) {
-        //port 1 explicitly: Audio's default is I2S_NUM_0 *by name*, but radioI2s.begin above
-        //(I2S_NUM_AUTO) has already claimed port 0 by the time we construct lazily -- in
-        //sgcrelay the global Audio constructed first and the default happened to fit
-        radioAudio = new (std::nothrow) Audio(I2S_NUM_1);
+        //The ES8388 only needs the Audio engine's own live MCLK; the old second
+        //"bootstrap" controller was an ES8311 workaround and fought these same pins.
+        radioAudio = new (std::nothrow) Audio(I2S_NUM_0);
         if (radioAudio == nullptr) {
             radioAnnounce("radio: out of memory for audio engine", C_RED);
             return false;
@@ -240,6 +238,12 @@ static bool radioEnsureCodec() {
         delete radioAudio;
         radioAudio = nullptr;
         radioAnnounce("radio: audio engine could not attach I2S", C_RED);
+        return false;
+    }
+    if (!audioCodecEnsure(384)) {
+        delete radioAudio;
+        radioAudio = nullptr;
+        radioAnnounce("radio: ES8388 codec init failed (see serial log)", C_RED);
         return false;
     }
     //v3.4.x delivers titles/station/eof/info through this one callback (radioAudioInfo).
@@ -360,7 +364,7 @@ static void radioTaskHandleCommand() {
             }
             break;
         case RADIO_CMD_RELEASE:
-            //Give both I2S controllers back (see radioReleaseAudio). Done here, on the
+            //Give the I2S controller back (see radioReleaseAudio). Done here, on the
             //task, rather than by the caller: radioAudio is task-local and audio.loop()
             //is running on this stack -- deleting the engine from the main loop would
             //race the decoder mid-frame.
@@ -377,11 +381,8 @@ static void radioTaskHandleCommand() {
                 delete radioAudio;
                 radioAudio = nullptr;
             }
-            if (radioI2sReady) {
-                radioI2s.end();
-                radioI2sReady = false;
-            }
-            //codec *registers* stay programmed (audioCodecEnsure keeps its own latch);
+            audioCodecSetOutputEnabled(false);
+            //Codec base registers stay programmed (audioCodecEnsure keeps its own latch);
             //only the streaming side has to be rebuilt on the next "radio play"
             radioCodecReady = false;
             radioSetState(RADIO_STOPPED);
@@ -925,9 +926,9 @@ static void radioHandleListCommand(const String parts[], int partCount) {
 }
 
 //Hand the audio hardware to something else -- currently only the Game Boy emulator
-//(Gameboy.ino -> src/AudioOut.cpp), which needs one of the S3's two I2S controllers
-//and can't have one while the radio holds both (a bootstrap channel for MCLK plus
-//ESP32-audioI2S's). Stops any stream, deletes the engine, frees the controllers.
+//(Gameboy.ino -> src/AudioOut.cpp), which needs the active I2S TX controller and
+//can't have it while ESP32-audioI2S owns it. Stops any stream, deletes the engine,
+//and frees the controller.
 //Nothing is auto-restored: the next "radio play" walks radioEnsureCodec again and
 //rebuilds what it needs, which by then is free because the game called AudioOut::end().
 //

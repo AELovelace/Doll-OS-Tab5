@@ -18,6 +18,9 @@ static constexpr int TAB5_KEYBOARD_SDA_PIN = 0;
 static constexpr int TAB5_KEYBOARD_SCL_PIN = 1;
 static constexpr int TAB5_KEYBOARD_INTERRUPT_PIN = 50;
 
+// Rotation 3 presents this Tab5 panel as upright 1280x720 landscape.
+static constexpr int TAB5_DISPLAY_ROTATION = 3;
+
 // ESP32-P4 reaches the onboard ESP32-C6 radio through this SDIO2 bus.
 static constexpr int WIFI_SDIO_CLK_PIN = 12;
 static constexpr int WIFI_SDIO_CMD_PIN = 13;

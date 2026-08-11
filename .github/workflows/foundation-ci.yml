@@ -15,8 +15,8 @@ jobs:
       - name: Compile the transport-neutral input tests
         run: |
           c++ -std=c++17 -Wall -Wextra -Werror \
-            -I libraries/DollInput/src \
-            libraries/DollInput/src/DollInput.cpp \
+            -I src/DollInput \
+            src/DollInput/DollInput.cpp \
             tests/doll_input_test.cpp \
             -o /tmp/doll_input_test
       - name: Run the input tests

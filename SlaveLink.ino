@@ -7,8 +7,12 @@ void slaveLinkBegin() {
 }  // Records that the Tab5-exclusive build owns its keyboards locally.
 
 void slaveLinkSendLine(const String& line) {
-    (void)line;
-}  // Ignores legacy game-mode commands until the native HID game mapping lands.
+    if (line == "GAME 1") {
+        keyboardSetGameMode(true, false, "Game Boy requested controls");
+    } else if (line == "GAME 0") {
+        keyboardSetGameMode(false, false, "Game Boy released controls");
+    }
+}  // Routes inherited DS-Slave game-mode commands into the native HID mapper.
 
 void handleSlaveCommand(const String parts[], int partCount) {
     (void)parts;

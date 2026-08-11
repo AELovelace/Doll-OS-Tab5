@@ -442,8 +442,8 @@ Public surface worth knowing:
 ```cpp
 int  radioGetVolume();            // the status bar reads this every refresh
 void radioAdjustVolume(int delta);// the Ctrl+Up/Down chords
-bool radioReleaseAudio();         // hand both I2S controllers to a takeover; blocks ~ms
-bool audioCodecEnsure();          // bring up the ES8311 without starting a stream
+bool radioReleaseAudio();         // hand the I2S TX controller to a takeover; blocks ~ms
+bool audioCodecEnsure(uint16_t);  // bring up the ES8388 for an owner's MCLK ratio
 ```
 
 ## 11. Storage API (`Storage.ino`)

@@ -1,4 +1,4 @@
-﻿//   AppRunner.ino
+//   AppRunner.ino
 //   tiny executable script runtime for DOLL-OS. Apps are plain text .dapp files stored
 //   in /apps on LittleFS or /sd/apps on the FTP-served SD card, then launched from
 //   the shell with "run". The format is intentionally small: a few display/shell
@@ -1071,6 +1071,7 @@ static void appCanvasClear() {
 //renderer in Display.ino can never follow a dangling pointer.
 static void appCanvasEnd() {
     bool wasActive = dappCanvasActive;
+    displayInvalidateDappCanvas();
     dappCanvasActive = false;
     dappCanvasCols = 0;
     dappCanvasRows = 0;

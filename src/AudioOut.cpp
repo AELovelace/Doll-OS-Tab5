@@ -8,7 +8,8 @@
 // pin); these are its exported entry points. Declared rather than included
 // because config/globals of the sketch can't be pulled into a .cpp without
 // dragging in duplicate definitions.
-bool audioCodecEnsure();
+bool audioCodecEnsure(uint16_t mclkMultiple);
+void audioCodecSetOutputEnabled(bool enabled);
 int radioGetVolume();
 
 namespace {
@@ -76,24 +77,21 @@ bool AudioOut::begin() {
   stdCfg.gpio_cfg.ws = kPinWs;
   stdCfg.gpio_cfg.dout = kPinDout;
   stdCfg.gpio_cfg.din = I2S_GPIO_UNUSED;
-  // 384x matches what es8311_codec_init() programs the codec's dividers for
-  // (EXAMPLE_MCLK_MULTIPLE, es8311.h). The codec is an I2S slave, so what
-  // actually has to hold is the MCLK:LRCK *ratio* -- keep it at 384 and the
-  // registers stay correct even though they were computed for 16kHz.
-  stdCfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
+  //Tab5's ES8388 setup uses the board-supported 128x MCLK ratio. Keeping the I2S
+  //clock and codec register 24 in agreement preserves the 32768Hz Game Boy pitch.
+  stdCfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_128;
 
   if (i2s_channel_init_std_mode(txChan, &stdCfg) != ESP_OK) {
     end();
     return false;
   }
-  // Clocks must already be running when the codec's registers are programmed --
-  // same order Radio.ino uses (I2S up, then es8311_codec_init).
+  //Clocks must already be running when the slave codec's registers are programmed.
   if (i2s_channel_enable(txChan) != ESP_OK) {
     end();
     return false;
   }
   enabled = true;
-  if (!audioCodecEnsure()) {
+  if (!audioCodecEnsure(128)) {
     end();
     return false;
   }
@@ -105,6 +103,7 @@ bool AudioOut::begin() {
 }
 
 void AudioOut::end() {
+  audioCodecSetOutputEnabled(false);  // Mutes the Tab5 amp before its clocks disappear.
   if (txChan) {
     if (enabled) i2s_channel_disable(txChan);
     i2s_del_channel(txChan);
@@ -124,7 +123,7 @@ void AudioOut::setDiscard(bool on) { discard = on; }
 
 // gnuboy calls this once per emulated frame with GB_AUDIO_MONO_S16 samples.
 //
-// Mono is deliberate: the ES8311 drives a single speaker off one I2S slot, so a
+// Mono is deliberate: the ES8388 drives a single speaker off one I2S slot, so a
 // true stereo feed would silently throw away everything panned to the other
 // side (NR51 pans plenty of Pokemon's channels). We take gnuboy's own mixdown
 // and write the same sample into both slots, which is right whichever slot the

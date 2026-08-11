@@ -32,9 +32,9 @@
 //   can't be fed that fast (see the loop's frame-skip note), so drawing is what
 //   gets dropped, not emulation. `gb` prints both rates on exit.
 //
-//   Audio: the APU plays through the onboard ES8311 + speaker (src/AudioOut.*).
-//   That codec normally belongs to Radio.ino, which holds both of the S3's I2S
-//   controllers, so launching a game calls radioReleaseAudio() to take them
+//   Audio: the APU plays through the onboard ES8388 + speaker (src/AudioOut.*).
+//   That codec normally belongs to Radio.ino, which holds the active I2S TX
+//   controller, so launching a game calls radioReleaseAudio() to take it
 //   back and AudioOut::end() hands them over again on exit. If any of that
 //   fails the game just runs silent -- audio is never a reason not to launch.
 //   Volume is the shell's radio volume ("radio vol <0-21>"), read per frame.
@@ -196,20 +196,18 @@ static void gbBlitFrame() {
     tft_st77922.Fill_Colors_Landscape(gbOutX, gbOutY, width, height,
                                       const_cast<uint16_t*>(pixels));
 #else
-    tft.setSwapBytes(true);
-    tft.pushImage(gbOutX, gbOutY, width, height,
-                  const_cast<uint16_t*>(pixels));
+    //The scaled frame lives in PSRAM. Route it through Display.ino's internal-RAM
+    //strip and keep all strips in one transaction; direct PSRAM-to-DSI framebuffer
+    //copies are what caused Tetris to flash the panel's cyan clear colour.
+    pushDisplayImageStaged(gbOutX, gbOutY, width, height, pixels, true);
 #endif
 #endif
 }
 
 static void gbClearPanel() {
-#ifdef FNK0104N_3P5_320x480_ST77922
     frameSprite.fillSprite(TFT_BLACK);
+    displayInvalidateShadow();
     pushDisplayFrame();
-#else
-    tft.fillScreen(TFT_BLACK);
-#endif
 }
 
 // One-shot requests the slave can raise alongside the held-button bitmap.
@@ -817,8 +815,8 @@ void handleGbCommand(const String parts[], int partCount) {
         outLine("gb: low memory, running native 1x", C_YELLOW);
     }
 
-    // Take the codec off the radio (which otherwise holds both I2S controllers)
-    // and bring up our own TX channel. Both steps are advisory: a game with no
+    // Take the codec off the radio and bring up our own TX channel. Both steps
+    // are advisory: a game with no
     // sound still beats no game.
     bool audioUp = false;
     if (radioReleaseAudio()) {
@@ -849,11 +847,9 @@ void handleGbCommand(const String parts[], int partCount) {
         if (events & GB_EVT_MENU) {
             // Modal: emulation is paused for the duration. Audio goes quiet on
             // its own once the DMA ring drains -- nothing is producing samples.
-#ifdef FNK0104N_3P5_320x480_ST77922
             // Game frames bypass frameSprite, so force the menu's first push to
             // replace every game pixel rather than trusting the shell shadow.
             displayInvalidateShadow();
-#endif
             if (gbRunMenu(buttons)) break;
             gbClearPanel();                   // clear the menu and any old letterbox
             nextFrame = micros() + frameUs;   // menu time isn't the emulator falling behind
