@@ -181,8 +181,7 @@ bool audioCodecEnsure() {
         return true;
     }
 
-    pinMode(AUDIO_AMP_ENABLE_PIN, OUTPUT);
-    digitalWrite(AUDIO_AMP_ENABLE_PIN, LOW);
+    // Tab5 amplifier power is managed by M5Unified through its I/O expander.
 
     if (!Wire.begin(AUDIO_I2C_SDA_PIN, AUDIO_I2C_SCL_PIN, AUDIO_I2C_SPEED)) {
         Serial.println("[audio] I2C init failed");

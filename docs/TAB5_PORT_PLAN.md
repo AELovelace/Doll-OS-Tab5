@@ -46,9 +46,9 @@ modifier or game button stuck.
 - Track the source repository as `upstream-fnk`.
 - Pin the first port baseline with tag `fnk-base-27313e8`.
 - Add reviewed upstream-sync pull requests; never auto-merge source changes.
-- Establish a reproducible ESP32-P4 bring-up build.
+- Establish a reproducible Arduino IDE/Arduino CLI build of the complete sketch.
 
-### M1: hardware bring-up
+### M1: complete-sketch hardware integration
 
 - Initialize M5Unified/M5GFX without registering touch as an input source.
 - Verify the 1280x720 display, 32MB PSRAM, and board detection.
@@ -107,3 +107,10 @@ a second external ESP32.
 USB host is supported by the P4, but the final application must own the USB-A
 role and its switched 5V rail. USB device/HID forwarding demos are not the same
 as accepting a keyboard, so the port uses Espressif's HID host component.
+
+## Canonical build
+
+The repository root is the Arduino sketch. `Doll-OS-Tab5.ino` and
+`sketch.yaml` are the only supported firmware entry point; there is no separate
+PlatformIO or throwaway bring-up project. Arduino IDE is used for development
+and flashing, while Arduino CLI compiles the same profile in CI.

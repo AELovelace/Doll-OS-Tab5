@@ -1488,7 +1488,7 @@ void handleEditCommand(const String parts[], int partCount) {
     //geometry from the panel -- both surfaces render this grid (see the header:
     //there is no NAWS negotiation to ask a telnet client its real size)
     editCharW = max(1, (int)frameSprite.textWidth("M"));
-    editLineH = max(frameSprite.fontHeight() + 2, 8);
+    editLineH = max((int)frameSprite.fontHeight() + 2, 8);
     editCols = max(8, (DISPLAY_WIDTH - 2 * DISPLAY_PADDING) / editCharW);
     editRows = max(1, (DISPLAY_HEIGHT - EDIT_TITLE_H - EDIT_HINT_H - 4) / editLineH);
 

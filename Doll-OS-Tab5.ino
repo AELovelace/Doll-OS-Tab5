@@ -1,9 +1,7 @@
-//   DS.ino
-//   entry point -- telnet-interface port of DOLL-OS for the Freenove ESP32-S3
-//   display board (FNK0104-series / "FNK1014B"). No physical screen or keyboard is
-//   used: a single telnet client is the entire UI, replacing M5Cardputer's sprite
-//   display + keyboard as DOLL-OS's whole interaction model. See docs/PORTING.md
-//   for what changed and why.
+//   Doll-OS-Tab5.ino
+// Entry point for the Tab5-exclusive DOLL-OS fork. The onboard display mirrors
+// the shell while the official keyboard and telnet feed the shared editor.
+// Bluetooth and USB keyboards will join that same input hub after hardware test.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <FS.h>
@@ -24,9 +22,23 @@ void setup() {
     Serial.println();
     Serial.printf("Starting DOLL-OS on %s...\n", DOLL_BOARD_NAME);
     Serial.flush();   //force this out over UART now, in case something below hangs before the next line
+
+    auto m5Config = M5.config();
+    m5Config.serial_baudrate = 0;                 // Serial is already initialized above.
+    m5Config.clear_display = false;               // Display.ino paints the first complete frame.
+    m5Config.output_power = true;                 // Keep Ext.Port1 and USB-A power available.
+    m5Config.internal_imu = false;                // Defer unused devices to later port milestones.
+    m5Config.internal_rtc = false;
+    m5Config.internal_mic = false;
+    m5Config.internal_spk = false;
+    m5Config.external_imu = false;
+    m5Config.external_rtc = false;
+    M5.begin(m5Config);                           // Detects every supported Tab5 display revision.
+    M5.Power.setExtOutput(true);                  // Enables external keyboard and USB host power.
+
     ledBegin();
 
-    //report PSRAM up front -- if it's not enabled here, the ~150KB frame sprite and the
+    //report PSRAM up front -- if it is not enabled, the ~1.8MB frame sprite and the
     //history ring stay in internal SRAM and everything below is starved for it
     reportPsramStatus();
 
@@ -36,7 +48,7 @@ void setup() {
     enablePsramHeap();
 
     //bring the panel up first so boot progress is visible on it too -- it mirrors
-    //the telnet session (see Display.ino) but doesn't gate on one existing
+    //the shell session (see Display.ino) but does not gate on a network client
     Serial.println("[boot] initDisplay()...");
     Serial.flush();
     initDisplay();
@@ -51,9 +63,13 @@ void setup() {
     //STA only. DOLL-OS used to run an always-on softAP alongside STA as a fallback
     //telnet path, but AP+STA on the S3's single radio cost too much streaming
     //throughput (Radio.ino audio starved once its buffer drained) and the AP
-    //went unused -- the panel + BLE keyboard already cover the no-network case.
+    //went unused -- the panel + official keyboard cover the no-network case.
     Serial.println("[boot] WiFi STA...");
     Serial.flush();
+    WiFi.setPins(WIFI_SDIO_CLK_PIN, WIFI_SDIO_CMD_PIN,
+                 WIFI_SDIO_D0_PIN, WIFI_SDIO_D1_PIN,
+                 WIFI_SDIO_D2_PIN, WIFI_SDIO_D3_PIN,
+                 WIFI_SDIO_RESET_PIN);
     WiFi.mode(WIFI_STA);
     connectToInternet();
     recordHeapCheckpoint("after wifi");
@@ -68,14 +84,11 @@ void setup() {
     Serial.println("[boot] storage OK");
     Serial.flush();
 
-    //second UART for the DS-Slave BLE-keyboard bridge (KeyboardSerial.ino)
-    Serial.println("[boot] initKeyboardSerial()...");
+    Serial.println("[boot] init Tab5 Keyboard...");
     Serial.flush();
     initKeyboardSerial();
 
-    //Hardware-UART outbound command channel to DS-Slave. KeyboardSerial UART1 is
-    //full-duplex, with its TX routed to the clear variant-specific pin.
-    slaveLinkBegin();
+    slaveLinkBegin();                              // Compatibility no-op on the Tab5-only fork.
 
     telnetServer.begin();
     telnetServer.setNoDelay(true);
@@ -90,7 +103,7 @@ void setup() {
     Serial.println("Connect with: telnet <ip> 23");
 
     //start the interactive shell right now instead of waiting for a telnet client to
-    //connect -- the panel + BLE keyboard (KeyboardSerial.ino) are a complete UI on their
+    //connect -- the panel + Tab5 keyboard (KeyboardSerial.ino) are a complete UI on their
     //own, so present the welcome banner and prompt immediately. A telnet client that
     //dials in later re-runs this same sequence for its own screen (acceptTelnetClient()).
     beginShellSession();
@@ -110,7 +123,7 @@ void setup() {
 void loop() {
     acceptTelnetClient();
     readTelnetClient();
-    readKeyboardSerial();   //keystrokes from the DS-Slave BLE-keyboard bridge (KeyboardSerial.ino)
+    readKeyboardSerial();   //official Tab5 Keyboard events normalized into terminal bytes
     ftpService();           //drives the FTP server one non-blocking step when active (FtpServer.ino)
     radioService();         //prints whatever the radio task/callbacks stashed (Radio.ino)
     maintainInternetConnection();

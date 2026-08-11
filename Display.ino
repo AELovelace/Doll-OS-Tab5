@@ -1,11 +1,8 @@
 //   Display.ino
-//   drives the TFT panel as a mirror of the telnet session -- "a second screen for
-//   the cardputer," per the user's request. Telnet remains the only *input* path;
-//   this is output-only. Ported from DOLL-OS's terminal.ino (history wrapping/
-//   rendering) and ansi.ino (SGR color interpretation for raw remote byte streams),
-//   retargeted from an M5GFX sprite to a TFT_eSPI one -- the API shapes
-//   (drawString/textWidth/setTextColor/setTextDatum/fillSprite) are close enough
-//   that the porting is mostly a rename, not a redesign.
+// Drives the Tab5 panel as the shared shell display. It is output-only for this
+// milestone: touchscreen events are never read. Rendering uses an M5Canvas so
+// the inherited terminal-history and ANSI code stays independent of the panel
+// controller fitted to a particular Tab5 revision.
 //
 //   The panel follows the tail of history live by default, same as DOLL-OS, but
 //   Shift+Up/Down (recognized in TelnetServer.ino's handleCsiSequence and
@@ -17,14 +14,13 @@
 //   Panel pushes.
 //
 //   Redrawing the whole sprite every frame is cheap -- it is memory. The blit is the
-//   expensive half: 16bpp over the panel bus is ~150KB per frame at 320x240 and ~300KB at
-//   480x320, and a canvas app that moves one character was paying the full price of it on
+//   expensive half: the 1280x720 16bpp canvas is about 1.8MB, and a canvas app that moves
+//   one character would otherwise pay the full transfer cost on
 //   every FLIP. That transfer, not the interpreter, is what set the ceiling on how fast a
 //   dapp game could feel.
 //
 //   Frames are diffed against a shadow copy of what the panel was last sent, and only the
-//   rows that actually differ go over the bus. On N, those logical landscape rows are
-//   transformed into native portrait strips before reaching Freenove's rotation-0 writer.
+//   rows that actually differ go to the M5GFX display surface.
 //
 //   The shadow can go wrong one way -- if something draws to the panel *without* going through the
 //   sprite, the shadow no longer describes the glass. Gameboy.ino does exactly that, so any
@@ -41,31 +37,20 @@ static void pushDisplayRows(int y, int rowCount) {
     if (rowCount <= 0) {
         return;
     }
-    uint16_t* src = (uint16_t*)frameSprite.getPointer() + (size_t)y * DISPLAY_WIDTH;
-#ifdef FNK0104N_3P5_320x480_ST77922
-    // Freenove's LVGL path rounds native regions to four-pixel boundaries.
-    // Align logical rows the same way; after rotation these become native X.
-    int alignedY = y & ~0x3;
-    int alignedEnd = min(DISPLAY_HEIGHT, (y + rowCount + 3) & ~0x3);
-    int alignedRows = alignedEnd - alignedY;
-    src = (uint16_t*)frameSprite.getPointer() + (size_t)alignedY * DISPLAY_WIDTH;
-    tft_st77922.Fill_Colors_Landscape(0, alignedY, DISPLAY_WIDTH, alignedRows, src);
-#else
-    //mirrors what TFT_eSprite::pushSprite does for a 16bpp sprite -- the sprite's buffer is
-    //already in the panel's byte order, so the swap has to be off for the transfer
+    uint16_t* src = (uint16_t*)frameSprite.getBuffer() + (size_t)y * DISPLAY_WIDTH;
+    // M5GFX accepts row regions directly on the Tab5 MIPI-DSI framebuffer.
     bool oldSwapBytes = tft.getSwapBytes();
     tft.setSwapBytes(false);
     tft.pushImage(0, y, DISPLAY_WIDTH, rowCount, src);
     tft.setSwapBytes(oldSwapBytes);
-#endif
 }
 
 void pushDisplayFrame() {
-    uint16_t* frame = (uint16_t*)frameSprite.getPointer();
+    uint16_t* frame = (uint16_t*)frameSprite.getBuffer();
     const size_t rowWords = (size_t)DISPLAY_WIDTH;
     const size_t rowBytes = rowWords * sizeof(uint16_t);
 
-    //TFT_eSprite::pushSprite used to do this guard for us -- nothing to send before
+    //Nothing can be sent before createSprite has allocated the canvas.
     //createSprite has run, and the row pointers below would be offsets from null
     if (!frame) {
         return;
@@ -105,27 +90,17 @@ void initDisplay() {
     displayHistoryRows = (DisplayHistoryRow*) psramOrInternalCalloc(
         DISPLAY_HISTORY_MAX_LINES, sizeof(DisplayHistoryRow), "displayHistory");
 
-    //the frame sprite is the big one (~150KB at 16bpp). TFT_eSPI routes it to PSRAM by
-    //itself when psramFound() (Sprite.cpp callocSprite); snapshot the PSRAM pool around
-    //createSprite so the boot log proves whether it actually landed there.
+    //The frame sprite is about 1.8MB at 16bpp. Snapshot PSRAM around allocation
+    //so the boot log proves where M5Canvas placed it.
     size_t psramFreeBeforeSprite = ESP.getFreePsram();
-#ifdef FNK0104N_3P5_320x480_ST77922
-    tft_st77922.Init();
-    tft_st77922.Set_Rotation(0);
+    tft.setRotation(0);
     frameSprite.setColorDepth(16);
     frameSprite.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    frameSprite.setSwapBytes(true);
-#else
-    tft.init();
-    tft.setRotation(DOLL_DISPLAY_UPSIDE_DOWN ? 3 : 1);
-    frameSprite.setColorDepth(16);
-    frameSprite.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT);
-#endif
     Serial.printf("[psram] frameSprite: %u bytes drawn from PSRAM (0 => it fell back to internal RAM)\n",
                   (unsigned)(psramFreeBeforeSprite - ESP.getFreePsram()));
 
-    //   Same size as the sprite. Deliberately PSRAM-or-nothing rather than going through
-    //   psramOrInternalCalloc: this buffer only buys speed, and taking 150KB of the scarce
+    //Same size as the sprite. Deliberately PSRAM-or-nothing rather than going through
+    //psramOrInternalCalloc: this buffer only buys speed, and taking 1.8MB of the scarce
     //   internal pool to get it would be a bad trade. A null result costs nothing but the
     //   old full-frame push.
     displayShadow = (uint16_t*) heap_caps_calloc(
@@ -143,32 +118,11 @@ void initDisplay() {
 
 void displaySetSleeping(bool sleeping) {
     if (sleeping) {
-#ifdef FNK0104N_3P5_320x480_ST77922
-        tft_st77922.Write_Reg(0x28, nullptr, 0);  // Disable ST77922 pixel output before sleep-in.
-        delay(10);
-        tft_st77922.Write_Reg(0x10, nullptr, 0);  // Put the QSPI panel controller into sleep-in.
-#else
-        tft.writecommand(0x28);                   // Disable ILI9341/ST7796 pixel output first.
-        delay(10);
-        tft.writecommand(0x10);                   // Put the SPI panel controller into sleep-in.
-#endif
-        delay(10);
-        digitalWrite(DOLL_DISPLAY_BACKLIGHT_PIN, LOW);  // Remove the largest visible power load.
+        tft.sleep();                              // M5GFX handles every Tab5 panel revision safely.
         return;
     }
 
-#ifdef FNK0104N_3P5_320x480_ST77922
-    tft_st77922.Write_Reg(0x11, nullptr, 0);      // Wake the ST77922 controller without reinitializing RAM.
-#else
-    tft.writecommand(0x11);                       // Wake the ILI9341/ST7796 controller in place.
-#endif
-    delay(120);                                   // Panel datasheets require settling after sleep-out.
-#ifdef FNK0104N_3P5_320x480_ST77922
-    tft_st77922.Write_Reg(0x29, nullptr, 0);      // Re-enable ST77922 display output.
-#else
-    tft.writecommand(0x29);                       // Re-enable ILI9341/ST7796 display output.
-#endif
-    digitalWrite(DOLL_DISPLAY_BACKLIGHT_PIN, HIGH);  // Light the preserved frame immediately.
+    tft.wakeup();                                 // Restores the remembered display brightness.
     displayInvalidateShadow();                    // Force the next render to resynchronize panel RAM.
     markDisplayDirty();                           // Repaint status after network and wake state change.
 }

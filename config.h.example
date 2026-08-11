@@ -3,21 +3,12 @@
 //   defaults. config.h is intentionally ignored so secrets stay local.
 #pragma once
 
-// Board selection and every board-dependent pin live in BoardVariant.h and
-// BoardPins.h. They are separate from this ignored secrets file so TFT_eSPI and
-// native .cpp modules compile against the same hardware map.
+// The board and every hardware pin live in BoardVariant.h and BoardPins.h.
+// This fork has one target: M5Stack Tab5.
 #include "BoardPins.h"
 
-//   Rear WS2812 RGB LED (used by indicators and the .dapp LED opcode). Leave
-//   unset to use Freenove's documented default: GPIO42 on AB/S, GPIO40 on N.
-//   Set to -1 to disable LED control in this build.
-// #define REAR_RGB_LED_PIN 42
-
-//battery voltage divider on this board is 2:1 (see Freenove's Battery_Voltage example)
-const float BATTERY_ADC_DIVIDER = 2.0f;
-//rough LiPo curve endpoints for a percent estimate -- not a fuel-gauge chip, just linear interpolation
-const float BATTERY_VOLTAGE_EMPTY = 3.3f;
-const float BATTERY_VOLTAGE_FULL  = 4.2f;
+// Battery voltage and percentage come from the Tab5 INA226 power monitor through
+// M5Unified; no ADC calibration values are required here.
 
 //   Wi-Fi
 //   STA credentials: the home/router network joined for internet access. These

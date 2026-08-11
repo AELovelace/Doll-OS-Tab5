@@ -22,14 +22,18 @@ jobs:
       - name: Run the input tests
         run: /tmp/doll_input_test
 
-  tab5-bringup:
+  tab5-arduino:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install PlatformIO Core
-        run: python -m pip install --disable-pip-version-check platformio==6.1.18
-      - name: Compile the ESP32-P4 bring-up firmware
-        run: pio run --project-dir examples/Tab5Bringup
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install the pinned external ESP32Ping library
+        run: |
+          mkdir -p ../libraries
+          git clone https://github.com/marian-craciunescu/ESP32Ping.git ../libraries/ESP32Ping
+          git -C ../libraries/ESP32Ping checkout aadac3c08f5e6f5062faf26ae1b17e566e22728c
+      - name: Create a non-secret CI configuration
+        run: cp config.h.example config.h
+      - name: Compile the complete Arduino IDE sketch for ESP32-P4
+        run: arduino-cli compile --profile tab5 .
