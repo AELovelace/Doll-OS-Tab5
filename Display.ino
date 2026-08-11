@@ -269,7 +269,8 @@ void initDisplay() {
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
     frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
     frameSprite.fillSprite(TFT_BLACK);
-    pushDisplayFrame();
+    //setup() draws the boot splash immediately after initDisplay(). Avoid a redundant
+    //full black commit immediately before that first cyan frame.
 }
 
 void displaySetSleeping(bool sleeping) {
@@ -884,17 +885,17 @@ void drawDisplayCommandBar() {
     }
     frameSprite.drawString(shown, textX, y + DISPLAY_PADDING);
 
-    //blinking caret at the edit position. commandCursorPos indexes the full buffer; subtract
+    //Solid caret at the edit position. On the Tab5, blinking this by committing the DSI
+    //framebuffer every 500 ms can interrupt panel scanout even when no UI content changed.
+    //commandCursorPos indexes the full buffer; subtract
     //the dropped head to land in `shown`, then clamp so a cursor scrolled off the left edge
     //parks at the start of the visible window rather than drawing off-panel.
-    if (((millis() / DISPLAY_CURSOR_BLINK_MS) & 1UL) == 0) {
-        int caretInShown = commandCursorPos - (int)droppedFromHead;
-        if (caretInShown < 0) caretInShown = 0;
-        if (caretInShown > (int)shown.length()) caretInShown = shown.length();
-        int caretX = textX + (int)frameSprite.textWidth(shown.substring(0, caretInShown));
-        if (caretX > textX + maxWidth) caretX = textX + maxWidth;
-        frameSprite.drawFastVLine(caretX, y + DISPLAY_PADDING, frameSprite.fontHeight(), TFT_WHITE);
-    }
+    int caretInShown = commandCursorPos - (int)droppedFromHead;
+    if (caretInShown < 0) caretInShown = 0;
+    if (caretInShown > (int)shown.length()) caretInShown = shown.length();
+    int caretX = textX + (int)frameSprite.textWidth(shown.substring(0, caretInShown));
+    if (caretX > textX + maxWidth) caretX = textX + maxWidth;
+    frameSprite.drawFastVLine(caretX, y + DISPLAY_PADDING, frameSprite.fontHeight(), TFT_WHITE);
 }
 
 //   paints a running .dapp's CANVAS grid over the terminal area (AppRunner.ino's FLIP).
@@ -914,11 +915,8 @@ void drawDappCanvas() {
     const int cellW = max(1, (DISPLAY_WIDTH - DISPLAY_PADDING * 2) / dappCanvasCols);
     const int cellH = max(1, (height - DISPLAY_PADDING * 2) / dappCanvasRows);
 
-    //the built-in font is 6x8 at size 1, so this is how many whole multiples of it fit in
-    //a cell -- a small grid gets big glyphs instead of a lot of empty space
-    int textSize = min(cellW / 6, cellH / 8);
-    if (textSize < 1) textSize = 1;
-    if (textSize > 4) textSize = 4;
+    //Keep AppRunner glyphs at the user-selected compact built-in size.
+    const int textSize = 1;
 
     //center the grid in the area it didn't divide evenly into
     const int originX = (DISPLAY_WIDTH - cellW * dappCanvasCols) / 2;
@@ -982,16 +980,10 @@ void drawDappCanvas() {
 }
 
 void drawDisplayFrame() {
-    unsigned long now = millis();
-    bool statusRefreshDue = (now - displayLastStatusRefresh) >= DISPLAY_STATUS_REFRESH_MS;
-    bool cursorPhase = ((now / DISPLAY_CURSOR_BLINK_MS) & 1UL) == 0;
-    bool cursorBlinkDue = (cursorPhase != displayLastCursorPhase);
-    if (!displayDirty && !statusRefreshDue && !cursorBlinkDue) {
-        return;   //nothing changed since the last push -- skip the full-frame redraw + SPI blit
+    if (!displayDirty) {
+        return;   //nothing changed: do not disturb the live DSI framebuffer while idle
     }
     displayDirty = false;
-    displayLastStatusRefresh = now;
-    displayLastCursorPhase = cursorPhase;
 
     if (dappCanvasActive) {
         //A canvas FLIP already knows exactly which cells changed. Preserve that knowledge

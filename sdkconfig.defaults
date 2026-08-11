@@ -1,5 +1,8 @@
 # Match the stable M5Tab5 UserDemo baseline.
 CONFIG_IDF_TARGET="esp32p4"
+# PlatformIO does not forward the board JSON variant when Arduino is an IDF
+# component, so select Arduino's ESP32-P4 pins/include variant explicitly.
+CONFIG_ARDUINO_VARIANT="esp32p4"
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
@@ -10,6 +13,11 @@ CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 # Build Arduino as an IDF component and preserve normal setup()/loop() startup.
 CONFIG_AUTOSTART_ARDUINO=y
 CONFIG_FREERTOS_HZ=1000
+
+# Diagnostic build: compile the task-WDT API required by Arduino, but do not initialize
+# the watchdog or subscribe idle tasks at runtime.
+CONFIG_ESP_TASK_WDT_EN=y
+# CONFIG_ESP_TASK_WDT_INIT is not set
 
 # These four settings are the display-bandwidth fix used by M5Stack's UserDemo
 # and recommended by Espressif for PSRAM-backed MIPI-DSI scanout.

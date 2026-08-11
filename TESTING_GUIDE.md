@@ -1,5 +1,9 @@
 # DOLL-OS Tab5 testing guide
 
+> Current diagnostic build: the ESP task-watchdog API is compiled for Arduino linkage but
+> is not initialized, AppRunner checkpoints do not reset it or sleep, and AppRunner canvas
+> glyphs use text size 1.
+
 Use the PlatformIO `tab5` environment for release hardware checks. It pins
 pioarduino 54.03.21, Arduino-ESP32 3.2.1, and ESP-IDF 5.4.2 to match M5Stack's
 working UserDemo generation. Keep a 115200-baud serial monitor open only after
@@ -21,7 +25,7 @@ full-screen `frameSprite` versus `displayShadow` PSRAM comparison: doing so read
 3.68MB for every small Tetris or Snake update and can starve continuous DSI
 scanout even on the known-good core.
 
-The ST7123 uses a conservative 50MHz DPI clock and 800Mbps DSI lane rate. Both
+The ST7123 uses M5GFX's native 80MHz DPI clock and 1040Mbps DSI lane rate. Both
 DW-GDMA AXI read ports are assigned QoS priority 15 after `M5.begin()`. A cyan
 or blue full-screen flash indicates that continuous PSRAM scanout was starved;
 it is not an AppRunner canvas color or clear operation.
@@ -54,13 +58,14 @@ writeback and trigger the blue underrun.
 1. Boot to the shell and confirm the log reports either the ST7121 or ST7123
    panel and a non-zero `logical=1280x720` display size. A touch-firmware read
    failure may be logged, but the DSI-ID fallback must still detect the panel.
-   For ST7123, the project M5GFX patch must select the current diagnostic 50MHz
-   DPI clock and 800Mbps DSI lane rate.
+   For ST7123, the project M5GFX patch must retain the native 80MHz DPI clock
+   and 1040Mbps DSI lane rate.
 2. Build with the PlatformIO `tab5` environment. Confirm the boot log reports
    200MHz PSRAM, an internal-RAM display row-staging buffer, and an internal-RAM
    `dapp canvas shadow`.
    The same strip must protect both panel pushes and display-shadow updates;
-   neither operation may copy directly between two PSRAM allocations.
+   neither operation may copy directly between two PSRAM allocations. The frame
+   sprite and shadow should each report approximately 1.84MB.
 3. Run `tetris` for at least five minutes, moving and rotating pieces often so
    the canvas produces frequent `FLIP` updates.
 4. Confirm every update moves directly between complete frames. The panel must

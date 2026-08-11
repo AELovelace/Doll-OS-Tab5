@@ -40,11 +40,10 @@ bool ntpEnsureClock(String& error, unsigned long timeoutMs, void (*yieldFn)()) {
 }
 
 //   PSRAM allocation helpers
-//   This board's ESP32-S3 module carries external PSRAM. Internal SRAM is the scarce
-//   pool -- WiFi (AP+STA here) and mbedTLS (ssh) both want room there -- so large,
-//   long-lived buffers are pushed out to PSRAM to leave internal RAM free. TFT_eSPI
-//   already does this for the ~150KB frame sprite on its own (callocSprite prefers
-//   PSRAM, see Extensions/Sprite.cpp); these helpers do the same for our own buffers.
+//   This board's ESP32-P4 module carries external PSRAM. Internal SRAM is the scarce
+//   pool -- hosted WiFi and mbedTLS (ssh) both want room there -- so large, long-lived
+//   buffers are pushed out to PSRAM to leave internal RAM free. M5Canvas does this for
+//   the ~1.8MB full-resolution frame sprite; these helpers do the same for our own buffers.
 //   All of it is contingent on PSRAM being enabled in the Arduino board menu -- with it
 //   off, psramFound() is false, every allocation below falls back to internal RAM, and
 //   reportPsramStatus() says so loudly at boot.
@@ -91,7 +90,7 @@ void reportPsramStatus() {
                       (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram());
     } else {
         Serial.println("[psram] NOT available -- enable PSRAM in the Arduino board menu, "
-                       "or the ~150KB frame sprite + history stay in internal SRAM");
+                       "or the ~1.8MB frame sprite + history stay in internal SRAM");
     }
     Serial.printf("[psram] heap: internal free=%u, spiram free=%u\n",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),

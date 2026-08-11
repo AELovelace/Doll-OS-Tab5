@@ -466,21 +466,14 @@ int dappCanvasCols = 0;
 int dappCanvasRows = 0;
 bool dappCanvasActive = false;
 
-//drawDisplayFrame() (Display.ino) skips its redraw + SPI push entirely unless this
-//is set -- every history/command-bar mutation marks it via markDisplayDirty() so a
-//full-frame push only happens when something actually changed, instead of on every
-//loop() tick regardless of activity
+//drawDisplayFrame() (Display.ino) skips its redraw + DSI framebuffer commit entirely
+//unless this is set. Every history/command-bar mutation marks it via markDisplayDirty(),
+//so an idle Tab5 never interrupts panel scanout merely to refresh a timer or blink a caret.
 bool displayDirty = true;   //starts true so the first frame after boot always draws
-const unsigned long DISPLAY_STATUS_REFRESH_MS = 1000;   //separate timer so the MEM/BAT
-                                                          //readout in the status bar still
-                                                          //ticks over while otherwise idle
-unsigned long displayLastStatusRefresh = 0;
 
-//command-bar caret blink. Like DISPLAY_STATUS_REFRESH_MS above, this is a second reason
-//drawDisplayFrame() may redraw an otherwise-clean frame: each time the blink phase flips
-//the frame is pushed again so the '|' caret in the mirrored command bar visibly blinks.
-const unsigned long DISPLAY_CURSOR_BLINK_MS = 500;   //half-period: on 500ms, off 500ms
-bool displayLastCursorPhase = false;                 //phase drawn last frame, to detect a flip
+//The full-screen editor uses this for its cursor phase. The shell renderer does not use
+//the timer as a reason to commit an otherwise-unchanged DSI framebuffer.
+const unsigned long DISPLAY_CURSOR_BLINK_MS = 500;
 
 const int DISPLAY_HISTORY_MAX_LINES = 200;
 const int DISPLAY_HISTORY_ROW_MAX_CHARS = 128;
