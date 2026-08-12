@@ -21,6 +21,28 @@ extern "C" {
 }
 
 const char* WIFI_CREDS_PATH = "/wifi.cfg";
+static bool wifiStationReady = false;
+static bool wifiReconnectEnabled = false;
+
+static bool wifiSsidIsConfigured(const String& ssid) {
+    return ssid.length() > 0 && ssid != "YOUR_WIFI_SSID";
+}  // Rejects the shipped sentinel before it can start the hosted radio.
+
+static void ensureWifiStationReady() {
+    if (wifiStationReady) return;
+
+    WiFi.setPins(WIFI_SDIO_CLK_PIN, WIFI_SDIO_CMD_PIN,
+                 WIFI_SDIO_D0_PIN, WIFI_SDIO_D1_PIN,
+                 WIFI_SDIO_D2_PIN, WIFI_SDIO_D3_PIN,
+                 WIFI_SDIO_RESET_PIN);
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(false);
+    wifiStationReady = true;
+}  // Starts ESP-Hosted only when boot or an explicit Wi-Fi command needs it.
+
+bool wifiStationIsReady() {
+    return wifiStationReady;
+}  // Lets socket and sleep code avoid touching an uninitialized network stack.
 
 //tries saved credentials first, falling back to the config.h defaults
 //returns true if the router connection succeeded
@@ -30,6 +52,15 @@ bool connectToInternet() {
         ssid = STA_DEFAULT_SSID;
         password = STA_DEFAULT_PASSWORD;
     }
+
+    if (!wifiSsidIsConfigured(ssid)) {
+        wifiReconnectEnabled = false;
+        Serial.println("WiFi skipped: no saved credentials (use 'wifi connect').");
+        ledSetWifiConnected(false);
+        return false;
+    }
+
+    ensureWifiStationReady();
 
     //Turn OFF the ESP32 core's built-in auto-reconnect (defaults to ON). Left on, a
     //failed join -- e.g. the config.h default SSID isn't present -- makes the driver
@@ -45,6 +76,7 @@ bool connectToInternet() {
     Serial.printf("Connecting to router: %s\n", ssid.c_str());
     ledPulseNetwork();
     ledSetWifiConnected(false);
+    wifiReconnectEnabled = true;
     WiFi.begin(ssid.c_str(), password.c_str());
 
     unsigned long startTime = millis();
@@ -71,8 +103,11 @@ unsigned long previousReconnectAttempt = 0;
 const unsigned long reconnectInterval = 10000;
 
 void maintainInternetConnection() {
+    if (!wifiStationReady || !wifiReconnectEnabled) return;
+
     if (WiFi.status() == WL_CONNECTED) {
         ledSetWifiConnected(true);
+        startTelnetServer();
         return;
     }
     ledSetWifiConnected(false);
@@ -94,10 +129,11 @@ void maintainInternetConnection() {
 }
 
 int wifiIsConnected() {
-    return WiFi.status() == WL_CONNECTED ? 1 : 0;
+    return wifiStationReady && WiFi.status() == WL_CONNECTED ? 1 : 0;
 }
 
 void scanWifiNetworks() {
+    ensureWifiStationReady();
     WiFi.scanDelete();
     outLine("Scanning for Wifi Networks");
     telnetClient.flush();   //push this line out before the blocking scan begins
@@ -165,6 +201,12 @@ void showWifiStatus() {
 }
 
 void connectWifiNetwork(const String& ssid, const String& password) {
+    if (!wifiSsidIsConfigured(ssid)) {
+        outLine("WiFi connect needs a real SSID", C_RED);
+        return;
+    }
+
+    ensureWifiStationReady();
     outLine("Connecting to: " + ssid);
     telnetClient.flush();
     ledPulseNetwork();
@@ -178,6 +220,7 @@ void connectWifiNetwork(const String& ssid, const String& password) {
     //off (connectToInternet), nothing re-associates underneath us between the two calls.
     WiFi.disconnect();
     delay(200);
+    wifiReconnectEnabled = true;
     WiFi.begin(ssid.c_str(), password.c_str());
 
     const unsigned long timeoutMs = 15000;
@@ -188,6 +231,7 @@ void connectWifiNetwork(const String& ssid, const String& password) {
 
     if (wifiIsConnected() == 1) {
         ledSetWifiConnected(true);
+        startTelnetServer();
         wifiStatus();
     } else {
         ledSetWifiConnected(false);

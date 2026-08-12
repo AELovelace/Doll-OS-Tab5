@@ -138,17 +138,29 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
 
 ## Game Boy display and ES8388 audio regression
 
-1. Launch the Tetris ROM in `fit` mode and play continuously for at least five
+1. Boot once without `/wifi.cfg` and with the unchanged `YOUR_WIFI_SSID`
+   default. Confirm the log says `WiFi skipped: no saved credentials`, reaches
+   the shell with `Telnet dormant`, and never reports `Brownout detector was
+   triggered` or an `Invalid mbox` assertion.
+2. Launch the Tetris ROM in `fit` mode and play continuously for at least five
    minutes. Tab5 `fit` is a centered, integer-scaled 480x432 image; confirm
    falling pieces update without a black screen, cyan flashes, or partial frames.
-2. Open and close the Escape settings menu several times. Confirm both the menu
+   The launch log should say `Tab5 safe-video mode: audio deferred`; video and
+   USB controls must be proven stable before codec ownership is restored.
+3. Open and close the Escape settings menu several times. Confirm both the menu
    and resumed game replace the complete frame without stale pixels.
-3. Repeat the test in `1x` mode so the native emulator framebuffer also crosses
+4. Repeat the test in `1x` mode so the native emulator framebuffer also crosses
    the Game-Boy-only internal staging strip.
-4. Confirm the serial log reports `ES8388 codec up` and never attempts an ES8311
-   address. Listen for correct Game Boy pitch and clean audio on launch and exit.
-5. After quitting, play radio or local music, then launch Tetris again. Confirm
-   audio ownership switches cleanly in both directions without a muted amp.
+5. Confirm the serial log reports `gbFrame: 46080 bytes -> INTERNAL RAM`. The
+   first `[gb] frame=...` diagnostic must have a changing `source_hash` and a
+   nonzero `nonblack` count. The probe deliberately performs no DSI panel
+   readback because ST7123/M5GFX readback can block; record the last `[gb]`
+   breadcrumb if the glass still appears black.
+6. Confirm the USB keyboard stays enumerated throughout launch and exit; an
+   `EspUsbHost: Device disconnected` line is a failure even if video continues.
+7. After video/input pass this regression, restore codec ownership in a separate
+   change and confirm the serial log reports `ES8388 codec up`, never attempts
+   ES8311, and switches cleanly between radio and Game Boy audio.
 
 If the boot log says `dapp canvas shadow: ... unavailable`, treat the display
 test as failed even if no corruption appears: the firmware has lost its

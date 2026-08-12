@@ -52,8 +52,11 @@ static GameBoyHost gbHost;
 // per-launch: `gb <rom> [1x|fit]`.
 static const int GB_W = GameBoyHost::kWidth;    // 160
 static const int GB_H = GameBoyHost::kHeight;   // 144
+#if defined(DOLL_BOARD_TAB5)
+static const int GB_TAB5_STAGE_ROWS = 4;        // bounds each DSI framebuffer writeback
+#endif
 
-static uint16_t* gbScaleBuf = nullptr;   // outW*outH RGB565, in PSRAM
+static uint16_t* gbScaleBuf = nullptr;   // scaled RGB565 frame, or a Tab5 row strip
 static int16_t* gbColMap = nullptr;      // outW source-column lookup
 static int16_t* gbRowMap = nullptr;      // outH source-row lookup
 static int gbOutW = 0, gbOutH = 0, gbOutX = 0, gbOutY = 0;
@@ -80,8 +83,8 @@ static void gbFreeScale() {
 }
 
 // Builds (or rebuilds) the scale buffers for the current mode. Returns false if
-// PSRAM for the scaled frame couldn't be had -- caller falls back to 1x, which
-// needs no scale buffer at all.
+// the board-specific scaling workspace couldn't be allocated -- caller falls
+// back to 1x, which needs no scale buffer at all.
 static bool gbSetupScale() {
 #if defined(DOLL_BOARD_TAB5)
     // The Tab5's panel is a continuously scanned PSRAM framebuffer. Scaling a
@@ -101,8 +104,12 @@ static bool gbSetupScale() {
 
     gbColMap = (int16_t*)heap_caps_malloc(gbOutW * sizeof(int16_t), MALLOC_CAP_8BIT);
     gbRowMap = (int16_t*)heap_caps_malloc(gbOutH * sizeof(int16_t), MALLOC_CAP_8BIT);
-    gbScaleBuf = (uint16_t*)heap_caps_malloc((size_t)gbOutW * gbOutH * sizeof(uint16_t),
-                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    //Only four scaled rows are materialized at once. The emulator framebuffer,
+    //this strip, and Display.ino's transfer strip all stay internal; the live DSI
+    //framebuffer is now the sole PSRAM participant in a Game Boy panel update.
+    gbScaleBuf = (uint16_t*)heap_caps_malloc(
+        (size_t)gbOutW * GB_TAB5_STAGE_ROWS * sizeof(uint16_t),
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!gbColMap || !gbRowMap || !gbScaleBuf) {
         gbFreeScale();
         return false;
@@ -173,7 +180,38 @@ static bool gbSetupScale() {
 static void gbBlitFrame() {
     const uint16_t* frame = gbHost.frame();
     if (!frame) return;
-#ifdef FNK0104N_3P5_320x480_ST77922
+#if defined(DOLL_BOARD_TAB5)
+    //The ROM picker and settings menu already prove the frameSprite -> DSI path
+    //works on this panel. Compose game pixels into that same canvas instead of
+    //using partial tft.pushImage writes, which left only the preceding black clear.
+    const bool oldSwapBytes = frameSprite.getSwapBytes();
+    frameSprite.setSwapBytes(true);
+    if (!gbFitMode) {
+        frameSprite.pushImage(gbOutX, gbOutY, GB_W, GB_H,
+                              const_cast<uint16_t*>(frame));
+        frameSprite.setSwapBytes(oldSwapBytes);
+        pushDisplayFrame();
+        return;
+    }
+
+    int firstRow = 0;
+    while (firstRow < gbOutH) {
+        const int rows = min(GB_TAB5_STAGE_ROWS, gbOutH - firstRow);
+        for (int localY = 0; localY < rows; localY++) {
+            const int outY = firstRow + localY;
+            const uint16_t* srcRow = frame + (size_t)gbRowMap[outY] * GB_W;
+            uint16_t* dstRow = gbScaleBuf + (size_t)localY * gbOutW;
+            for (int outX = 0; outX < gbOutW; outX++) {
+                dstRow[outX] = srcRow[gbColMap[outX]];
+            }
+        }
+        frameSprite.pushImage(gbOutX, gbOutY + firstRow, gbOutW, rows,
+                              gbScaleBuf);
+        firstRow += rows;
+    }
+    frameSprite.setSwapBytes(oldSwapBytes);
+    pushDisplayFrame();
+#elif defined(FNK0104N_3P5_320x480_ST77922)
     // Render directly in native portrait order. Each destination row is
     // contiguous in PSRAM and can be handed straight to Freenove's rotation-0
     // region writer, avoiding a second full-buffer landscape transpose.
@@ -230,11 +268,25 @@ static void gbBlitFrame() {
 #endif
 }
 
+static void gbLogFrameDiagnostic(uint32_t frameNumber) {
+    const uint16_t* frame = gbHost.frame();
+    if (!frame) return;
+
+    uint32_t signature = 2166136261u;
+    uint32_t nonBlack = 0;
+    for (size_t i = 0; i < (size_t)GB_W * GB_H; i++) {
+        signature = (signature ^ frame[i]) * 16777619u;
+        if (frame[i] != 0) nonBlack++;
+    }
+    Serial.printf("[gb] frame=%lu source_hash=%08lX nonblack=%lu/%u\n",
+                  (unsigned long)frameNumber, (unsigned long)signature,
+                  (unsigned long)nonBlack, (unsigned)(GB_W * GB_H));
+}  // Proves gnuboy rendered pixels without using unsupported DSI panel readback.
+
 static void gbClearPanel() {
     frameSprite.fillSprite(TFT_BLACK);
     displayInvalidateShadow();
-    pushDisplayFrame();
-}
+}  // Prepares black letterboxing without erasing the working screen before frame one.
 
 // One-shot requests the slave can raise alongside the held-button bitmap.
 static const uint8_t GB_EVT_QUIT = 0x01;   // Ctrl+T
@@ -828,16 +880,23 @@ void handleGbCommand(const String parts[], int partCount) {
         return;
     }
     ledPulseStorageRead(romLogical.startsWith("/sd/"));
+    Serial.printf("[gb] launch path=%s mode=%s\n", romVfs.c_str(),
+                  gbFitMode ? "fit" : "1x");
+    Serial.flush();
 
     if (!gbHost.begin()) {
         outLine("gb: " + gbHost.status(), C_RED);
         return;
     }
+    Serial.println("[gb] core initialized");
+    Serial.flush();
     if (!gbHost.load(romVfs, gbSavePath(romVfs))) {
         outLine("gb: " + gbHost.status(), C_RED);
         outLine("gb: check the path -- " + romVfs, C_YELLOW);
         return;
     }
+    Serial.println("[gb] ROM loaded and reset");
+    Serial.flush();
 
     if (!gbSetupScale()) {
         // Couldn't get the fitted frame buffer -- native 1x needs none on SPI
@@ -850,14 +909,31 @@ void handleGbCommand(const String parts[], int partCount) {
         }
         outLine("gb: low memory, running native 1x", C_YELLOW);
     }
+    Serial.printf("[gb] display workspace ready: %dx%d at %d,%d\n",
+                  gbOutW, gbOutH, gbOutX, gbOutY);
+    Serial.flush();
 
     // Take the codec off the radio and bring up our own TX channel. Both steps
     // are advisory: a game with no
     // sound still beats no game.
     bool audioUp = false;
+#if defined(DOLL_BOARD_TAB5)
+    //Keep the first proven video path independent of the codec and its shared
+    //PI4IO expander. USB host power disappeared during the failing launch, and
+    //a silent running game is recoverable while a dropped panel/input path is not.
+    Serial.println("[gb] Tab5 safe-video mode: audio deferred");
+    Serial.flush();
+#else
+    Serial.println("[gb] releasing shared audio");
+    Serial.flush();
     if (radioReleaseAudio()) {
+        Serial.println("[gb] starting Game Boy audio");
+        Serial.flush();
         audioUp = AudioOut::begin();
     }
+#endif
+    Serial.printf("[gb] audio setup complete: %s\n", audioUp ? "ready" : "silent");
+    Serial.flush();
     if (!audioUp) {
         outLine("gb: audio unavailable -- running silent", C_YELLOW);
     }
@@ -868,7 +944,11 @@ void handleGbCommand(const String parts[], int partCount) {
     // Hand the panel and the keyboard over to the game.
     slaveLinkSendLine("GAME 1");   // DS-Slave: emit raw button events, not ASCII
     delay(20);
+    Serial.println("[gb] preparing first canvas frame");
+    Serial.flush();
     gbClearPanel();
+    Serial.println("[gb] canvas ready; entering emulation loop");
+    Serial.flush();
 
     uint8_t buttons = 0;
     const uint32_t frameUs = 16743;   // ~59.7 Hz, true GB frame period
@@ -910,10 +990,29 @@ void handleGbCommand(const String parts[], int partCount) {
         const bool draw = !late || skipRun >= kMaxFrameSkip;
 
         gbHost.setButtons(buttons);
+        if (framesRun == 0) {
+            Serial.printf("[gb] first frame run begin: draw=%u\n", draw ? 1u : 0u);
+            Serial.flush();
+        }
         gbHost.runFrame(draw);
+        if (framesRun == 0) {
+            Serial.println("[gb] first frame run complete");
+            Serial.flush();
+        }
         if (draw) {
+            if (framesDrawn == 0) {
+                Serial.println("[gb] first frame blit begin");
+                Serial.flush();
+            }
             gbBlitFrame();
+            if (framesDrawn == 0) {
+                Serial.println("[gb] first frame blit complete");
+                Serial.flush();
+            }
             framesDrawn++;
+            if (framesDrawn == 1 || (framesDrawn % 120) == 0) {
+                gbLogFrameDiagnostic(framesRun + 1);
+            }
             skipRun = 0;
         } else {
             skipRun++;
@@ -944,7 +1043,9 @@ void handleGbCommand(const String parts[], int partCount) {
     // Shut the game down and give everything back to the shell.
     AudioOut::setDiscard(true);   // stop feeding I2S before the channel goes away
     gbHost.stop();                // flushes SRAM to the .sav
-    AudioOut::end();              // releases the I2S controller for the next "radio play"
+    if (audioUp) {
+        AudioOut::end();          // releases the I2S controller for the next "radio play"
+    }
     gbFreeScale();
     slaveLinkSendLine("GAME 0");   // DS-Slave: back to normal keystroke mode
 

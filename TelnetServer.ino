@@ -44,6 +44,26 @@ static UserIacState userIacState = UIAC_NORMAL;
 //(userIacState above) is telnet-transport-specific and stays separate; this part is
 //the generic line-edit state now shared with KeyboardSerial.ino via LineEditState.
 static LineEditState telnetLineState;
+static bool telnetServerStarted = false;
+
+bool startTelnetServer() {
+    if (telnetServerStarted) return true;
+    if (!wifiStationIsReady()) return false;
+
+    telnetServer.begin();
+    telnetServer.setNoDelay(true);
+    telnetServerStarted = true;
+    return true;
+}  // Binds port 23 only after Wi-Fi has created lwIP's TCP/IP mailbox.
+
+void stopTelnetServer() {
+    if (!telnetServerStarted) return;
+
+    telnetClient.stop();
+    telnetServer.stop();
+    telnetServerStarted = false;
+    ledSetTelnetConnected(false);
+}  // Releases the listener before Wi-Fi is stopped for light sleep.
 
 void resetTelnetInputState() {
     userIacState = UIAC_NORMAL;
@@ -286,6 +306,8 @@ void beginShellSession() {
 }
 
 void acceptTelnetClient() {
+    if (!telnetServerStarted) return;
+
     WiFiClient newClient = telnetServer.accept();
     if (!newClient) {
         return;

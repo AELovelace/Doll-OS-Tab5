@@ -1,5 +1,6 @@
 #include "GameBoyHost.h"
 
+#include "../BoardVariant.h"
 #include "AudioOut.h"
 #include "esp_heap_caps.h"
 
@@ -25,6 +26,19 @@ constexpr uint32_t kSaveMinIntervalMs = 30000;
 bool GameBoyHost::begin() {
   if (ready_) return true;
   const size_t framePixels = kWidth * kHeight;
+#if defined(DOLL_BOARD_TAB5)
+  //The DSI controller continuously reads its own framebuffer from PSRAM. Keep
+  //gnuboy's small, write-heavy source frame internal so LCD scanline rendering
+  //cannot contend with that scanout before Gameboy.ino stages the finished image.
+  frame_ = static_cast<uint16_t*>(heap_caps_calloc(
+      framePixels, sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  bool frameInPsram = false;
+  if (!frame_) {
+    frame_ = static_cast<uint16_t*>(heap_caps_calloc(
+        framePixels, sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    frameInPsram = frame_ != nullptr;
+  }
+#else
   frame_ = static_cast<uint16_t*>(heap_caps_calloc(
       framePixels, sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   const bool frameInPsram = frame_ != nullptr;
@@ -32,6 +46,7 @@ bool GameBoyHost::begin() {
     frame_ = static_cast<uint16_t*>(heap_caps_calloc(
         framePixels, sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   }
+#endif
   soundScratch_ = static_cast<int16_t*>(heap_caps_malloc(
       kSoundScratchSamples * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   if (!frame_ || !soundScratch_) {
@@ -44,7 +59,7 @@ bool GameBoyHost::begin() {
   }
   Serial.printf("[psram] gbFrame: %u bytes -> %s\n",
                 (unsigned)(framePixels * sizeof(uint16_t)),
-                frameInPsram ? "PSRAM" : "INTERNAL RAM (PSRAM unavailable)");
+                frameInPsram ? "PSRAM" : "INTERNAL RAM");
   // The callback is always registered, even if the codec never came up: gnuboy
   // is init'd once for the life of the firmware, so binding on AudioOut's state
   // here would freeze the first launch's answer in forever. AudioOut::onSamples

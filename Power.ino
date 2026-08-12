@@ -61,10 +61,12 @@ void enterSystemLightSleep() {
 
     Serial.println("[sleep] slave requested paired low-power mode");
     Serial.flush();
-    telnetClient.stop();                           // Close the socket before intentionally stopping Wi-Fi.
-    ledSetTelnetConnected(false);
-    WiFi.disconnect(false, false);                 // Preserve saved credentials while releasing the radio.
-    WiFi.mode(WIFI_OFF);                           // Manual light sleep cannot retain the Wi-Fi association.
+    const bool resumeWifi = wifiStationIsReady(); // Remember whether this boot ever initialized the network stack.
+    stopTelnetServer();                            // Close the listener before intentionally stopping Wi-Fi.
+    if (resumeWifi) {
+        WiFi.disconnect(false, false);             // Preserve saved credentials while releasing the radio.
+        WiFi.mode(WIFI_OFF);                       // Manual light sleep cannot retain the Wi-Fi association.
+    }
     ledSetWifiConnected(false);
 
     ledPrepareForSleep();                          // Darken the rear RGB status indicator.
@@ -75,11 +77,12 @@ void enterSystemLightSleep() {
     gpio_wakeup_disable(wakePin);                  // Stop ordinary keyboard traffic becoming a wake source.
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
     displaySetSleeping(false);                     // Restore the preserved frame before network reconnect work.
-    WiFi.mode(WIFI_STA);                           // Restart STA without blocking the newly restored screen.
-    WiFi.setAutoReconnect(false);
-    WiFi.reconnect();                              // Existing maintenance logic handles a slow association.
-    telnetServer.begin();                          // Rebind the listener after the network interface restart.
-    telnetServer.setNoDelay(true);
+    if (resumeWifi) {
+        WiFi.mode(WIFI_STA);                       // Restart STA without blocking the newly restored screen.
+        WiFi.setAutoReconnect(false);
+        WiFi.reconnect();                          // Existing maintenance logic handles a slow association.
+        startTelnetServer();                       // Rebind only after lwIP is live again.
+    }
     ledService();                                  // Restore the logical rear-LED indication immediately.
 
     Serial.printf("[sleep] main unit awake (cause=%d, result=%d)\n",

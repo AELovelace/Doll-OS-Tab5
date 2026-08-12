@@ -97,22 +97,9 @@ void setup() {
     reserveHotStrings();
     recordHeapCheckpoint("after reserve");
 
-    //STA only. DOLL-OS used to run an always-on softAP alongside STA as a fallback
-    //telnet path, but AP+STA on the S3's single radio cost too much streaming
-    //throughput (Radio.ino audio starved once its buffer drained) and the AP
-    //went unused -- the panel + official keyboard cover the no-network case.
-    Serial.println("[boot] WiFi STA...");
-    Serial.flush();
-    WiFi.setPins(WIFI_SDIO_CLK_PIN, WIFI_SDIO_CMD_PIN,
-                 WIFI_SDIO_D0_PIN, WIFI_SDIO_D1_PIN,
-                 WIFI_SDIO_D2_PIN, WIFI_SDIO_D3_PIN,
-                 WIFI_SDIO_RESET_PIN);
-    WiFi.mode(WIFI_STA);
-    connectToInternet();
-    recordHeapCheckpoint("after wifi");
-    Serial.println("[boot] WiFi OK");
-    Serial.flush();
-
+    //Mount settings before Wi-Fi so connectToInternet() can actually read wifi.cfg.
+    //The old order always queried an unmounted LittleFS volume, silently discarded
+    //saved credentials, and repeatedly powered the C6 radio for YOUR_WIFI_SSID.
     Serial.println("[boot] initStorage()...");
     Serial.flush();
     initStorage();
@@ -121,21 +108,27 @@ void setup() {
     Serial.println("[boot] storage OK");
     Serial.flush();
 
+    //STA only. WiFiManager initializes ESP-Hosted lazily after it has found real
+    //credentials; placeholder defaults now leave the power-hungry radio switched off.
+    Serial.println("[boot] WiFi STA...");
+    Serial.flush();
+    connectToInternet();
+    recordHeapCheckpoint("after wifi");
+    Serial.println("[boot] WiFi ready");
+    Serial.flush();
+
     Serial.println("[boot] init Tab5 Keyboard...");
     Serial.flush();
     initKeyboardSerial();
 
     slaveLinkBegin();                              // Compatibility no-op on the Tab5-only fork.
 
-    telnetServer.begin();
-    telnetServer.setNoDelay(true);
-
     Serial.println();
-    Serial.println("Telnet server started.");
-    if (wifiIsConnected() == 1) {
+    if (startTelnetServer() && wifiIsConnected() == 1) {
+        Serial.println("Telnet server started.");
         Serial.printf("  Station IP: %s\n", WiFi.localIP().toString().c_str());
     } else {
-        Serial.println("  (WiFi not connected yet -- telnet reachable once STA joins)");
+        Serial.println("Telnet dormant (starts after WiFi is initialized).");
     }
     Serial.println("Connect with: telnet <ip> 23");
 
