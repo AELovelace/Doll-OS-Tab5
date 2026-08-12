@@ -53,7 +53,9 @@ static GameBoyHost gbHost;
 static const int GB_W = GameBoyHost::kWidth;    // 160
 static const int GB_H = GameBoyHost::kHeight;   // 144
 #if defined(DOLL_BOARD_TAB5)
-static const int GB_TAB5_STAGE_ROWS = 4;        // bounds each DSI framebuffer writeback
+// Match the shell's safe per-transaction byte range while avoiding hundreds of
+// tiny cache-writeback transactions. 480 x 24 x 2 = 23 KB per fit-mode strip.
+static const int GB_TAB5_STAGE_ROWS = 24;
 #endif
 
 static uint16_t* gbScaleBuf = nullptr;   // scaled RGB565 frame, or a Tab5 row strip
@@ -68,13 +70,71 @@ static bool gbFitMode = true;
 // is drawn. It only binds in fit mode, where a 38ms push plus ~3ms of emulation
 // needs roughly one frame in four to leave any slack at all; at 2 the loop can
 // just barely hold realtime, which is no margin for a heavier scene.
-#ifdef FNK0104N_3P5_320x480_ST77922
+#if defined(DOLL_BOARD_TAB5)
+static const int kMaxFrameSkip = 5;
+#elif defined(FNK0104N_3P5_320x480_ST77922)
 static const int kMaxFrameSkip = 5;
 #else
 static const int kMaxFrameSkip = 3;
 #endif
 static const int kGbRomMenuMax = 128;
 static const char* kGbRomDir = "/sd/gb";
+
+#if defined(DOLL_BOARD_TAB5)
+// Compact shell launcher. It lives entirely in the 32-pixel status bar, so it
+// never steals terminal space. Its y range deliberately ends before the ROM
+// picker's top-right MENU control begins at y=30.
+static constexpr int GB_LAUNCH_X = DISPLAY_WIDTH - 72;
+static constexpr int GB_LAUNCH_Y = 3;
+static constexpr int GB_LAUNCH_W = 64;
+static constexpr int GB_LAUNCH_H = 25;
+
+int gbMainTouchLauncherLeft() {
+    return GB_LAUNCH_X;
+}
+
+void gbDrawMainTouchLauncher() {
+    frameSprite.fillRoundRect(GB_LAUNCH_X, GB_LAUNCH_Y,
+                              GB_LAUNCH_W, GB_LAUNCH_H, 7, 0x2104);
+    frameSprite.drawRoundRect(GB_LAUNCH_X, GB_LAUNCH_Y,
+                              GB_LAUNCH_W, GB_LAUNCH_H, 7, TFT_CYAN);
+    frameSprite.setTextDatum(MC_DATUM);
+    frameSprite.setTextColor(TFT_WHITE);
+    frameSprite.drawString("GB", GB_LAUNCH_X + GB_LAUNCH_W / 2,
+                          GB_LAUNCH_Y + GB_LAUNCH_H / 2);
+    frameSprite.setTextDatum(TL_DATUM);
+}
+
+void gbServiceMainTouch() {
+    static bool launcherWasDown = false;
+    M5.update();
+
+    bool launcherDown = false;
+    if (!dappCanvasActive) {
+        const uint8_t count = M5.Touch.getCount();
+        for (uint8_t i = 0; i < count; i++) {
+            const auto& touch = M5.Touch.getDetail(i);
+            if (!touch.isPressed()) continue;
+            if (touch.x >= GB_LAUNCH_X && touch.x < GB_LAUNCH_X + GB_LAUNCH_W &&
+                touch.y >= GB_LAUNCH_Y && touch.y < GB_LAUNCH_Y + GB_LAUNCH_H) {
+                launcherDown = true;
+                break;
+            }
+        }
+    }
+
+    const bool launch = launcherDown && !launcherWasDown;
+    launcherWasDown = launcherDown;
+    if (launch) {
+        String command = "gb";
+        commandProcessor(command);  // same history, picker, and cleanup path as typed `gb`
+    }
+}
+#else
+int gbMainTouchLauncherLeft() { return DISPLAY_WIDTH; }
+void gbDrawMainTouchLauncher() {}
+void gbServiceMainTouch() {}
+#endif
 
 static void gbFreeScale() {
     if (gbScaleBuf) { heap_caps_free(gbScaleBuf); gbScaleBuf = nullptr; }
@@ -96,7 +156,7 @@ static bool gbSetupScale() {
     gbOutW = GB_W * scale;
     gbOutH = GB_H * scale;
     gbOutX = (DISPLAY_WIDTH - gbOutW) / 2;
-    gbOutY = (DISPLAY_HEIGHT - gbOutH) / 2;
+    gbOutY = 0;  // top-align the Game Boy picture; controls use the space below
 
     if (!gbFitMode) {
         return true;
@@ -181,16 +241,22 @@ static void gbBlitFrame() {
     const uint16_t* frame = gbHost.frame();
     if (!frame) return;
 #if defined(DOLL_BOARD_TAB5)
-    //The ROM picker and settings menu already prove the frameSprite -> DSI path
-    //works on this panel. Compose game pixels into that same canvas instead of
-    //using partial tft.pushImage writes, which left only the preceding black clear.
-    const bool oldSwapBytes = frameSprite.getSwapBytes();
+    // Compose into frameSprite for menu/cleanup correctness, but send each
+    // completed internal-RAM strip straight to the DSI framebuffer. The prior
+    // path re-read the whole rectangle from PSRAM and issued 108 four-row
+    // transactions twice, which hardware timing measured at ~66.9ms per blit.
+    const bool oldFrameSwap = frameSprite.getSwapBytes();
+    const bool oldPanelSwap = tft.getSwapBytes();
     frameSprite.setSwapBytes(true);
+    tft.setSwapBytes(true);
     if (!gbFitMode) {
         frameSprite.pushImage(gbOutX, gbOutY, GB_W, GB_H,
                               const_cast<uint16_t*>(frame));
-        frameSprite.setSwapBytes(oldSwapBytes);
-        pushDisplayFrame();
+        tft.pushImage(gbOutX, gbOutY, GB_W, GB_H,
+                      const_cast<uint16_t*>(frame));
+        frameSprite.setSwapBytes(oldFrameSwap);
+        tft.setSwapBytes(oldPanelSwap);
+        displayInvalidateShadow();
         return;
     }
 
@@ -207,10 +273,12 @@ static void gbBlitFrame() {
         }
         frameSprite.pushImage(gbOutX, gbOutY + firstRow, gbOutW, rows,
                               gbScaleBuf);
+        tft.pushImage(gbOutX, gbOutY + firstRow, gbOutW, rows, gbScaleBuf);
         firstRow += rows;
     }
-    frameSprite.setSwapBytes(oldSwapBytes);
-    pushDisplayFrame();
+    frameSprite.setSwapBytes(oldFrameSwap);
+    tft.setSwapBytes(oldPanelSwap);
+    displayInvalidateShadow();
 #elif defined(FNK0104N_3P5_320x480_ST77922)
     // Render directly in native portrait order. Each destination row is
     // contiguous in PSRAM and can be handed straight to Freenove's rotation-0
@@ -283,10 +351,92 @@ static void gbLogFrameDiagnostic(uint32_t frameNumber) {
                   (unsigned long)nonBlack, (unsigned)(GB_W * GB_H));
 }  // Proves gnuboy rendered pixels without using unsupported DSI panel readback.
 
+#if defined(DOLL_BOARD_TAB5)
+// Touch controls live in the wide margins around the centered 3x Game Boy
+// picture. They deliberately remain outside the 480x432 game image, so no UI
+// pixels obscure the game and the same layout can stay visible in the menu.
+static constexpr int GB_TOUCH_DPAD_X = 180;
+static constexpr int GB_TOUCH_DPAD_Y = 510;
+static constexpr int GB_TOUCH_DPAD_HALF = 175;
+static constexpr int GB_TOUCH_DPAD_DEAD = 44;
+static constexpr int GB_TOUCH_A_X = 1160;
+static constexpr int GB_TOUCH_A_Y = 430;
+static constexpr int GB_TOUCH_B_X = 1010;
+static constexpr int GB_TOUCH_B_Y = 550;
+static constexpr int GB_TOUCH_FACE_R = 70;
+static constexpr int GB_TOUCH_DOT_R = 14;
+static constexpr int GB_TOUCH_DOT_BOX = GB_TOUCH_DOT_R * 2 + 1;
+
+struct GbTouchPoint {
+    int16_t x;
+    int16_t y;
+};
+
+static GbTouchPoint gbTouchActivePoints[5];
+static uint8_t gbTouchActivePointCount = 0;
+static GbTouchPoint gbTouchDrawnPoints[5];
+static uint8_t gbTouchDrawnPointCount = 0;
+static bool gbTouchDotsDirty = false;
+static uint16_t gbTouchDotRestore[GB_TOUCH_DOT_BOX * GB_TOUCH_DOT_BOX];
+
+static void gbDrawTouchControls() {
+    const uint16_t padFill = 0x2104;  // very dark grey; visible without glare
+    const uint16_t padEdge = TFT_CYAN;
+    const int arm = 120;
+    const int thick = 110;
+
+    frameSprite.fillRoundRect(GB_TOUCH_DPAD_X - thick / 2,
+                              GB_TOUCH_DPAD_Y - arm - thick / 2,
+                              thick, arm + thick / 2, 12, padFill);
+    frameSprite.fillRoundRect(GB_TOUCH_DPAD_X - thick / 2,
+                              GB_TOUCH_DPAD_Y,
+                              thick, arm + thick / 2, 12, padFill);
+    frameSprite.fillRoundRect(GB_TOUCH_DPAD_X - arm - thick / 2,
+                              GB_TOUCH_DPAD_Y - thick / 2,
+                              arm + thick / 2, thick, 12, padFill);
+    frameSprite.fillRoundRect(GB_TOUCH_DPAD_X,
+                              GB_TOUCH_DPAD_Y - thick / 2,
+                              arm + thick / 2, thick, 12, padFill);
+    frameSprite.drawRoundRect(GB_TOUCH_DPAD_X - thick / 2,
+                              GB_TOUCH_DPAD_Y - arm - thick / 2,
+                              thick, arm * 2 + thick, 12, padEdge);
+    frameSprite.drawRoundRect(GB_TOUCH_DPAD_X - arm - thick / 2,
+                              GB_TOUCH_DPAD_Y - thick / 2,
+                              arm * 2 + thick, thick, 12, padEdge);
+
+    frameSprite.fillCircle(GB_TOUCH_A_X, GB_TOUCH_A_Y, GB_TOUCH_FACE_R, 0x4008);
+    frameSprite.drawCircle(GB_TOUCH_A_X, GB_TOUCH_A_Y, GB_TOUCH_FACE_R, TFT_PINK);
+    frameSprite.fillCircle(GB_TOUCH_B_X, GB_TOUCH_B_Y, GB_TOUCH_FACE_R, 0x4008);
+    frameSprite.drawCircle(GB_TOUCH_B_X, GB_TOUCH_B_Y, GB_TOUCH_FACE_R, TFT_PINK);
+
+    frameSprite.fillRoundRect(485, 650, 135, 48, 18, padFill);
+    frameSprite.drawRoundRect(485, 650, 135, 48, 18, padEdge);
+    frameSprite.fillRoundRect(660, 650, 135, 48, 18, padFill);
+    frameSprite.drawRoundRect(660, 650, 135, 48, 18, padEdge);
+    frameSprite.fillRoundRect(1090, 30, 150, 52, 18, padFill);
+    frameSprite.drawRoundRect(1090, 30, 150, 52, 18, TFT_YELLOW);
+
+    frameSprite.setTextDatum(MC_DATUM);
+    frameSprite.setTextColor(TFT_WHITE);
+    frameSprite.drawString("A", GB_TOUCH_A_X, GB_TOUCH_A_Y);
+    frameSprite.drawString("B", GB_TOUCH_B_X, GB_TOUCH_B_Y);
+    frameSprite.drawString("SELECT", 552, 674);
+    frameSprite.drawString("START", 727, 674);
+    frameSprite.drawString("MENU", 1165, 56);
+    frameSprite.setTextDatum(TL_DATUM);
+}
+#else
+static void gbDrawTouchControls() {}
+#endif
+
+static void gbRenderTouchDots(bool force = false);
+
 static void gbClearPanel() {
     frameSprite.fillSprite(TFT_BLACK);
+    gbDrawTouchControls();
     displayInvalidateShadow();
-}  // Prepares black letterboxing without erasing the working screen before frame one.
+    pushDisplayFrame();
+}  // Commits black letterboxing + controls once; game frames update only their rectangle.
 
 // One-shot requests the slave can raise alongside the held-button bitmap.
 static const uint8_t GB_EVT_QUIT = 0x01;   // Ctrl+T
@@ -317,17 +467,155 @@ static uint8_t gbPumpInput(uint8_t& buttons) {
     return events;
 }
 
+// Samples every active Tab5 contact so combinations such as diagonal+A work.
+// Coordinates are already rotated into the display's 1280x720 space by
+// M5Unified. MENU is edge-triggered; ordinary Game Boy buttons remain held for
+// as long as their contact remains inside the corresponding control.
+static uint8_t gbPumpTouch(uint8_t& buttons) {
+#if !defined(DOLL_BOARD_TAB5)
+    buttons = 0;
+    return 0;
+#else
+    M5.update();
+    uint8_t next = 0;
+    bool menuDown = false;
+    GbTouchPoint nextPoints[5];
+    uint8_t nextPointCount = 0;
+    const uint8_t count = M5.Touch.getCount();
+    for (uint8_t i = 0; i < count; i++) {
+        const auto& touch = M5.Touch.getDetail(i);
+        if (!touch.isPressed()) continue;
+        const int x = touch.x;
+        const int y = touch.y;
+        if (nextPointCount < 5) {
+            nextPoints[nextPointCount].x = x;
+            nextPoints[nextPointCount].y = y;
+            nextPointCount++;
+        }
+
+        if (x >= 1090 && x < 1240 && y >= 30 && y < 82) {
+            menuDown = true;
+            continue;
+        }
+
+        const int dx = x - GB_TOUCH_DPAD_X;
+        const int dy = y - GB_TOUCH_DPAD_Y;
+        if (abs(dx) <= GB_TOUCH_DPAD_HALF && abs(dy) <= GB_TOUCH_DPAD_HALF) {
+            if (dx < -GB_TOUCH_DPAD_DEAD) next |= GameBoyHost::kLeft;
+            if (dx >  GB_TOUCH_DPAD_DEAD) next |= GameBoyHost::kRight;
+            if (dy < -GB_TOUCH_DPAD_DEAD) next |= GameBoyHost::kUp;
+            if (dy >  GB_TOUCH_DPAD_DEAD) next |= GameBoyHost::kDown;
+        }
+
+        const int dax = x - GB_TOUCH_A_X;
+        const int day = y - GB_TOUCH_A_Y;
+        if (dax * dax + day * day <= GB_TOUCH_FACE_R * GB_TOUCH_FACE_R)
+            next |= GameBoyHost::kA;
+        const int dbx = x - GB_TOUCH_B_X;
+        const int dby = y - GB_TOUCH_B_Y;
+        if (dbx * dbx + dby * dby <= GB_TOUCH_FACE_R * GB_TOUCH_FACE_R)
+            next |= GameBoyHost::kB;
+
+        if (x >= 485 && x < 620 && y >= 650 && y < 698)
+            next |= GameBoyHost::kSelect;
+        if (x >= 660 && x < 795 && y >= 650 && y < 698)
+            next |= GameBoyHost::kStart;
+    }
+
+    static bool menuWasDown = false;
+    const uint8_t events = (menuDown && !menuWasDown) ? GB_EVT_MENU : 0;
+    menuWasDown = menuDown;
+    bool contactsChanged = nextPointCount != gbTouchActivePointCount;
+    for (uint8_t i = 0; !contactsChanged && i < nextPointCount; i++) {
+        contactsChanged = nextPoints[i].x != gbTouchActivePoints[i].x ||
+                          nextPoints[i].y != gbTouchActivePoints[i].y;
+    }
+    if (contactsChanged) {
+        memcpy(gbTouchActivePoints, nextPoints,
+               sizeof(GbTouchPoint) * nextPointCount);
+        gbTouchActivePointCount = nextPointCount;
+        gbTouchDotsDirty = true;
+    }
+    buttons = next;
+    return events;
+#endif
+}
+
+// Contact dots are a panel-only overlay: frameSprite remains the clean source
+// underneath them. Before moving/removing a dot, restore its tiny rectangle
+// from that source, then draw the latest contacts. Keeping the shadow clean
+// avoids turning each touch movement into a full-screen DSI refresh.
+static void gbRenderTouchDots(bool force) {
+#if !defined(DOLL_BOARD_TAB5)
+    (void)force;
+#else
+    if (!force && !gbTouchDotsDirty) return;
+    uint16_t* frame = (uint16_t*)frameSprite.getBuffer();
+    if (!frame) return;
+
+    const bool oldSwap = tft.getSwapBytes();
+    tft.setSwapBytes(false);  // frameSprite pixels are already panel-native RGB565
+    for (uint8_t i = 0; i < gbTouchDrawnPointCount; i++) {
+        const int x0 = max(0, (int)gbTouchDrawnPoints[i].x - GB_TOUCH_DOT_R);
+        const int y0 = max(0, (int)gbTouchDrawnPoints[i].y - GB_TOUCH_DOT_R);
+        const int x1 = min(DISPLAY_WIDTH, (int)gbTouchDrawnPoints[i].x + GB_TOUCH_DOT_R + 1);
+        const int y1 = min(DISPLAY_HEIGHT, (int)gbTouchDrawnPoints[i].y + GB_TOUCH_DOT_R + 1);
+        const int width = x1 - x0;
+        const int height = y1 - y0;
+        if (width <= 0 || height <= 0) continue;
+        for (int row = 0; row < height; row++) {
+            memcpy(gbTouchDotRestore + row * width,
+                   frame + (size_t)(y0 + row) * DISPLAY_WIDTH + x0,
+                   (size_t)width * sizeof(uint16_t));
+        }
+        tft.pushImage(x0, y0, width, height, gbTouchDotRestore);
+    }
+    tft.setSwapBytes(oldSwap);
+
+    for (uint8_t i = 0; i < gbTouchActivePointCount; i++) {
+        const int x = gbTouchActivePoints[i].x;
+        const int y = gbTouchActivePoints[i].y;
+        tft.fillCircle(x, y, 9, TFT_WHITE);
+        tft.drawCircle(x, y, 12, TFT_CYAN);
+        tft.drawCircle(x, y, 13, TFT_CYAN);
+    }
+
+    memcpy(gbTouchDrawnPoints, gbTouchActivePoints,
+           sizeof(GbTouchPoint) * gbTouchActivePointCount);
+    gbTouchDrawnPointCount = gbTouchActivePointCount;
+    gbTouchDotsDirty = false;
+#endif
+}
+
 // Turns a DOLL-OS logical path (absolute or relative to cwd) into a stdio/VFS path
 // gnuboy's fopen can open. SD is mounted at "/sdcard" (Storage.ino), LittleFS at
 // "/littlefs". Returns "" if the path routes to SD but no card is mounted.
 static String gbVfsPath(const String& arg) {
+    Serial.printf("[GBDBG launch 01] resolve begin cwd='%s' arg='%s' sd_mounted=%u\n",
+                  cwd.c_str(), arg.c_str(), sdCardMounted ? 1u : 0u);
+    Serial.flush();
     String resolved = resolvePath(cwd, arg);
+    Serial.printf("[GBDBG launch 02] logical path resolved='%s'\n", resolved.c_str());
+    Serial.flush();
     RoutedPath r = routePath(resolved);
+    Serial.printf("[GBDBG launch 03] route is_sd=%u real_path='%s' fs=%p\n",
+                  r.isSd ? 1u : 0u, r.realPath.c_str(), static_cast<void*>(r.fs));
+    Serial.flush();
     if (r.isSd) {
-        if (!sdCardMounted) return "";
-        return "/sdcard" + r.realPath;
+        if (!sdCardMounted) {
+            Serial.println("[GBDBG launch 04] VFS mapping failed: SD is not mounted");
+            Serial.flush();
+            return "";
+        }
+        String vfs = "/sdcard" + r.realPath;
+        Serial.printf("[GBDBG launch 04] VFS path='%s'\n", vfs.c_str());
+        Serial.flush();
+        return vfs;
     }
-    return "/littlefs" + r.realPath;
+    String vfs = "/littlefs" + r.realPath;
+    Serial.printf("[GBDBG launch 04] VFS path='%s'\n", vfs.c_str());
+    Serial.flush();
+    return vfs;
 }
 
 // romVfs -> same directory/name with the extension swapped for `ext`. Used for
@@ -447,10 +735,18 @@ static String gbFitMenuText(String text, int maxWidth) {
 static void gbDrawRomMenu(String names[], int count, int selected, bool truncated) {
     const int rowH = 18;
     const int top = 28;
+#if defined(DOLL_BOARD_TAB5)
+    // Keep the list between the touch-control rails: the D-pad ends at x=363
+    // and B begins at x=940. Start/Select occupy the bottom center.
+    const int left = 365;
+    const int width = 550;
+    const int footY = 620;
+#else
     const int left = 14;
     const int width = DISPLAY_WIDTH - left * 2;
-    const int listTop = top + 28;
     const int footY = DISPLAY_HEIGHT - 30;
+#endif
+    const int listTop = top + 28;
     int visibleRows = (footY - listTop - 4) / rowH;
     if (visibleRows < 3) visibleRows = 3;
     if (visibleRows > count) visibleRows = count;
@@ -467,7 +763,7 @@ static void gbDrawRomMenu(String names[], int count, int selected, bool truncate
 
     frameSprite.setTextDatum(TR_DATUM);
     frameSprite.setTextColor(TFT_CYAN, TFT_BLACK);
-    frameSprite.drawString(String(selected + 1) + "/" + String(count), DISPLAY_WIDTH - left, top);
+    frameSprite.drawString(String(selected + 1) + "/" + String(count), left + width, top);
     frameSprite.setTextDatum(TL_DATUM);
 
     frameSprite.drawFastHLine(left, top + 14, width, TFT_PINK);
@@ -486,14 +782,16 @@ static void gbDrawRomMenu(String names[], int count, int selected, bool truncate
     if (first + visibleRows < count) frameSprite.drawString("v more", left, footY - 14);
 
     frameSprite.setTextColor(truncated ? TFT_YELLOW : TFT_DARKGREY, TFT_BLACK);
-    frameSprite.drawString(truncated ? "showing first 128 ROMs" : "W/S move  N/Enter ok  M/Esc cancel",
-                           left, footY);
+    frameSprite.drawString(truncated ? "showing first 128 ROMs" :
+                           "D-pad move/page  A/Start choose  B/Menu cancel", left, footY);
     if (truncated) {
         frameSprite.setTextColor(TFT_DARKGREY, TFT_BLACK);
-        frameSprite.drawString("W/S move  N/Enter ok  M/Esc cancel", left, footY + 12);
+        frameSprite.drawString("D-pad move/page  A/Start choose  B/Menu cancel", left, footY + 12);
     }
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
+    gbDrawTouchControls();
     pushDisplayFrame();
+    gbRenderTouchDots(true);
 }
 
 enum GbTelnetEscState : uint8_t {
@@ -586,7 +884,8 @@ static bool gbPickRom(String& romLogical) {
     gbResetTelnetMenuInput();
 
     uint8_t buttons = 0;
-    uint8_t prev = 0;
+    uint8_t touchButtons = 0;
+    uint8_t prevCombined = 0;
     int selected = 0;
     bool redraw = true;
 
@@ -598,6 +897,8 @@ static bool gbPickRom(String& romLogical) {
 
         uint8_t telnetPressed = 0;
         uint8_t events = gbPumpInput(buttons);
+        events |= gbPumpTouch(touchButtons);
+        gbRenderTouchDots();
         events |= gbPumpTelnetMenuInput(telnetPressed);
         if (events & (GB_EVT_QUIT | GB_EVT_MENU)) {
             slaveLinkSendLine("GAME 0");
@@ -605,8 +906,9 @@ static bool gbPickRom(String& romLogical) {
             return false;
         }
 
-        uint8_t pressed = (buttons & ~prev) | telnetPressed;
-        prev = buttons;
+        const uint8_t combined = buttons | touchButtons;
+        uint8_t pressed = (combined & ~prevCombined) | telnetPressed;
+        prevCombined = combined;
         if (pressed == 0) {
             delay(15);
             continue;
@@ -662,6 +964,9 @@ static void gbPrintUsage() {
     outLine("  M=B, Enter=Start, \\=Select, Ctrl+T=quit.", C_CYAN);
     outLine("  Xbox pad via slave: stick/d-pad, A=A, B=B, Menu=Start,", C_CYAN);
     outLine("  View=Select, LB=this menu, LB+RB=quit.", C_CYAN);
+#if defined(DOLL_BOARD_TAB5)
+    outLine("  Touch: D-pad left, A/B right, Select/Start below, Menu top-right.", C_CYAN);
+#endif
     outLine("  Esc opens the settings menu: display mode, volume, save/load", C_CYAN);
     outLine("  state, resume, quit. States sit next to the ROM as <name>.gbs.", C_CYAN);
     outLine("  Volume is shared with the radio ('radio vol <0-21>').", C_CYAN);
@@ -758,21 +1063,23 @@ static void gbDrawMenu(int selected, const String& note) {
         frameSprite.drawString(note, left, footY);
     }
     frameSprite.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    frameSprite.drawString("W/S move  A/D change  N ok  Esc back", left, footY + 12);
+    frameSprite.drawString("D-pad move/change  A ok  B/Menu back", left, footY + 12);
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
+    gbDrawTouchControls();
     pushDisplayFrame();
+    gbRenderTouchDots(true);
 }
 
 // Runs the menu until the player leaves it. Returns true if they chose to quit
 // the ROM. `buttons` is kept live throughout (the slave keeps sending DOWN/UP
 // while we're here), so the game doesn't inherit a stuck key on resume.
-static bool gbRunMenu(uint8_t& buttons) {
+static bool gbRunMenu(uint8_t& buttons, uint8_t& touchButtons) {
     int selected = 0;
     String note;
     // Seed the edge detector with what's already held, so the keypress that
     // opened the menu -- or a D-pad direction the player hadn't let go of --
     // doesn't immediately move the cursor.
-    uint8_t prev = buttons;
+    uint8_t prev = buttons | touchButtons;
     bool redraw = true;
 
     for (;;) {
@@ -781,12 +1088,15 @@ static bool gbRunMenu(uint8_t& buttons) {
             redraw = false;
         }
 
-        const uint8_t events = gbPumpInput(buttons);
+        uint8_t events = gbPumpInput(buttons);
+        events |= gbPumpTouch(touchButtons);
+        gbRenderTouchDots();
         if (events & GB_EVT_QUIT) return true;
         if (events & GB_EVT_MENU) return false;   // Escape closes what Escape opened
 
-        const uint8_t pressed = buttons & ~prev;
-        prev = buttons;
+        const uint8_t combined = buttons | touchButtons;
+        const uint8_t pressed = combined & ~prev;
+        prev = combined;
         if (pressed == 0) {
             delay(15);   // nothing to do; yield so IDLE runs and feeds the WDT
             continue;
@@ -813,7 +1123,7 @@ static bool gbRunMenu(uint8_t& buttons) {
                 // Left/right and A all just flip it -- there are only two modes.
                 gbSetDisplayMode(!gbFitMode);
 #if defined(DOLL_BOARD_TAB5)
-                note = gbFitMode ? "fit: centered 3x, DSI-safe"
+                note = gbFitMode ? "fit: top-aligned 3x, DSI-safe"
                                  : "1x: native 160x144";
 #else
                 note = gbFitMode ? "fit: fills the panel, most frames skipped"
@@ -860,6 +1170,8 @@ static bool gbRunMenu(uint8_t& buttons) {
 }
 
 void handleGbCommand(const String parts[], int partCount) {
+    Serial.printf("[GBDBG launch 00] command enter argc=%d\n", partCount);
+    Serial.flush();
     String romLogical;
     if (partCount >= 2 && gbIsHelpArg(parts[1])) {
         gbPrintUsage();
@@ -879,23 +1191,41 @@ void handleGbCommand(const String parts[], int partCount) {
         outLine("gb: SD not mounted (insert card and reboot)", C_RED);
         return;
     }
+    const String saveVfs = gbSavePath(romVfs);
+    Serial.printf("[GBDBG launch 05] selected logical='%s' vfs='%s' save='%s' mode=%s\n",
+                  romLogical.c_str(), romVfs.c_str(), saveVfs.c_str(),
+                  gbFitMode ? "fit" : "1x");
+    Serial.printf("[GBDBG launch 06] memory before host heap=%u internal=%u psram=%u\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    Serial.flush();
     ledPulseStorageRead(romLogical.startsWith("/sd/"));
     Serial.printf("[gb] launch path=%s mode=%s\n", romVfs.c_str(),
                   gbFitMode ? "fit" : "1x");
     Serial.flush();
 
+    Serial.println("[GBDBG launch 07] host begin call");
+    Serial.flush();
     if (!gbHost.begin()) {
         outLine("gb: " + gbHost.status(), C_RED);
         return;
     }
-    Serial.println("[gb] core initialized");
+    Serial.println("[GBDBG launch 08] host begin complete");
     Serial.flush();
-    if (!gbHost.load(romVfs, gbSavePath(romVfs))) {
-        outLine("gb: " + gbHost.status(), C_RED);
-        outLine("gb: check the path -- " + romVfs, C_YELLOW);
+    Serial.println("[GBDBG launch 09] host ROM load call");
+    Serial.flush();
+    if (!gbHost.load(romVfs, saveVfs)) {
+        const String loadStatus = gbHost.status();
+        outLine("gb: " + loadStatus, C_RED);
+        if (loadStatus.indexOf("integrity check failed") >= 0) {
+            outLine("gb: replace this ROM with a verified dump", C_YELLOW);
+        } else {
+            outLine("gb: check the path -- " + romVfs, C_YELLOW);
+        }
         return;
     }
-    Serial.println("[gb] ROM loaded and reset");
+    Serial.println("[GBDBG launch 10] host ROM load/reset/SRAM complete");
     Serial.flush();
 
     if (!gbSetupScale()) {
@@ -917,13 +1247,6 @@ void handleGbCommand(const String parts[], int partCount) {
     // are advisory: a game with no
     // sound still beats no game.
     bool audioUp = false;
-#if defined(DOLL_BOARD_TAB5)
-    //Keep the first proven video path independent of the codec and its shared
-    //PI4IO expander. USB host power disappeared during the failing launch, and
-    //a silent running game is recoverable while a dropped panel/input path is not.
-    Serial.println("[gb] Tab5 safe-video mode: audio deferred");
-    Serial.flush();
-#else
     Serial.println("[gb] releasing shared audio");
     Serial.flush();
     if (radioReleaseAudio()) {
@@ -931,7 +1254,6 @@ void handleGbCommand(const String parts[], int partCount) {
         Serial.flush();
         audioUp = AudioOut::begin();
     }
-#endif
     Serial.printf("[gb] audio setup complete: %s\n", audioUp ? "ready" : "silent");
     Serial.flush();
     if (!audioUp) {
@@ -951,16 +1273,21 @@ void handleGbCommand(const String parts[], int partCount) {
     Serial.flush();
 
     uint8_t buttons = 0;
+    uint8_t touchButtons = 0;
     const uint32_t frameUs = 16743;   // ~59.7 Hz, true GB frame period
     uint32_t nextFrame = micros() + frameUs;   // deadline for the frame about to run
     uint32_t framesRun = 0, framesDrawn = 0;
+    uint32_t perfStartedUs = micros();
+    uint32_t perfRunUs = 0, perfBlitUs = 0;
+    uint16_t perfFrames = 0, perfDrawn = 0;
     // Guarantee that the first emulated frame is rendered even if launch-time
     // housekeeping happens to put the deadline slightly in the past.
     int skipRun = kMaxFrameSkip;
     const uint32_t startedMs = millis();
 
     for (;;) {
-        const uint8_t events = gbPumpInput(buttons);
+        uint8_t events = gbPumpInput(buttons);
+        events |= gbPumpTouch(touchButtons);
         if (events & GB_EVT_QUIT) break;
         if (events & GB_EVT_MENU) {
             // Modal: emulation is paused for the duration. Audio goes quiet on
@@ -968,7 +1295,7 @@ void handleGbCommand(const String parts[], int partCount) {
             // Game frames bypass frameSprite, so force the menu's first push to
             // replace every game pixel rather than trusting the shell shadow.
             displayInvalidateShadow();
-            if (gbRunMenu(buttons)) break;
+            if (gbRunMenu(buttons, touchButtons)) break;
             gbClearPanel();                   // clear the menu and any old letterbox
             nextFrame = micros() + frameUs;   // menu time isn't the emulator falling behind
             skipRun = kMaxFrameSkip;          // and draw the frame after it, whatever the clock says
@@ -989,37 +1316,49 @@ void handleGbCommand(const String parts[], int partCount) {
         const bool late = (int32_t)(micros() - nextFrame) > 0;
         const bool draw = !late || skipRun >= kMaxFrameSkip;
 
-        gbHost.setButtons(buttons);
-        if (framesRun == 0) {
-            Serial.printf("[gb] first frame run begin: draw=%u\n", draw ? 1u : 0u);
-            Serial.flush();
-        }
+        gbHost.setButtons(buttons | touchButtons);
+        uint32_t perfMarkUs = micros();
         gbHost.runFrame(draw);
-        if (framesRun == 0) {
-            Serial.println("[gb] first frame run complete");
-            Serial.flush();
-        }
+        perfRunUs += micros() - perfMarkUs;
         if (draw) {
-            if (framesDrawn == 0) {
-                Serial.println("[gb] first frame blit begin");
-                Serial.flush();
-            }
+            perfMarkUs = micros();
             gbBlitFrame();
-            if (framesDrawn == 0) {
-                Serial.println("[gb] first frame blit complete");
-                Serial.flush();
-            }
+            perfBlitUs += micros() - perfMarkUs;
             framesDrawn++;
-            if (framesDrawn == 1 || (framesDrawn % 120) == 0) {
-                gbLogFrameDiagnostic(framesRun + 1);
-            }
+            perfDrawn++;
             skipRun = 0;
         } else {
             skipRun++;
         }
+        gbRenderTouchDots(draw);
         gbHost.tickSave();
         ledService();
         framesRun++;
+        perfFrames++;
+
+        // A five-second rolling report is cheap enough to leave enabled and
+        // gives us real hardware timing if either emulation or DSI blitting is
+        // still the limiting side after removing the opcode tracer.
+        if (perfFrames >= 300) {
+            const uint32_t elapsedUs = micros() - perfStartedUs;
+            const uint32_t emuFps10 = elapsedUs
+                ? (uint32_t)(((uint64_t)perfFrames * 10000000ULL) / elapsedUs) : 0;
+            const uint32_t drawFps10 = elapsedUs
+                ? (uint32_t)(((uint64_t)perfDrawn * 10000000ULL) / elapsedUs) : 0;
+            uint32_t audioPushed = 0, audioDropped = 0, audioGaps = 0;
+            AudioOut::stats(audioPushed, audioDropped, audioGaps);
+            Serial.printf("[gb perf] emu=%lu.%lu drawn=%lu.%lu run_avg=%luus blit_avg=%luus audio=%s pushed=%lu dropped=%lu gaps=%lu\n",
+                          (unsigned long)(emuFps10 / 10), (unsigned long)(emuFps10 % 10),
+                          (unsigned long)(drawFps10 / 10), (unsigned long)(drawFps10 % 10),
+                          (unsigned long)(perfRunUs / perfFrames),
+                          (unsigned long)(perfDrawn ? perfBlitUs / perfDrawn : 0),
+                          audioUp ? "on" : "off", (unsigned long)audioPushed,
+                          (unsigned long)audioDropped, (unsigned long)audioGaps);
+            Serial.flush();
+            perfStartedUs = micros();
+            perfRunUs = perfBlitUs = 0;
+            perfFrames = perfDrawn = 0;
+        }
 
         // Pace to ~59.7 fps when we're ahead; if we've fallen more than a few
         // frames behind, give up on that time rather than sprinting after it

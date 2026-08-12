@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include "gnuboy.h"
 #include "hw.h"
 #include "cpu.h"
@@ -45,9 +46,14 @@ static inline void *gb_big_calloc(size_t n, size_t sz) {
 }
 #define GB_PSRAM_MALLOC(sz)    gb_big_malloc(sz)
 #define GB_PSRAM_CALLOC(n, sz) gb_big_calloc(n, sz)
+#define GBDBG(stage, fmt, ...) do { \
+	printf("[GBDBG core %s] " fmt "\n", stage, ##__VA_ARGS__); \
+	fflush(stdout); \
+} while (0)
 // Bank-paging state for the no-PSRAM path (see gnuboy_load_bank).
 static int gb_live_bank = 1;   // switchable bank currently mapped by the MBC
 static int gb_preloading = 0;  // inside the boot-time preload loop
+static unsigned gb_debug_run_count = 0;  // bounded early-boot frame tracing
 // ---------------------------------------------------------------------------
 
 #define hw GB
@@ -57,11 +63,130 @@ static int gb_preloading = 0;  // inside the boot-time preload loop
 
 #define BANK_SIZE 0x4000
 
+static void gb_debug_dump_rom_bytes(const char *source, const byte *data,
+									size_t base, size_t count)
+{
+	printf("[GBDBG ROMCHK] %s %05X-%05X:", source, (unsigned)base,
+		(unsigned)(base + count - 1));
+	for (size_t i = 0; i < count; ++i)
+		printf(" %02X", data[i]);
+	printf("\n");
+	fflush(stdout);
+}
+
+// Verify the bytes the CPU will execute against a completely fresh SD-card
+// read. This deliberately runs before reset: it distinguishes a bad ROM file
+// from corruption while copying/storing banks in PSRAM, instead of inferring
+// either one from the CPU's later symptoms.
+static bool gb_debug_verify_preloaded_rom(long probed_file_size)
+{
+	const size_t expected_size = (size_t)cart.romsize * BANK_SIZE;
+	byte file_bytes[1024];
+	uint16_t file_sum = 0;
+	uint16_t loaded_sum = 0;
+	uint32_t file_fnv = 2166136261u;
+	uint32_t loaded_fnv = 2166136261u;
+	size_t compared = 0;
+	size_t first_mismatch = (size_t)-1;
+	size_t first_missing_bank = (size_t)-1;
+	byte first_mismatch_file = 0;
+	byte first_mismatch_loaded = 0;
+	bool read_failed = false;
+
+	clearerr(cart.romFile);
+	errno = 0;
+	int seek_result = fseek(cart.romFile, 0, SEEK_SET);
+	GBDBG("V1", "verify begin expected=%u probed=%ld seek=%d errno=%d",
+		(unsigned)expected_size, probed_file_size, seek_result, errno);
+	if (seek_result != 0)
+		return false;
+
+	for (size_t base = 0; base < expected_size; base += sizeof(file_bytes))
+	{
+		size_t want = expected_size - base;
+		if (want > sizeof(file_bytes)) want = sizeof(file_bytes);
+		size_t got = fread(file_bytes, 1, want, cart.romFile);
+		if (got != want)
+		{
+			GBDBG("V!", "fresh fread failed offset=%u want=%u got=%u errno=%d feof=%d ferror=%d",
+				(unsigned)base, (unsigned)want, (unsigned)got, errno,
+				feof(cart.romFile), ferror(cart.romFile));
+			read_failed = true;
+			break;
+		}
+
+		for (size_t i = 0; i < got; ++i)
+		{
+			const size_t absolute = base + i;
+			const byte from_file = file_bytes[i];
+			if (absolute != 0x014E && absolute != 0x014F)
+				file_sum = (uint16_t)(file_sum + from_file);
+			file_fnv = (file_fnv ^ from_file) * 16777619u;
+
+			const size_t bank = absolute / BANK_SIZE;
+			if (!cart.rombanks[bank])
+			{
+				if (first_missing_bank == (size_t)-1) first_missing_bank = bank;
+				continue;
+			}
+			const byte from_loaded = cart.rombanks[bank][absolute % BANK_SIZE];
+			if (absolute != 0x014E && absolute != 0x014F)
+				loaded_sum = (uint16_t)(loaded_sum + from_loaded);
+			loaded_fnv = (loaded_fnv ^ from_loaded) * 16777619u;
+			if (from_file != from_loaded && first_mismatch == (size_t)-1)
+			{
+				first_mismatch = absolute;
+				first_mismatch_file = from_file;
+				first_mismatch_loaded = from_loaded;
+			}
+			++compared;
+		}
+	}
+
+	const uint16_t header_sum = cart.rombanks[0]
+		? (((uint16_t)cart.rombanks[0][0x014E] << 8) | cart.rombanks[0][0x014F])
+		: 0;
+	GBDBG("V2", "fresh file sum=%04X header=%04X match=%u fnv=%08X read_failed=%u",
+		file_sum, header_sum, file_sum == header_sum, (unsigned)file_fnv,
+		read_failed ? 1u : 0u);
+	GBDBG("V3", "loaded sum=%04X header=%04X match=%u fnv=%08X compared=%u/%u missing_bank=%d",
+		loaded_sum, header_sum,
+		(first_missing_bank == (size_t)-1 && loaded_sum == header_sum) ? 1u : 0u,
+		(unsigned)loaded_fnv, (unsigned)compared, (unsigned)expected_size,
+		first_missing_bank == (size_t)-1 ? -1 : (int)first_missing_bank);
+	if (first_mismatch == (size_t)-1)
+		GBDBG("V4", "fresh file and loaded banks are byte-identical");
+	else
+	{
+		GBDBG("V!", "FIRST MISMATCH offset=%05X bank=%u file=%02X loaded=%02X",
+			(unsigned)first_mismatch, (unsigned)(first_mismatch / BANK_SIZE),
+			first_mismatch_file, first_mismatch_loaded);
+	}
+
+	if (cart.rombanks[0])
+		gb_debug_dump_rom_bytes("loaded", cart.rombanks[0] + 0x3E70, 0x3E70, 32);
+	clearerr(cart.romFile);
+	if (fseek(cart.romFile, 0x3E70, SEEK_SET) == 0
+		&& fread(file_bytes, 1, 32, cart.romFile) == 32)
+		gb_debug_dump_rom_bytes("fresh ", file_bytes, 0x3E70, 32);
+	clearerr(cart.romFile);
+
+	const bool size_matches = probed_file_size == (long)expected_size;
+	const bool checksum_matches = !read_failed && file_sum == header_sum;
+	const bool copies_match = first_mismatch == (size_t)-1;
+	GBDBG("V5", "verdict size=%u checksum=%u copy=%u => %s",
+		size_matches ? 1u : 0u, checksum_matches ? 1u : 0u,
+		copies_match ? 1u : 0u,
+		(size_matches && checksum_matches && copies_match) ? "VALID" : "REJECT");
+	return size_matches && checksum_matches && copies_match;
+}
+
 
 // Note: Eventually we'll just pass a gb_host_t to init...
 // But for now assume it's been configured before we were alled!
 int gnuboy_init(int samplerate, gb_audio_fmt_t audio_fmt, gb_video_fmt_t video_fmt, gb_video_cb_t *video_callback, gb_audio_cb_t *audio_callback)
 {
+	GBDBG("01", "gnuboy_init enter sample_rate=%d audio_fmt=%d video_fmt=%d", samplerate, audio_fmt, video_fmt);
 	GB = (gb_t){
 		.video.colorize = GB_PALETTE_CGB,
 		.video.format = video_fmt,
@@ -70,8 +195,14 @@ int gnuboy_init(int samplerate, gb_audio_fmt_t audio_fmt, gb_video_fmt_t video_f
 		.audio.format = audio_fmt,
 		.audio.callback = audio_callback,
 	};
-	if (!gb_hw_init())
+	GBDBG("02", "gb_hw_init begin");
+	if (!gb_hw_init()) {
+		GBDBG("03", "gb_hw_init FAILED internal_free=%u largest=%u",
+			(unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+			(unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 		return -1;
+	}
+	GBDBG("04", "gb_hw_init complete");
 	return 0;
 }
 
@@ -83,10 +214,17 @@ int gnuboy_init(int samplerate, gb_audio_fmt_t audio_fmt, gb_video_fmt_t video_f
  */
 void gnuboy_reset(bool hard)
 {
+	GBDBG("R1", "reset enter hard=%u", hard ? 1u : 0u);
+	GBDBG("R2", "hardware reset begin");
 	gb_hw_reset(hard);
+	GBDBG("R3", "hardware reset complete; LCD reset begin");
 	gb_lcd_reset(hard);
+	GBDBG("R4", "LCD reset complete; CPU reset begin");
 	gb_cpu_reset(hard);
+	GBDBG("R5", "CPU reset complete; sound reset begin");
 	gb_sound_reset(hard);
+	gb_debug_run_count = 0;
+	GBDBG("R6", "reset complete");
 }
 
 
@@ -123,6 +261,14 @@ void gnuboy_set_soundbuffer(void *buffer, size_t length)
 */
 void gnuboy_run(bool draw)
 {
+	const unsigned debug_run = ++gb_debug_run_count;
+	const bool trace_run = debug_run <= 12;
+	if (trace_run) {
+		GBDBG("F0", "run=%u enter draw=%u pc=%04X sp=%04X ly=%u lcdc=%02X stat=%02X if=%02X ie=%02X cycles=%d bank=%d",
+			debug_run, draw ? 1u : 0u,
+			GB.cpu ? GB.cpu->pc.w : 0, GB.cpu ? GB.cpu->sp.w : 0,
+			R_LY, R_LCDC, R_STAT, R_IF, R_IE, GB.cycles, cart.rombank);
+	}
 	GB.video.enabled = draw;
 	GB.audio.pos = 0;
 
@@ -130,16 +276,31 @@ void gnuboy_run(bool draw)
 
 	// LCD is powered down, it won't touch LY or do vblank
 	if (!(R_LCDC & 0x80)) {
+		if (trace_run)
+			GBDBG("F1", "run=%u LCD disabled; CPU advance begin pc=%04X", debug_run,
+				GB.cpu ? GB.cpu->pc.w : 0);
 		cycles += 154 * 228;
 		cycles -= gb_cpu_emulate(cycles);
+		if (trace_run)
+			GBDBG("F4", "run=%u exit LCD disabled pc=%04X ly=%u lcdc=%02X stat=%02X cycles=%d",
+				debug_run, GB.cpu ? GB.cpu->pc.w : 0, R_LY, R_LCDC, R_STAT, GB.cycles);
 		return;
 	}
 
 	// We emulate until vblank (0..144)
+	int next_ly_report = 0;
 	while (R_LY <= 144) {
+		if (trace_run && R_LY >= next_ly_report) {
+			GBDBG("F1", "run=%u visible progress ly=%u pc=%04X stat=%02X cycles=%d",
+				debug_run, R_LY, GB.cpu ? GB.cpu->pc.w : 0, R_STAT, GB.cycles);
+			next_ly_report = ((int)R_LY / 24 + 1) * 24;
+		}
 		cycles += 228;
 		cycles -= gb_cpu_emulate(cycles);
 	}
+	if (trace_run)
+		GBDBG("F2", "run=%u visible complete ly=%u pc=%04X stat=%02X cycles=%d",
+			debug_run, R_LY, GB.cpu ? GB.cpu->pc.w : 0, R_STAT, GB.cycles);
 
 	/* When using GB_PIXEL_PALETTED, the host should draw the frame in this callback
 	   because the palette can be modified below before gnuboy_run returns. */
@@ -148,12 +309,19 @@ void gnuboy_run(bool draw)
 	}
 
 	gb_hw_vblank();
+	if (trace_run)
+		GBDBG("F3", "run=%u vblank callback complete ly=%u pc=%04X audio_samples=%u",
+			debug_run, R_LY, GB.cpu ? GB.cpu->pc.w : 0, (unsigned)GB.audio.pos);
 
 	// Emulate vblank (145...0)
 	while (R_LY > 0) {
 		cycles += 228;
 		cycles -= gb_cpu_emulate(cycles);
 	}
+	if (trace_run)
+		GBDBG("F4", "run=%u exit pc=%04X ly=%u lcdc=%02X stat=%02X if=%02X ie=%02X cycles=%d bank=%d",
+			debug_run, GB.cpu ? GB.cpu->pc.w : 0, R_LY, R_LCDC, R_STAT,
+			R_IF, R_IE, GB.cycles, cart.rombank);
 
 	if (GB.audio.callback && GB.audio.pos > 0) {
 		(GB.audio.callback)(GB.audio.buffer, GB.audio.pos);
@@ -221,18 +389,31 @@ int gnuboy_load_bios_file(const char *file)
 void gnuboy_load_bank(int bank)
 {
 	const size_t OFFSET = bank * BANK_SIZE;
+	if (bank < 0 || bank >= cart.romsize) {
+		GBDBG("B!", "invalid bank=%d rom_banks=%d", bank, cart.romsize);
+		return;
+	}
+	GBDBG("B1", "bank=%d/%d begin offset=%u ptr=%p psram_free=%u largest=%u",
+		bank, cart.romsize - 1, (unsigned)OFFSET, (void *)cart.rombanks[bank],
+		(unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+		(unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 
 	if (!cart.rombanks[bank])
 		cart.rombanks[bank] = GB_PSRAM_MALLOC(BANK_SIZE);  // CrowPanel patch: PSRAM
+	GBDBG("B2", "bank=%d allocation ptr=%p", bank, (void *)cart.rombanks[bank]);
 
-	if (!cart.romFile)
+	if (!cart.romFile) {
+		GBDBG("B!", "bank=%d stopped: ROM FILE pointer is null", bank);
 		return;
+	}
 
 	// Cube Boy: during the boot-time preload, stop at the first failed alloc
 	// instead of thrashing every ROM bank through the tiny reclaim cache -
 	// missing banks load on demand at their first MBC select.
-	if (!cart.rombanks[bank] && gb_preloading)
+	if (!cart.rombanks[bank] && gb_preloading) {
+		GBDBG("B3", "bank=%d preload allocation unavailable", bank);
 		return;
+	}
 
 	// NOTE: no MESSAGE_INFO here - on a thrashing cart this path runs many
 	// times per frame and the serial printf becomes its own bottleneck.
@@ -258,8 +439,19 @@ void gnuboy_load_bank(int bank)
 	}
 
 	// Load the 16K page
-	if (fseek(cart.romFile, OFFSET, SEEK_SET) != 0
-		|| !fread(cart.rombanks[bank], BANK_SIZE, 1, cart.romFile))
+	GBDBG("B4", "bank=%d fseek begin", bank);
+	errno = 0;
+	int seek_result = fseek(cart.romFile, OFFSET, SEEK_SET);
+	GBDBG("B5", "bank=%d fseek returned=%d errno=%d", bank, seek_result, errno);
+	size_t read_result = 0;
+	if (seek_result == 0) {
+		GBDBG("B6", "bank=%d fread begin bytes=%u", bank, (unsigned)BANK_SIZE);
+		errno = 0;
+		read_result = fread(cart.rombanks[bank], BANK_SIZE, 1, cart.romFile);
+		GBDBG("B7", "bank=%d fread returned=%u errno=%d feof=%d ferror=%d", bank,
+			(unsigned)read_result, errno, feof(cart.romFile), ferror(cart.romFile));
+	}
+	if (seek_result != 0 || read_result != 1)
 	{
 		MESSAGE_WARN("ROM bank loading failed\n");
 		if (!feof(cart.romFile))
@@ -267,11 +459,13 @@ void gnuboy_load_bank(int bank)
 	}
 	if (!gb_preloading)
 		gb_live_bank = bank;  // the MBC just mapped this bank - never steal it
+	GBDBG("B8", "bank=%d complete ptr=%p", bank, (void *)cart.rombanks[bank]);
 }
 
 
 int gnuboy_load_rom(const byte *data, size_t size)
 {
+	GBDBG("10", "header setup enter data=%p bytes=%u", (const void *)data, (unsigned)size);
 	// Memory Bank Controller names
 	const char *mbc_names[16] = {
 		"MBC_NONE", "MBC_MBC1", "MBC_MBC2", "MBC_MBC3",
@@ -284,13 +478,17 @@ int gnuboy_load_rom(const byte *data, size_t size)
 	};
 
 	// We need at least the header
-	if (size < 0x200)
+	if (size < 0x200) {
+		GBDBG("11", "header rejected: need 512 bytes, got %u", (unsigned)size);
 		return -1;
+	}
 
 	const byte *header = data;
 	int type = header[0x0147];
 	int romsize = header[0x0148];
 	int ramsize = header[0x0149];
+	GBDBG("12", "header bytes type=0x%02X rom_code=0x%02X ram_code=0x%02X cgb=0x%02X sgb=0x%02X",
+		type, romsize, ramsize, header[0x0143], header[0x0146]);
 
 	if (header[0x0143] == 0x80 || header[0x0143] == 0xC0)
 		hw.hwtype = GB_HW_CGB; // Game supports CGB mode so we go for that
@@ -302,6 +500,8 @@ int gnuboy_load_rom(const byte *data, size_t size)
 	memcpy(&cart.checksum, header + 0x014E, 2);
 	memcpy(&cart.name, header + 0x0134, 16);
 	cart.name[16] = 0;
+	GBDBG("13", "title parsed name='%s' checksum=%02X%02X", cart.name,
+		header[0x014E], header[0x014F]);
 
 	cart.has_battery = (type == 3 || type == 6 || type == 9 || type == 13 || type == 15 ||
 						type == 16 || type == 19 || type == 27 || type == 30 || type == 255);
@@ -330,6 +530,9 @@ int gnuboy_load_rom(const byte *data, size_t size)
 		cart.mbc = MBC_HUC1;
 	else
 		cart.mbc = MBC_NONE;
+	GBDBG("14", "mode parsed hw=%d mbc=%d battery=%u rtc=%u rumble=%u sensor=%u",
+		hw.hwtype, cart.mbc, cart.has_battery, cart.has_rtc,
+		cart.has_rumble, cart.has_sensor);
 
 	if (romsize < 9)
 	{
@@ -355,15 +558,28 @@ int gnuboy_load_rom(const byte *data, size_t size)
 		MESSAGE_ERROR("Invalid RAM size: %d\n", ramsize);
 		cart.ramsize = 1;
 	}
+	GBDBG("15", "size parsed rom_banks=%d (%d KiB) ram_banks=%d (%d KiB)",
+		cart.romsize, cart.romsize * 16, cart.ramsize, cart.ramsize * 8);
 
+	GBDBG("16", "cart RAM allocation begin bytes=%u psram_free=%u largest=%u",
+		(unsigned)(cart.ramsize * 0x2000),
+		(unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+		(unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 	cart.rambanks = GB_PSRAM_CALLOC(cart.ramsize, 0x2000);  // CrowPanel patch: PSRAM
+	GBDBG("17", "cart RAM allocation ptr=%p", (void *)cart.rambanks);
+	GBDBG("18", "ROM pointer table allocation begin entries=%d bytes=%u internal_free=%u largest=%u",
+		cart.romsize, (unsigned)(cart.romsize * sizeof(byte *)),
+		(unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+		(unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 	cart.rombanks = calloc(cart.romsize, sizeof(byte *));   // small hot table: internal
+	GBDBG("19", "ROM pointer table allocation ptr=%p", (void *)cart.rombanks);
 
 	if (!cart.rambanks || !cart.rombanks)
 	{
 		MESSAGE_ERROR("Memory allocation failed.");
 		return -3;
 	}
+	GBDBG("20", "cart allocations complete");
 
 	for (size_t pos = 0; size - pos >= BANK_SIZE; pos += BANK_SIZE)
 	{
@@ -443,6 +659,7 @@ int gnuboy_load_rom(const byte *data, size_t size)
 
 		cart.colorize = col_palette_info[infoIdx];
 	}
+	GBDBG("21", "palette detection complete colorize=%d", cart.colorize);
 
 	MESSAGE_INFO("Cart loaded: name='%s', hw=%s, mbc=%s, romsize=%dK, ramsize=%dK, colorize=%d\n",
 		cart.name, hw_types[hw.hwtype], mbc_names[cart.mbc], cart.romsize * 16, cart.ramsize * 8, cart.colorize);
@@ -463,24 +680,40 @@ int gnuboy_load_rom(const byte *data, size_t size)
 		hw.compat.window_offset = 0;
 	}
 
+	GBDBG("22", "header setup complete");
 	return 0;
 }
 
 
 int gnuboy_load_rom_file(const char *file)
 {
-	MESSAGE_INFO("Loading file: '%s'\n", file);
+	GBDBG("30", "ROM file load enter path='%s'", file ? file : "(null)");
 
 	byte header[0x200];
 
+	errno = 0;
+	GBDBG("31", "fopen begin");
 	cart.romFile = fopen(file, "rb");
+	GBDBG("32", "fopen returned fp=%p errno=%d", (void *)cart.romFile, errno);
 	if (cart.romFile == NULL)
 	{
 		MESSAGE_ERROR("ROM fopen failed\n");
 		return -1;
 	}
 
-	if (fread(&header, 0x200, 1, cart.romFile) != 1)
+	errno = 0;
+	GBDBG("33", "file size probe begin");
+	int size_seek = fseek(cart.romFile, 0, SEEK_END);
+	long file_size = size_seek == 0 ? ftell(cart.romFile) : -1;
+	int rewind_result = fseek(cart.romFile, 0, SEEK_SET);
+	GBDBG("34", "file size probe size=%ld seek=%d rewind=%d errno=%d", file_size,
+		size_seek, rewind_result, errno);
+	GBDBG("35", "header fread begin bytes=%u", (unsigned)sizeof(header));
+	errno = 0;
+	size_t header_read = fread(&header, sizeof(header), 1, cart.romFile);
+	GBDBG("36", "header fread returned=%u errno=%d feof=%d ferror=%d",
+		(unsigned)header_read, errno, feof(cart.romFile), ferror(cart.romFile));
+	if (header_read != 1)
 	{
 		MESSAGE_ERROR("ROM fread failed\n");
 		fclose(cart.romFile);
@@ -488,7 +721,9 @@ int gnuboy_load_rom_file(const char *file)
 		return -1;
 	}
 
+	GBDBG("37", "header setup call begin");
 	int ret = gnuboy_load_rom(header, 0x200);
+	GBDBG("38", "header setup returned=%d", ret);
 	if (ret != 0)
 	{
 		MESSAGE_ERROR("ROM setup failed\n");
@@ -506,11 +741,12 @@ int gnuboy_load_rom_file(const char *file)
 		preload = cart.romsize - 40;
 	}
 
-	MESSAGE_INFO("Preloading the first %d banks\n", preload);
+	GBDBG("39", "preload plan banks=%d of %d", preload, cart.romsize);
 	gb_preloading = 1;
 	gb_live_bank = 1;
 	for (int i = 0; i < preload; i++)
 	{
+		GBDBG("40", "preload dispatch bank=%d", i);
 		gnuboy_load_bank(i);
 		if (!cart.rombanks[i])
 		{
@@ -526,7 +762,18 @@ int gnuboy_load_rom_file(const char *file)
 		vTaskDelay(1);
 	}
 	gb_preloading = 0;
+	GBDBG("41", "preload complete psram_free=%u largest=%u internal_free=%u largest=%u",
+		(unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+		(unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+		(unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+		(unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+	if (!gb_debug_verify_preloaded_rom(file_size))
+	{
+		MESSAGE_ERROR("ROM integrity check failed; refusing to execute corrupt cartridge data\n");
+		return -5;
+	}
 
+	GBDBG("42", "ROM file load complete");
 	return 0;
 }
 
@@ -615,10 +862,16 @@ bool gnuboy_sram_dirty(void)
 
 int gnuboy_load_sram(const char *file)
 {
-	if (!cart.has_battery || !cart.ramsize || !file || !*file)
+	GBDBG("S1", "SRAM load enter path='%s' battery=%u ram_banks=%d",
+		file ? file : "(null)", cart.has_battery, cart.ramsize);
+	if (!cart.has_battery || !cart.ramsize || !file || !*file) {
+		GBDBG("S2", "SRAM load skipped: cartridge/path not applicable");
 		return -1;
+	}
 
+	errno = 0;
 	FILE *f = fopen(file, "rb");
+	GBDBG("S3", "SRAM fopen returned fp=%p errno=%d", (void *)f, errno);
 	if (!f)
 		return -2;
 
@@ -629,7 +882,12 @@ int gnuboy_load_sram(const char *file)
 
 	for (int i = 0; i < cart.ramsize; i++)
 	{
-		if (fseek(f, i * 8192, SEEK_SET) == 0 && fread(cart.rambanks[i], 8192, 1, f) == 1)
+		GBDBG("S4", "SRAM bank=%d read begin", i);
+		int sram_seek = fseek(f, i * 8192, SEEK_SET);
+		size_t sram_read = sram_seek == 0 ? fread(cart.rambanks[i], 8192, 1, f) : 0;
+		GBDBG("S5", "SRAM bank=%d seek=%d read=%u feof=%d ferror=%d", i,
+			sram_seek, (unsigned)sram_read, feof(f), ferror(f));
+		if (sram_seek == 0 && sram_read == 1)
 		{
 			MESSAGE_INFO("Loaded SRAM bank %d.\n", i);
 			cart.sram_saved = (1 << i);
@@ -656,6 +914,7 @@ int gnuboy_load_sram(const char *file)
 
 	fclose(f);
 
+	GBDBG("S6", "SRAM load complete saved_mask=0x%X", cart.sram_saved);
 	return cart.sram_saved ? 0 : -1;
 }
 

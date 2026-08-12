@@ -120,6 +120,57 @@ void pushDisplayImageStaged(int x, int y, int width, int height,
     displayInvalidateShadow();
 }  // Pushes arbitrary RGB565 images through a small internal-RAM strip.
 
+// Copies only a rectangular region of the shared frameSprite to the Tab5 DSI
+// framebuffer. frameSprite has a 1280-pixel stride, so a sub-rectangle is not
+// contiguous; pack a few rows through the same small internal staging buffer
+// instead of promoting every changed Game Boy row to a full-width transfer.
+void pushDisplaySpriteRegion(int x, int y, int width, int height) {
+    uint16_t* frame = (uint16_t*)frameSprite.getBuffer();
+    if (!frame || width <= 0 || height <= 0) return;
+
+    if (x < 0) { width += x; x = 0; }
+    if (y < 0) { height += y; y = 0; }
+    if (x + width > DISPLAY_WIDTH) width = DISPLAY_WIDTH - x;
+    if (y + height > DISPLAY_HEIGHT) height = DISPLAY_HEIGHT - y;
+    if (width <= 0 || height <= 0) return;
+
+    const int rowsPerPush = min(DISPLAY_IMAGE_STAGING_ROWS, height);
+    const int wantedPixels = width * rowsPerPush;
+    if (wantedPixels > displayImageStagingPixels) {
+        if (displayImageStaging) heap_caps_free(displayImageStaging);
+        displayImageStaging = (uint16_t*)heap_caps_malloc(
+            (size_t)wantedPixels * sizeof(uint16_t),
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        displayImageStagingPixels = displayImageStaging ? wantedPixels : 0;
+    }
+
+    bool oldSwapBytes = tft.getSwapBytes();
+    tft.setSwapBytes(false);  // frameSprite already contains panel-native RGB565
+    int pushed = 0;
+    while (pushed < height) {
+        const int rows = min(rowsPerPush, height - pushed);
+        if (displayImageStaging) {
+            for (int row = 0; row < rows; row++) {
+                memcpy(displayImageStaging + (size_t)row * width,
+                       frame + (size_t)(y + pushed + row) * DISPLAY_WIDTH + x,
+                       (size_t)width * sizeof(uint16_t));
+            }
+            tft.pushImage(x, y + pushed, width, rows, displayImageStaging);
+        } else {
+            // Low-memory fallback keeps the transfer narrow even without a
+            // packed multi-row buffer.
+            for (int row = 0; row < rows; row++) {
+                uint16_t* src = frame
+                    + (size_t)(y + pushed + row) * DISPLAY_WIDTH + x;
+                tft.pushImage(x, y + pushed + row, width, 1, src);
+            }
+        }
+        pushed += rows;
+    }
+    tft.setSwapBytes(oldSwapBytes);
+    displayInvalidateShadow();
+}
+
 static void pushDisplayRows(int y, int rowCount) {
     if (rowCount <= 0) {
         return;
@@ -795,7 +846,12 @@ void drawDisplayStatusBar() {
         (unsigned long)(ESP.getFreeHeap() / 1000), radioGetVolume(), readBatteryPercent());
     frameSprite.setTextDatum(TR_DATUM);
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
-    frameSprite.drawString(statusText, DISPLAY_WIDTH - DISPLAY_PADDING, 4);
+    const int statusRight = dappCanvasActive
+        ? DISPLAY_WIDTH - DISPLAY_PADDING
+        : gbMainTouchLauncherLeft() - DISPLAY_PADDING;
+    frameSprite.drawString(statusText, statusRight, 4);
+
+    if (!dappCanvasActive) gbDrawMainTouchLauncher();
 
     frameSprite.drawFastHLine(0, DISPLAY_STATUS_BAR_HEIGHT - 1, DISPLAY_WIDTH, TFT_PINK);
     frameSprite.setTextDatum(TL_DATUM);

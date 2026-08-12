@@ -146,6 +146,130 @@ label: op(b); break;
 
 static gb_cpu_t cpu;
 
+#define GB_CPU_DIAGNOSTIC_TRACE 0
+#if GB_CPU_DIAGNOSTIC_TRACE
+// Keep a bounded instruction history in RAM so a control-flow failure can be
+// diagnosed without slowing normal emulation with per-opcode serial output.
+// If the CPU gets stuck executing the 0xFF byte at RST vector 0x0038, dump the
+// instructions that led into the loop exactly once.
+#define GB_CPU_TRACE_DEPTH 64
+typedef struct
+{
+	uint16_t pc, sp, af, bc, de, hl;
+	uint16_t rombank;
+	uint8_t op, arg1, arg2, ime, ireg, ie;
+} gb_cpu_trace_t;
+
+static gb_cpu_trace_t gb_cpu_trace[GB_CPU_TRACE_DEPTH];
+static unsigned gb_cpu_trace_head;
+static unsigned gb_cpu_trace_count;
+static unsigned gb_cpu_rst38_run;
+static bool gb_cpu_trace_dumped;
+static bool gb_cpu_ff80_dumped;
+
+static void gb_cpu_trace_record(uint16_t pc, byte op)
+{
+	gb_cpu_trace_t *entry = &gb_cpu_trace[gb_cpu_trace_head];
+	entry->pc = pc;
+	entry->sp = SP;
+	entry->af = AF;
+	entry->bc = BC;
+	entry->de = DE;
+	entry->hl = HL;
+	entry->rombank = GB.cart ? GB.cart->rombank : 0xFFFF;
+	entry->op = op;
+	entry->arg1 = readb((uint16_t)(pc + 1));
+	entry->arg2 = readb((uint16_t)(pc + 2));
+	entry->ime = IME;
+	entry->ireg = R_IF;
+	entry->ie = R_IE;
+
+	gb_cpu_trace_head = (gb_cpu_trace_head + 1) % GB_CPU_TRACE_DEPTH;
+	if (gb_cpu_trace_count < GB_CPU_TRACE_DEPTH)
+		gb_cpu_trace_count++;
+}
+
+static void gb_cpu_trace_check_rst38(uint16_t pc, byte op)
+{
+	if (pc == 0x0038 && op == 0xFF)
+		gb_cpu_rst38_run++;
+	else
+		gb_cpu_rst38_run = 0;
+
+	if (gb_cpu_trace_dumped || gb_cpu_rst38_run < 8)
+		return;
+
+	gb_cpu_trace_dumped = true;
+	LOG_PRINTF(1, "[GBDBG CPU!] repeated RST38 detected; dumping last %u instructions\n",
+		gb_cpu_trace_count);
+	unsigned start = (gb_cpu_trace_head + GB_CPU_TRACE_DEPTH - gb_cpu_trace_count) % GB_CPU_TRACE_DEPTH;
+	for (unsigned i = 0; i < gb_cpu_trace_count; i++)
+	{
+		const gb_cpu_trace_t *entry = &gb_cpu_trace[(start + i) % GB_CPU_TRACE_DEPTH];
+		LOG_PRINTF(1,
+			"[GBDBG CPU %02u] pc=%04X op=%02X args=%02X,%02X sp=%04X af=%04X bc=%04X de=%04X hl=%04X ime=%u if=%02X ie=%02X bank=%u\n",
+			i, entry->pc, entry->op, entry->arg1, entry->arg2, entry->sp, entry->af, entry->bc,
+			entry->de, entry->hl, entry->ime, entry->ireg, entry->ie,
+			entry->rombank);
+	}
+
+	if (GB.cart && GB.cart->rombanks && GB.cart->rombanks[0])
+	{
+		const byte *rom0 = GB.cart->rombanks[0];
+		LOG_PRINTF(1,
+			"[GBDBG CPU ROM] 0038=%02X %02X %02X %02X 0100=%02X %02X %02X %02X 0150=%02X %02X %02X %02X\n",
+			rom0[0x0038], rom0[0x0039], rom0[0x003A], rom0[0x003B],
+			rom0[0x0100], rom0[0x0101], rom0[0x0102], rom0[0x0103],
+			rom0[0x0150], rom0[0x0151], rom0[0x0152], rom0[0x0153]);
+	}
+}
+
+static void gb_cpu_trace_check_ff80(uint16_t pc)
+{
+	if (gb_cpu_ff80_dumped || pc != 0xFF80)
+		return;
+
+	gb_cpu_ff80_dumped = true;
+	LOG_PRINTF(1, "[GBDBG CPU@FF80] first execution from HRAM; prior %u instructions\n",
+		gb_cpu_trace_count);
+	unsigned start = (gb_cpu_trace_head + GB_CPU_TRACE_DEPTH - gb_cpu_trace_count) % GB_CPU_TRACE_DEPTH;
+	for (unsigned i = 0; i < gb_cpu_trace_count; i++)
+	{
+		const gb_cpu_trace_t *entry = &gb_cpu_trace[(start + i) % GB_CPU_TRACE_DEPTH];
+		LOG_PRINTF(1,
+			"[GBDBG PRE %02u] pc=%04X op=%02X args=%02X,%02X sp=%04X af=%04X bc=%04X de=%04X hl=%04X ime=%u if=%02X ie=%02X bank=%u\n",
+			i, entry->pc, entry->op, entry->arg1, entry->arg2, entry->sp, entry->af, entry->bc,
+			entry->de, entry->hl, entry->ime, entry->ireg, entry->ie,
+			entry->rombank);
+	}
+	LOG_PRINTF(1,
+		"[GBDBG HRAM SNAP] FF80-FFAF:"
+		" %02X %02X %02X %02X %02X %02X %02X %02X"
+		" %02X %02X %02X %02X %02X %02X %02X %02X"
+		" %02X %02X %02X %02X %02X %02X %02X %02X"
+		" %02X %02X %02X %02X %02X %02X %02X %02X"
+		" %02X %02X %02X %02X %02X %02X %02X %02X"
+		" %02X %02X %02X %02X %02X %02X %02X %02X\n",
+		REG(0x80), REG(0x81), REG(0x82), REG(0x83),
+		REG(0x84), REG(0x85), REG(0x86), REG(0x87),
+		REG(0x88), REG(0x89), REG(0x8A), REG(0x8B),
+		REG(0x8C), REG(0x8D), REG(0x8E), REG(0x8F),
+		REG(0x90), REG(0x91), REG(0x92), REG(0x93),
+		REG(0x94), REG(0x95), REG(0x96), REG(0x97),
+		REG(0x98), REG(0x99), REG(0x9A), REG(0x9B),
+		REG(0x9C), REG(0x9D), REG(0x9E), REG(0x9F),
+		REG(0xA0), REG(0xA1), REG(0xA2), REG(0xA3),
+		REG(0xA4), REG(0xA5), REG(0xA6), REG(0xA7),
+		REG(0xA8), REG(0xA9), REG(0xAA), REG(0xAB),
+		REG(0xAC), REG(0xAD), REG(0xAE), REG(0xAF));
+}
+
+unsigned gb_cpu_debug_pc(void)
+{
+	return PC;
+}
+#endif
+
 
 gb_cpu_t *gb_cpu_init(void)
 {
@@ -155,6 +279,14 @@ gb_cpu_t *gb_cpu_init(void)
 /* reset */
 void gb_cpu_reset(bool hard)
 {
+#if GB_CPU_DIAGNOSTIC_TRACE
+	gb_cpu_trace_head = 0;
+	gb_cpu_trace_count = 0;
+	gb_cpu_rst38_run = 0;
+	gb_cpu_trace_dumped = false;
+	gb_cpu_ff80_dumped = false;
+#endif
+
 	cpu.double_speed = 0;
 	cpu.halted = 0;
 	cpu.div = 0;
@@ -329,6 +461,12 @@ next:
 #endif
 
 	op = FETCH;
+#if GB_CPU_DIAGNOSTIC_TRACE
+	uint16_t op_pc = (uint16_t)(PC - 1);
+	gb_cpu_trace_record(op_pc, op);
+	gb_cpu_trace_check_ff80(op_pc);
+	gb_cpu_trace_check_rst38(op_pc, op);
+#endif
 	clen = cycles_table[op];
 
 	switch(op)

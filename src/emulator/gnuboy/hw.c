@@ -225,6 +225,7 @@ bool gb_hw_init(void)
 }
 
 
+
 void gb_hw_reset(bool hard)
 {
 	hw.ilines = 0;

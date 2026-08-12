@@ -50,16 +50,26 @@ uint32_t underrunCount = 0;
 bool AudioOut::begin() {
   if (ready) return true;
 
+  Serial.printf("[gb audio] begin rate=%lu mclk=%lu volume=%d\n",
+                static_cast<unsigned long>(kSampleRate),
+                static_cast<unsigned long>(kSampleRate * 128u), radioGetVolume());
+
   stage = static_cast<int16_t*>(heap_caps_malloc(
       kStageFrames * 2 * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  if (!stage) return false;
+  if (!stage) {
+    Serial.println("[gb audio] internal staging allocation failed");
+    return false;
+  }
 
   i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
   chanCfg.dma_desc_num = kDmaDescNum;
   chanCfg.dma_frame_num = kDmaFrameNum;
   chanCfg.auto_clear = true;   // ring goes silent on underrun instead of looping the last buffer
-  if (i2s_new_channel(&chanCfg, &txChan, nullptr) != ESP_OK) {
+  esp_err_t err = i2s_new_channel(&chanCfg, &txChan, nullptr);
+  if (err != ESP_OK) {
     // Both controllers still spoken for -- Radio.ino didn't (or couldn't) let go.
+    Serial.printf("[gb audio] i2s_new_channel failed: %s (0x%X)\n",
+                  esp_err_to_name(err), static_cast<unsigned>(err));
     txChan = nullptr;
     end();
     return false;
@@ -81,17 +91,24 @@ bool AudioOut::begin() {
   //clock and codec register 24 in agreement preserves the 32768Hz Game Boy pitch.
   stdCfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_128;
 
-  if (i2s_channel_init_std_mode(txChan, &stdCfg) != ESP_OK) {
+  err = i2s_channel_init_std_mode(txChan, &stdCfg);
+  if (err != ESP_OK) {
+    Serial.printf("[gb audio] i2s init failed: %s (0x%X)\n",
+                  esp_err_to_name(err), static_cast<unsigned>(err));
     end();
     return false;
   }
   //Clocks must already be running when the slave codec's registers are programmed.
-  if (i2s_channel_enable(txChan) != ESP_OK) {
+  err = i2s_channel_enable(txChan);
+  if (err != ESP_OK) {
+    Serial.printf("[gb audio] i2s enable failed: %s (0x%X)\n",
+                  esp_err_to_name(err), static_cast<unsigned>(err));
     end();
     return false;
   }
   enabled = true;
   if (!audioCodecEnsure(128)) {
+    Serial.println("[gb audio] ES8388 setup failed");
     end();
     return false;
   }
@@ -99,6 +116,7 @@ bool AudioOut::begin() {
   discard = false;
   pushedFrames = droppedFrames = underrunCount = 0;
   ready = true;
+  Serial.println("[gb audio] ready");
   return true;
 }
 

@@ -350,6 +350,9 @@ bool wifiStationIsReady();
 bool startTelnetServer();
 void stopTelnetServer();
 void drawDisplayFrame();
+int gbMainTouchLauncherLeft();
+void gbDrawMainTouchLauncher();
+void gbServiceMainTouch();
 int readBatteryPercent();
 int wifiIsConnected();
 
