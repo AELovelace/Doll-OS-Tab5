@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id snake
 # @name Snake
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.1.0 <2.0.0
 # @summary The classic snake game for the DOLL-OS canvas
 # /apps/snake.dapp
@@ -15,7 +15,7 @@
 # so collision and food placement are single lookups instead of a walk
 # down the body. Movement is paced off $millis, never off WAIT.
 
-CANVAS 40 22
+CANVAS 80 36
 COLOR green
 PUT 14 9 "SNAKE"
 COLOR white
@@ -281,26 +281,23 @@ EXPR scy $sny[$hd] + 1
 PUT $scx $scy "@@"
 
 COLOR pink
-PUT 31 1 "SNAKE"
+PUT 48 3 "S N A K E"
 COLOR cyan
-PUT 31 3 "SCORE"
+PUT 48 7 "SCORE"
 COLOR white
-PUT 31 4 $score
+PUT 60 7 $score
 COLOR cyan
-PUT 31 6 "LEN"
+PUT 48 10 "LENGTH"
 COLOR white
-PUT 31 7 $len
+PUT 60 10 $len
 COLOR cyan
-PUT 31 9 "HI"
+PUT 48 13 "BEST"
 COLOR white
-PUT 31 10 $hiscore
+PUT 60 13 $hiscore
 COLOR yellow
-PUT 31 13 "wasd"
-PUT 31 14 "or arw"
-PUT 31 16 "spc"
-PUT 31 17 "pause"
-PUT 31 19 "esc"
-PUT 31 20 "quit"
+PUT 48 19 "WASD / arrows  steer"
+PUT 48 22 "SPACE          pause"
+PUT 48 25 "ESC            quit"
 
 IF $paused = 0 GOTO dr_flip
 COLOR yellow

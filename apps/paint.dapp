@@ -1,16 +1,17 @@
 # @dapp-format 1
 # @id paint
 # @name Pixel Paint
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.1.0 <2.0.0
-# @summary A saved 56x28 color pixel-art studio for the larger DS canvas
+# @summary A wide Tab5 pixel-art studio with permanent tools and palette panels
 # /apps/paint.dapp
 # Arrows move, space paints, 0 erases, 1-7 choose a color, p toggles pen
 # mode, s saves, l loads, c twice clears, escape quits. Art is stored in
 # /apps/paint.dat as rows of palette digits.
 
-CANVAS 72 36
+# The artwork keeps its existing save format while Tab5 adds a permanent sidebar.
+CANVAS 100 40
 SET cols 56
 SET rows 28
 DIM pixels 1568
@@ -129,18 +130,24 @@ RETURN
 :draw
 CLS
 COLOR pink
-PUT 2 1 "PIXEL PAINT 56x28"
+PUT 3 1 "PIXEL PAINT // TAB5 STUDIO"
+COLOR cyan
+PUT 65 1 "TOOLS + PALETTE"
 COLOR white
-PUT 25 1 "palette:"
+PUT 65 4 "BRUSH  $brush"
+PUT 65 5 "CURSOR $cx,$cy"
+PUT 65 6 "PEN    $pen"
 SET value 1
 :palette
 IF $value > 7 GOTO palettedone
 GOSUB setcolor
-EXPR x 33 + $value * 4
-PUT $x 1 "$value#"
+EXPR py 7 + $value * 3
+PUT 68 $py "$value  ##"
 ADD value 1
 GOTO palette
 :palettedone
+COLOR blue
+PUT 68 31 "0  .."
 SET y 0
 :drawrow
 IF $y >= $rows GOTO drawfooter
@@ -148,8 +155,8 @@ SET x 0
 :drawcell
 IF $x >= $cols GOTO drawnextr
 EXPR idx $y * $cols + $x
-EXPR px $x + 2
-EXPR py $y + 4
+EXPR px $x + 3
+EXPR py $y + 6
 IF $x = $cx GOTO maybecursor
 GOTO normalpixel
 :maybecursor
@@ -175,9 +182,10 @@ ADD y 1
 GOTO drawrow
 :drawfooter
 COLOR cyan
-PUT 2 33 "$msg"
+PUT 65 34 "$msg"
 COLOR white
-PUT 2 35 "arrows move  space paint  p pen  0 erase  s save  l load  c clear"
+PUT 3 37 "ARROWS move   SPACE paint   P pen mode   0 erase"
+PUT 3 39 "1-7 colour   S save   L load   C clear   ESC quit"
 FLIP
 RETURN
 

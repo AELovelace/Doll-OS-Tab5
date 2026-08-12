@@ -334,6 +334,15 @@ EXIT
 - [docs/DAPP-BOOK.md](docs/DAPP-BOOK.md) — the long-form guide
 - [dapp-web/](dapp-web/) — DOLL-OS web emulator + `.dapp` IDE/runtime, no build step
 
+### Tab5-enhanced editions
+
+All 46 shipped apps now use ordinary package-format-1 artifacts that declare
+`# @boards m5stack-tab5`. The 27 canvas apps use 80-100 column workspaces with
+30-40 rows: editors and dashboards gain visible data, while games keep their
+boards readable and move scores, help, and state into side panels. Terminal-native
+apps use longer 90-94 column records and 34-line pages where their data model can
+benefit. Existing save-file formats remain compatible with the earlier editions.
+
 ---
 
 ## Project layout

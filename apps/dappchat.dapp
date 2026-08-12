@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id dappchat
 # @name DappChat
-# @version 1.1.4
-# @boards fnk0104
+# @version 1.2.0
+# @boards m5stack-tab5
 # @runtime >=1.4.2 <2.0.0
 # @echo off
 # @summary Chat with other DOLL-OS/DS units over the Sad Girls Club backend
@@ -39,15 +39,13 @@ CHR q 34
 # trimmed, so it survives both.
 CHR sp 32
 
-# Canvas geometry: header, feed, status, prompt. The panel scales its glyphs to
-# fit whatever grid it is handed, so these numbers are the font size -- fewer
-# columns means bigger text. 40x15 reads comfortably; raise $cols and $rows
-# together for more history at a smaller size.
-SET cols 40
-SET rows 15
-SET feedrows 11
-SET statusrow 12
-SET promptrow 14
+# Tab5 uses a full-width room with thirty-six visible history rows. The status
+# and live editor remain isolated at the bottom so incoming messages never jump.
+SET cols 100
+SET rows 40
+SET feedrows 36
+SET statusrow 37
+SET promptrow 39
 
 # how long the room may go unrefreshed, in milliseconds
 SET pollms 2000

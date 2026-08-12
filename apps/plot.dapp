@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id plot
 # @name Plot
-# @version 1.0.1
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.4.2 <2.0.0
 # @echo off
 # @summary Graph a typed formula of x, with pan, zoom and auto-fit
@@ -31,13 +31,13 @@
 # whole evaluation, at the cost of one rounding per operator -- the same
 # cost a real floating-point evaluator pays per operator, just spelled out.
 
-CANVAS 78 27
-SET gw 76
-SET gh 18
+CANVAS 100 40
+SET gw 98
+SET gh 30
 DIM nstk 32
 DIM ostk 32
-DIM ys 76
-DIM okarr 76
+DIM ys 98
+DIM okarr 98
 
 COLOR yellow
 PUT 18 3 "P L O T"
@@ -104,7 +104,7 @@ LEN nl $newformula
 IF $nl = 0 GOTO hk_formend
 SETSTR formula $newformula
 :hk_formend
-CANVAS 78 27
+CANVAS 100 40
 GOSUB compute
 GOSUB draw
 
@@ -200,34 +200,34 @@ GOSUB axes
 GOSUB curve
 
 COLOR cyan
-PUT 0 21 "y"
+PUT 0 33 "y"
 COLOR white
-PUT 2 21 $ymax
+PUT 2 33 $ymax
 COLOR cyan
-PUT 8 21 ".."
+PUT 8 33 ".."
 COLOR white
-PUT 11 21 $ymin
+PUT 11 33 $ymin
 COLOR cyan
-PUT 0 22 "x"
+PUT 0 34 "x"
 GOSUB leftx
 COLOR white
-PUT 2 22 $lx
+PUT 2 34 $lx
 COLOR cyan
-PUT 12 22 ".."
+PUT 12 34 ".."
 GOSUB rightx
 COLOR white
-PUT 15 22 $rx
+PUT 15 34 $rx
 COLOR cyan
-PUT 0 23 "scale"
+PUT 0 35 "scale"
 COLOR white
-PUT 6 23 $xscale
+PUT 6 35 $xscale
 IF $badrange = 0 GOTO dr_keys
 COLOR yellow
-PUT 20 23 "(flat or all-error - padded range shown)"
+PUT 20 35 "(flat or all-error - padded range shown)"
 
 :dr_keys
 COLOR yellow
-PUT 0 25 "left/right pan   up/down zoom   r reset   f formula   esc quit"
+PUT 0 39 "left/right pan   up/down zoom   r reset   f formula   esc quit"
 FLIP
 RETURN
 

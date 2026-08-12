@@ -4,8 +4,8 @@
 static const char BUNDLED_APP_ADVENTURE[] = R"DOLLAPP(# @dapp-format 1
 # @id adventure
 # @name The Cursed Grotto
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.0.0 <2.0.0
 # @summary A branching fantasy text adventure
 # /sd/apps/adventure.dapp
@@ -857,8 +857,8 @@ EXIT
 static const char BUNDLED_APP_TETRIS[] = R"DOLLAPP(# @dapp-format 1
 # @id tetris
 # @name Tetris
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.1.0 <2.0.0
 # @summary A falling-block puzzle game for the DOLL-OS canvas
 # /apps/tetris.dapp
@@ -871,7 +871,7 @@ static const char BUNDLED_APP_TETRIS[] = R"DOLLAPP(# @dapp-format 1
 # blocking on INPUT, and the whole frame is drawn by cell instead of
 # printed as lines.
 
-CANVAS 32 22
+CANVAS 80 36
 COLOR white
 PUT 8 10 "TETRIS"
 PUT 4 12 "arrows move - up rotates"
@@ -1265,30 +1265,29 @@ ADD i 1
 IF $i < 4 GOTO draw_piece
 
 COLOR pink
-PUT 23 1 "TETRIS"
+PUT 40 3 "T E T R I S"
 COLOR cyan
-PUT 23 3 "SCORE"
+PUT 40 7 "SCORE"
 COLOR white
-PUT 23 4 $score
+PUT 52 7 $score
 COLOR cyan
-PUT 23 6 "LINES"
+PUT 40 10 "LINES"
 COLOR white
-PUT 23 7 $lines
+PUT 52 10 $lines
 COLOR cyan
-PUT 23 9 "LEVEL"
+PUT 40 13 "LEVEL"
 COLOR white
-PUT 23 10 $level
+PUT 52 13 $level
 COLOR cyan
-PUT 23 12 "HI"
+PUT 40 16 "BEST"
 COLOR white
-PUT 23 13 $hiscore
+PUT 52 16 $hiscore
 COLOR yellow
-PUT 23 14 "<- ->"
-PUT 23 15 "move"
-PUT 23 16 "up rot"
-PUT 23 17 "dn soft"
-PUT 23 18 "spc drop"
-PUT 23 20 "esc quit"
+PUT 40 22 "LEFT/RIGHT  move"
+PUT 40 24 "UP          rotate"
+PUT 40 26 "DOWN        soft drop"
+PUT 40 28 "SPACE       hard drop"
+PUT 40 30 "ESC         quit"
 FLIP
 RETURN
 
@@ -1388,8 +1387,8 @@ EXIT
 static const char BUNDLED_APP_SNAKE[] = R"DOLLAPP(# @dapp-format 1
 # @id snake
 # @name Snake
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.1.0 <2.0.0
 # @summary The classic snake game for the DOLL-OS canvas
 # /apps/snake.dapp
@@ -1402,7 +1401,7 @@ static const char BUNDLED_APP_SNAKE[] = R"DOLLAPP(# @dapp-format 1
 # so collision and food placement are single lookups instead of a walk
 # down the body. Movement is paced off $millis, never off WAIT.
 
-CANVAS 40 22
+CANVAS 80 36
 COLOR green
 PUT 14 9 "SNAKE"
 COLOR white
@@ -1668,26 +1667,23 @@ EXPR scy $sny[$hd] + 1
 PUT $scx $scy "@@"
 
 COLOR pink
-PUT 31 1 "SNAKE"
+PUT 48 3 "S N A K E"
 COLOR cyan
-PUT 31 3 "SCORE"
+PUT 48 7 "SCORE"
 COLOR white
-PUT 31 4 $score
+PUT 60 7 $score
 COLOR cyan
-PUT 31 6 "LEN"
+PUT 48 10 "LENGTH"
 COLOR white
-PUT 31 7 $len
+PUT 60 10 $len
 COLOR cyan
-PUT 31 9 "HI"
+PUT 48 13 "BEST"
 COLOR white
-PUT 31 10 $hiscore
+PUT 60 13 $hiscore
 COLOR yellow
-PUT 31 13 "wasd"
-PUT 31 14 "or arw"
-PUT 31 16 "spc"
-PUT 31 17 "pause"
-PUT 31 19 "esc"
-PUT 31 20 "quit"
+PUT 48 19 "WASD / arrows  steer"
+PUT 48 22 "SPACE          pause"
+PUT 48 25 "ESC            quit"
 
 IF $paused = 0 GOTO dr_flip
 COLOR yellow
@@ -1794,8 +1790,8 @@ EXIT
 static const char BUNDLED_APP_DAPPCHAT[] = R"DOLLAPP(# @dapp-format 1
 # @id dappchat
 # @name DappChat
-# @version 1.1.4
-# @boards fnk0104
+# @version 1.2.0
+# @boards m5stack-tab5
 # @runtime >=1.4.2 <2.0.0
 # @echo off
 # @summary Chat with other DOLL-OS/DS units over the Sad Girls Club backend
@@ -1832,15 +1828,13 @@ CHR q 34
 # trimmed, so it survives both.
 CHR sp 32
 
-# Canvas geometry: header, feed, status, prompt. The panel scales its glyphs to
-# fit whatever grid it is handed, so these numbers are the font size -- fewer
-# columns means bigger text. 40x15 reads comfortably; raise $cols and $rows
-# together for more history at a smaller size.
-SET cols 40
-SET rows 15
-SET feedrows 11
-SET statusrow 12
-SET promptrow 14
+# Tab5 uses a full-width room with thirty-six visible history rows. The status
+# and live editor remain isolated at the bottom so incoming messages never jump.
+SET cols 100
+SET rows 40
+SET feedrows 36
+SET statusrow 37
+SET promptrow 39
 
 # how long the room may go unrefreshed, in milliseconds
 SET pollms 2000
@@ -2232,37 +2226,64 @@ EXIT
 static const char BUNDLED_APP_DAPPSTORE[] = R"DOLLAPP(# @dapp-format 1
 # @id dappstore
 # @name Dappstore
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.6.0 <2.0.0
 # @echo off
-# @summary Browse, install, update and repair verified Dapper packages
+# @summary A wide Tab5 front end for browsing and maintaining Dapper packages
 # /system/apps/dappstore.dapp
 #
-# A guided front end for the runtime's deliberately narrow DAPPER bridge. The
-# bridge enters Dapper.ino directly rather than executing a shell command, so
-# repository identity checks, HTTPS verification, SHA-256 validation, atomic
-# replacement, managed-path rules and rollback remain exactly the same as at
-# the shell. This app adds prompts and confirmations; it does not install files
-# itself.
+# DAPPER remains the only installation path. This interface only collects choices,
+# then returns to the terminal surface while Dapper prints verified operation details.
 
 :menu
-CLEAR
+CANVAS 100 40
+CLS
 COLOR pink
-PRINT "========================================"
-PRINT "              DAPPSTORE"
-PRINT "========================================"
+PUT 3 1 "DAPPSTORE // TAB5 PACKAGE DESK"
 COLOR white
-PRINT "1  browse compatible packages"
-PRINT "2  search the catalog"
-PRINT "3  package details"
-PRINT "4  install a package"
-PRINT "5  update packages"
-PRINT "6  remove a package"
-PRINT "7  refresh catalog"
-PRINT "8  verify installed packages"
-PRINT "q  return to DOLL-OS"
-PRINT ""
+PUT 3 3 "Choose an action in the command bar. Repository operations remain HTTPS + SHA-256 verified."
+
+COLOR cyan
+PUT 4 7 "1  BROWSE"
+COLOR white
+PUT 4 9 "All compatible packages"
+COLOR cyan
+PUT 4 13 "2  SEARCH"
+COLOR white
+PUT 4 15 "Find packages by keyword"
+COLOR cyan
+PUT 4 19 "3  DETAILS"
+COLOR white
+PUT 4 21 "Versions and installation state"
+COLOR cyan
+PUT 4 25 "4  INSTALL"
+COLOR white
+PUT 4 27 "Install to flash or SD"
+
+COLOR yellow
+PUT 53 7 "5  UPDATE"
+COLOR white
+PUT 53 9 "One package or everything"
+COLOR yellow
+PUT 53 13 "6  REMOVE"
+COLOR white
+PUT 53 15 "Keep the app's save data"
+COLOR yellow
+PUT 53 19 "7  REFRESH"
+COLOR white
+PUT 53 21 "Download the latest catalog"
+COLOR yellow
+PUT 53 25 "8  DOCTOR"
+COLOR white
+PUT 53 27 "Verify registry and hashes"
+
+COLOR pink
+PUT 4 34 "Q  RETURN TO DOLL-OS"
+COLOR white
+PUT 4 37 "The operation report opens in the terminal and returns here when acknowledged."
+FLIP
+
 INPUT choice "store> "
 IFEQ $choice "1" GOTO browse
 IFEQ $choice "2" GOTO search
@@ -2277,6 +2298,7 @@ IFEQ $choice "Q" GOTO leave
 GOTO menu
 
 :browse
+ENDCANVAS
 CLEAR
 COLOR cyan
 PRINT "COMPATIBLE PACKAGES"
@@ -2286,6 +2308,7 @@ GOSUB pause
 GOTO menu
 
 :search
+ENDCANVAS
 CLEAR
 INPUT query "search> "
 LEN n $query
@@ -2298,6 +2321,7 @@ GOSUB pause
 GOTO menu
 
 :info
+ENDCANVAS
 CLEAR
 INPUT id "package id> "
 LEN n $id
@@ -2307,6 +2331,7 @@ GOSUB pause
 GOTO menu
 
 :install
+ENDCANVAS
 CLEAR
 COLOR cyan
 PRINT "INSTALL PACKAGE"
@@ -2332,6 +2357,7 @@ GOSUB pause
 GOTO menu
 
 :update
+ENDCANVAS
 CLEAR
 COLOR cyan
 PRINT "UPDATE PACKAGES"
@@ -2351,6 +2377,7 @@ GOSUB pause
 GOTO menu
 
 :remove
+ENDCANVAS
 CLEAR
 COLOR yellow
 PRINT "REMOVE PACKAGE"
@@ -2367,6 +2394,7 @@ GOSUB pause
 GOTO menu
 
 :refresh
+ENDCANVAS
 CLEAR
 COLOR cyan
 PRINT "REFRESH CATALOG"
@@ -2376,6 +2404,7 @@ GOSUB pause
 GOTO menu
 
 :doctor
+ENDCANVAS
 CLEAR
 COLOR cyan
 PRINT "VERIFY INSTALLED PACKAGES"
@@ -2397,6 +2426,7 @@ INPUT waitkey "press enter> "
 RETURN
 
 :leave
+ENDCANVAS
 COLOR pink
 PRINT "Dappstore closed"
 EXIT
@@ -2641,6 +2671,14 @@ ENDCANVAS
 A canvas is at most 120 by 60 cells. run tetris is the worked example: a well
 in a 200-cell array, pieces rotated with EXPR, gravity paced off $millis, and
 every frame drawn cell by cell.
+
+Tab5 applications should normally use 84x36 for roomy calendar or grid views,
+or 100x40 for multi-panel tools. Those sizes retain readable glyphs on the
+1280x720 panel while exposing substantially more information than the inherited
+FNK layouts. Calendar and Sheet demonstrate 84x36; Files, Today, Dappstore, and
+Paint demonstrate 100x40. Touch is intentionally unavailable, so every visible
+action must remain reachable from the keyboard and its shortcut must be written
+on the canvas.
 
 Files:
 

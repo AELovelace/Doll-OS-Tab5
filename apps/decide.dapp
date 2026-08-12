@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id decide
 # @name Decide
-# @version 1.0.0
-# @boards m5cardputer,fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.0.0 <2.0.0
 # @summary Coin, dice, oracle and a shuffler for small decisions
 # /apps/decide.dapp

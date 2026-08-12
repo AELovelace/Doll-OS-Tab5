@@ -1,15 +1,15 @@
 # @dapp-format 1
 # @id lightsout
 # @name Lights Out
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.1.0 <2.0.0
 # @summary A solvable 7x7 light-switching puzzle with a spacious DS board
 # /apps/lightsout.dapp
 # Arrows move, space or enter flips a light and its four neighbours,
 # r restores the puzzle, n makes a new solvable puzzle, escape quits.
 
-CANVAS 60 25
+CANVAS 80 36
 DIM board 49
 DIM start 49
 SET quit 0
@@ -171,7 +171,7 @@ CLS
 COLOR pink
 PUT 4 1 "L I G H T S   O U T"
 COLOR cyan
-PUT 39 1 "moves: $moves"
+PUT 61 3 "moves: $moves"
 SET y 0
 :drawrow
 IF $y >= 7 GOTO drawfooter
@@ -210,9 +210,9 @@ ADD y 1
 GOTO drawrow
 :drawfooter
 COLOR pink
-PUT 4 21 "$msg"
+PUT 4 31 "$msg"
 COLOR white
-PUT 4 23 "arrows move   space/enter flip   r reset   n new   esc quit"
+PUT 4 34 "arrows move   space/enter flip   r reset   n new   esc quit"
 FLIP
 RETURN
 

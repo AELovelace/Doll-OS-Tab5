@@ -1,21 +1,20 @@
 # @dapp-format 1
 # @id calendar
 # @name Calendar
-# @version 1.0.2
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.4.2 <2.0.0
 # @echo off
-# @summary A full month calendar with persistent day reminders for DS
+# @summary A wide Tab5 month calendar with persistent day reminders
 # /apps/calendar.dapp
 # DS month planner for years 2000-2099. Arrows move the selected day,
 # a/d change month, n adds or replaces a reminder, x removes one,
 # h returns to the startup date, escape quits. Reminders are stored in
 # /apps/calendar.dat. The runtime has no clock API, so startup is explicit.
 
-# 56x24 rather than a full 80 columns: the panel scales the grid to fill the
-# terminal area, and 80 columns leaves each cell narrower than the 6px font, so
-# the whole month squeezes together. 56 gives square-ish cells at 7 per weekday.
-CANVAS 56 24
+# The 84x36 Tab5 layout gives every weekday an eleven-column lane while leaving
+# six calendar rows and a dedicated reminder panel visible together.
+CANVAS 84 36
 SET year 2026
 SET month 7
 SET day 31
@@ -154,7 +153,7 @@ IF $n = 0 GOTO editcancel
 GOSUB storetext
 GOSUB save
 SETSTR msg "reminder saved"
-CANVAS 56 24
+CANVAS 84 36
 RETURN
 :editcancel
 # If this was a newly reserved slot, release it again.
@@ -162,7 +161,7 @@ IF $found >= 0 GOTO editcancelview
 SUB count 1
 :editcancelview
 SETSTR msg "cancelled"
-CANVAS 56 24
+CANVAS 84 36
 RETURN
 :eventfull
 SETSTR msg "reminder list full (32)"
@@ -205,11 +204,11 @@ RETURN
 CLS
 GOSUB monthname
 COLOR pink
-PUT 2 1 "DOLL-OS DS CALENDAR"
+PUT 2 1 "DOLL-OS TAB5 CALENDAR"
 COLOR yellow
-PUT 38 1 "$mname $year"
+PUT 61 1 "$mname $year"
 COLOR cyan
-PUT 3 4 "SUN    MON    TUE    WED    THU    FRI    SAT"
+PUT 4 4 "SUN        MON        TUE        WED        THU        FRI        SAT"
 GOSUB firstweekday
 GOSUB monthdays
 SET d 1
@@ -220,8 +219,8 @@ SET col $cell
 MOD col 7
 SET row $cell
 DIV row 7
-EXPR x 3 + $col * 7
-EXPR y 6 + $row * 2
+EXPR x 5 + $col * 11
+EXPR y 7 + $row * 4
 SET yearfind $year
 SET monthfind $month
 SET dayfind $d
@@ -246,26 +245,26 @@ GOTO drawdays
 
 :drawselectedtext
 COLOR cyan
-PUT 2 19 "Selected: $year-$month-$day"
+PUT 2 30 "SELECTED  $year-$month-$day"
 GOSUB findevent
 IF $found < 0 GOTO shownone
 SET idx $found
 GOSUB fetchtext
 COLOR green
-PUT 2 20 "$line"
+PUT 2 32 "$line"
 GOTO showhelp
 :shownone
 COLOR blue
-PUT 2 20 "(no reminder)"
+PUT 2 32 "(no reminder for this day)"
 :showhelp
 COLOR white
-PUT 1 23 "arrows day  a/d month  n note  x del  h home  esc quit"
+PUT 1 35 "ARROWS day   A/D month   N note   X delete   H home   ESC quit"
 IFNE $msg "" GOTO showmsg
 FLIP
 RETURN
 :showmsg
 COLOR pink
-PUT 2 21 "$msg"
+PUT 46 32 "$msg"
 FLIP
 RETURN
 

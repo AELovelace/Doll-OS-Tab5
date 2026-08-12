@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id drill
 # @name Drill
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.1.0 <2.0.0
 # @summary Leitner-box flashcard reviewer backed by /apps/drill.deck
 # /apps/drill.dapp
@@ -26,10 +26,10 @@
 # total.
 
 SET maxcards 30
-SET qwidth 48
-SET awidth 48
-DIM qtext 1440
-DIM atext 1440
+SET qwidth 90
+SET awidth 90
+DIM qtext 2700
+DIM atext 2700
 DIM qlen 30
 DIM alen 30
 DIM level 30

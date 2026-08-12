@@ -1,99 +1,136 @@
 # @dapp-format 1
 # @id today
 # @name Today
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.4.2 <2.0.0
 # @echo off
-# @summary A pocket dashboard for focus, tasks, service events and device health
+# @summary A three-panel Tab5 dashboard for focus, tasks, events and device health
 # /apps/today.dapp
 # Reads Todo's plain-text task file and Control's event log. The focus line is
-# kept separately in /apps/today.focus.
+# kept separately in /apps/today.focus, preserving the original app's data format.
 
+# One wide canvas keeps the daily overview visible while the command bar handles input.
+CANVAS 100 40
 SETSTR focus "No focus set"
+SETSTR msg "F focus   R refresh   Q quit"
 GOSUB loadfocus
 
 :menu
-CLEAR
+CLS
 COLOR pink
-PRINT "TODAY"
+PUT 3 1 "TODAY // TAB5 DAILY DESK"
+COLOR white
+PUT 3 3 "FOCUS"
+COLOR yellow
+PUT 3 5 "$focus"
+
+# The left panel holds live device information without displacing personal data.
 COLOR cyan
-PRINT "Focus: $focus"
+PUT 3 9 "DEVICE"
 COLOR white
-PRINT ""
-PRINT "Device"
-PRINT "  battery $battery%   heap $heap"
-PRINT "  wifi $wifi   ip $ip   uptime $seconds seconds"
-PRINT ""
-COLOR yellow
-PRINT "Tasks"
-COLOR white
+PUT 3 11 "BATTERY  $battery%"
+PUT 3 13 "HEAP     $heap"
+PUT 3 15 "WIFI     $wifi"
+PUT 3 17 "IP       $ip"
+PUT 3 19 "UPTIME   $seconds seconds"
+
+COLOR cyan
+PUT 35 9 "TASKS"
 GOSUB tasks
-PRINT ""
-COLOR yellow
-PRINT "Recent service events"
-COLOR white
+COLOR cyan
+PUT 69 9 "RECENT SERVICE EVENTS"
 GOSUB events
-PRINT ""
-PRINT "f focus   r refresh   q quit"
+
+COLOR pink
+PUT 3 36 "$msg"
+COLOR white
+PUT 3 38 "TODAY reads /apps/todo.txt and /apps/control.log; those apps remain the editors."
+FLIP
+
 INPUT choice "today> "
 IFEQ $choice "f" GOTO setfocus
-IFEQ $choice "r" GOTO menu
+IFEQ $choice "F" GOTO setfocus
+IFEQ $choice "r" GOTO refreshed
+IFEQ $choice "R" GOTO refreshed
 IFEQ $choice "q" GOTO leave
+IFEQ $choice "Q" GOTO leave
+SETSTR msg "Unknown command: use F, R or Q"
+GOTO menu
+
+:refreshed
+SETSTR msg "Dashboard refreshed"
 GOTO menu
 
 :setfocus
 INPUT newfocus "focus> "
 LEN n $newfocus
-IF $n = 0 GOTO menu
+IF $n = 0 GOTO focuscancel
 SETSTR focus $newfocus
 FOPEN "/apps/today.focus" write
-IF $fok = 0 GOTO menu
+IF $fok = 0 GOTO focusfail
 FWRITE "$focus"
 FCLOSE
+SETSTR msg "Focus saved"
+GOTO menu
+:focuscancel
+SETSTR msg "Focus unchanged"
+GOTO menu
+:focusfail
+SETSTR msg "Could not save /apps/today.focus"
 GOTO menu
 
+# Draw up to twelve Todo rows in the middle panel.
 :tasks
+COLOR white
 FEXISTS have "/apps/todo.txt"
 IF $have = 0 GOTO notasks
 FOPEN "/apps/todo.txt" read
 IF $fok = 0 GOTO notasks
 SET count 0
+SET taskrow 11
 :taskloop
 FREAD line
 IF $feof = 1 GOTO taskdone
-PRINT "  $line"
+ADD taskrow 2
+PUT 35 $taskrow "$line"
 ADD count 1
-IF $count < 6 GOTO taskloop
-PRINT "  ..."
+IF $count < 12 GOTO taskloop
+COLOR blue
+PUT 35 35 "...more in Todo"
 :taskdone
 FCLOSE
 IF $count > 0 GOTO tasksdone
 :notasks
-FCLOSE
-PRINT "  (none; run todo to add tasks)"
+COLOR blue
+PUT 35 13 "(none; run Todo to add tasks)"
 :tasksdone
 RETURN
 
+# Draw up to twelve Control log rows in the right panel.
 :events
+COLOR white
 FEXISTS have "/apps/control.log"
 IF $have = 0 GOTO noevents
 FOPEN "/apps/control.log" read
 IF $fok = 0 GOTO noevents
 SET count 0
+SET eventrow 11
 :eventloop
 FREAD line
 IF $feof = 1 GOTO eventdone
-PRINT "  $line"
+ADD eventrow 2
+PUT 69 $eventrow "$line"
 ADD count 1
-IF $count < 4 GOTO eventloop
-PRINT "  ..."
+IF $count < 12 GOTO eventloop
+COLOR blue
+PUT 69 35 "...more in Control"
 :eventdone
 FCLOSE
 IF $count > 0 GOTO eventsdone
 :noevents
-FCLOSE
-PRINT "  (none; run control to check services)"
+COLOR blue
+PUT 69 13 "(none; run Control)"
 :eventsdone
 RETURN
 
@@ -108,5 +145,6 @@ FCLOSE
 RETURN
 
 :leave
+ENDCANVAS
 PRINT "today: done"
 EXIT

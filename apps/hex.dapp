@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id hex
 # @name Hex Editor
-# @version 1.0.1
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.4.2 <2.0.0
 # @echo off
 # @summary Inspect and patch files byte-for-byte without losing NULs or newlines
@@ -14,7 +14,7 @@ FSIZE size
 SET base 0
 SET cursor 0
 DIM bytes 16
-CANVAS 60 13
+CANVAS 100 30
 
 :loop
 GOSUB load_page
@@ -224,6 +224,16 @@ SET byte $bytes[$cursor]
 HEX hextext $byte 2
 PUT 1 10 "byte 0x$hextext  decimal $byte"
 :draw_flip
+COLOR pink
+PUT 54 3 "BYTE INSPECTOR"
+COLOR cyan
+PUT 54 6 "16-byte page"
+PUT 54 8 "N / P       page"
+PUT 54 10 "E           edit byte"
+PUT 54 12 "arrows      select"
+PUT 54 14 "X / ESC     close"
+COLOR white
+PUT 1 27 "Direct binary editing - changes are written immediately"
 FLIP
 RETURN
 

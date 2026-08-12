@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id feeds
 # @name Feeds
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.5.0 <2.0.0
 # @echo off
 # @summary An RSS headline reader with offline index and article rendering
@@ -188,7 +188,7 @@ RETURN
 CLEAR
 COLOR cyan
 PRINT "fetching $title"
-HTMLTEXT $link "/apps/feeds.article" "-" 76 0
+HTMLTEXT $link "/apps/feeds.article" "-" 94 0
 IF $httpok = 0 GOTO articlefail
 FOPEN "/apps/feeds.article" read
 IF $fok = 0 GOTO articlefail

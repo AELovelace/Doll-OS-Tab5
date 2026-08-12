@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 import { DappRuntime } from "./dapp-runtime.js";
@@ -318,6 +318,7 @@ test("the shipped hex editor reads a binary page and exits without changing it",
 async function runGrotto2({ answers, randoms = [] }) {
   const files = new MemoryFiles();
   const outputs = [];
+  const frames = [];
   let runtime;
   let queuedStart = false;
   const originalRandom = Math.random;
@@ -336,6 +337,7 @@ async function runGrotto2({ answers, randoms = [] }) {
       input(_prompt, resolve) { resolve(answers.shift() ?? ""); },
       canvas(canvas) {
         const text = chatCanvasText(canvas);
+        if (text.trim()) frames.push({ cols: canvas.cols, rows: canvas.rows, text });
         if (!queuedStart && text.trim()) {
           queuedStart = true;
           runtime.pushKey({ key: "Enter", ctrlKey: false });
@@ -345,7 +347,7 @@ async function runGrotto2({ answers, randoms = [] }) {
     runtime = new DappRuntime(io, files);
     const source = await readFile(new URL("../apps/grotto2.dapp", import.meta.url), "utf8");
     const result = await runtime.run(source);
-    return { result, runtime, files, outputs };
+    return { result, runtime, files, outputs, frames };
   } finally {
     Math.random = originalRandom;
     globalThis.setTimeout = originalSetTimeout;
@@ -359,7 +361,7 @@ test("The Cursed Grotto II reaches victory and saves its score", async () => {
     "1", "1", "1", "1", "1", "1", "1", "1",
     "d", "d"
   ];
-  const { result, runtime, files, outputs } = await runGrotto2({ answers });
+  const { result, runtime, files, outputs, frames } = await runGrotto2({ answers });
 
   assert.equal(result.ok, true, result.error?.message);
   assert.ok(outputs.some(line => line.includes("V I C T O R Y")));
@@ -367,6 +369,10 @@ test("The Cursed Grotto II reaches victory and saves its score", async () => {
   assert.equal(runtime.numbers.get("px"), 6);
   assert.equal(runtime.numbers.get("py"), 5);
   assert.equal(files.read("/apps/grotto2.hs"), "#1060\n");
+  assert.ok(frames.some(frame => frame.cols === 80 && frame.rows === 30
+    && frame.text.includes("THE ABYSSAL DEPTHS")), "wide title is rendered");
+  assert.ok(frames.some(frame => frame.cols === 84 && frame.rows === 36
+    && frame.text.includes("ADVENTURER")), "wide map dashboard is rendered");
 });
 
 test("The Cursed Grotto II random encounters return to movement", async () => {
@@ -857,7 +863,7 @@ test("the shipped Reader saves an article, resumes it, and preserves it when ref
         arrayBuffer: async () => new TextEncoder().encode("temporarily unavailable").buffer
       };
     }
-    const paragraphs = Array.from({ length: 25 }, (_, index) => `<p>Article line ${index + 1}</p>`).join("");
+    const paragraphs = Array.from({ length: 50 }, (_, index) => `<p>Article line ${index + 1}</p>`).join("");
     const body = `<h1>Saved Article</h1>${paragraphs}<a href="/next">Next</a>`;
     return {
       status: 200,
@@ -888,13 +894,13 @@ test("the shipped Reader saves an article, resumes it, and preserves it when ref
 
   assert.equal(result.ok, true);
   assert.equal(fetches, 2);
-  assert.match(files.read("/apps/reader-1-0.txt"), /Article line 25/);
+  assert.match(files.read("/apps/reader-1-0.txt"), /Article line 50/);
   assert.match(files.read("/apps/reader-1-0.lnk"), /https:\/\/example\.test\/next/);
   assert.equal(files.exists("/apps/reader-1-1.txt"), false);
   assert.equal(files.read("/apps/reader-1.meta"), [
     "Saved Article",
     "https://example.test/article",
-    "20",
+    "34",
     "0",
     ""
   ].join("\n"));
@@ -970,6 +976,61 @@ test("the remaining ecosystem apps enter and leave through their normal UI", asy
   }
 });
 
+test("Tab5-enhanced apps render their wide primary workspaces", async () => {
+  const cases = [
+    { id: "calendar", cols: 84, rows: 36, marker: "TAB5 CALENDAR", keyExit: true },
+    { id: "sheet", cols: 84, rows: 34, marker: "S H E E T", keyExit: true },
+    { id: "paint", cols: 100, rows: 40, marker: "TOOLS + PALETTE", keyExit: true },
+    { id: "files", cols: 100, rows: 40, marker: "FILES // /", keyExit: false },
+    { id: "today", cols: 100, rows: 40, marker: "TAB5 DAILY DESK", keyExit: false },
+    { id: "dappstore", cols: 100, rows: 40, marker: "TAB5 PACKAGE DESK", keyExit: false },
+  ];
+
+  for (const app of cases) {
+    const frames = [];
+    let runtime;
+    let exitQueued = false;
+    const io = {
+      output() {}, clear() {}, status() {}, endCanvas() {}, waveStop() {},
+      input(_prompt, resolve) { resolve("q"); },
+      canvas(canvas) {
+        const text = chatCanvasText(canvas);
+        frames.push({ cols: canvas.cols, rows: canvas.rows, text });
+        if (app.keyExit && !exitQueued && text.includes(app.marker)) {
+          exitQueued = true;
+          runtime.pushKey({ key: "Escape", ctrlKey: false });
+        }
+      }
+    };
+    runtime = new DappRuntime(io, new MemoryFiles());
+    const source = await readFile(new URL(`../apps/${app.id}.dapp`, import.meta.url), "utf8");
+    const result = await runtime.run(source);
+    assert.equal(result.ok, true, `${app.id}: ${result.error?.message || "failed"}`);
+    assert.ok(frames.some(frame => frame.cols === app.cols && frame.rows === app.rows
+      && frame.text.includes(app.marker)), `${app.id} renders ${app.cols}x${app.rows}`);
+  }
+});
+
+test("every shipped app declares Tab5 compatibility and every fixed canvas is wide", async () => {
+  const appRoot = new URL("../apps/", import.meta.url);
+  const names = (await readdir(appRoot)).filter(name => name.endsWith(".dapp"));
+  assert.equal(names.length, 46);
+
+  for (const name of names) {
+    const source = await readFile(new URL(name, appRoot), "utf8");
+    assert.match(source, /^# @boards .*\bm5stack-tab5\b/m, `${name} declares Tab5 support`);
+
+    for (const match of source.matchAll(/^CANVAS (\d+) (\d+)$/gm)) {
+      assert.ok(Number(match[1]) >= 80, `${name} fixed canvas is at least 80 columns`);
+      assert.ok(Number(match[2]) >= 30, `${name} fixed canvas is at least 30 rows`);
+    }
+  }
+
+  const chat = await readFile(new URL("dappchat.dapp", appRoot), "utf8");
+  assert.match(chat, /^SET cols 100$/m);
+  assert.match(chat, /^SET rows 40$/m);
+});
+
 test("Tracker Music renders its sequencer and exits with audio released", async () => {
   const files = new MemoryFiles();
   let runtime;
@@ -1007,7 +1068,7 @@ test("Tracker Music saves per-note tones and opens help", async () => {
       const text = chatCanvasText(canvas);
       if (!text.trim()) return;
       frames.push(text);
-      if (text.includes("TRACKER MUSIC CONTROLS")) {
+      if (text.includes("TRACKER MUSIC // CONTROLS")) {
         push("x");
         return;
       }
@@ -1035,8 +1096,8 @@ test("Tracker Music saves per-note tones and opens help", async () => {
   const result = await runtime.run(source);
 
   assert.equal(result.ok, true, result.error?.message);
-  assert.ok(frames.some(frame => frame.includes("TRACKER MUSIC CONTROLS")));
-  assert.ok(frames.some(frame => frame.includes("PAT 1/8") && frame.includes("TONE D#4")));
+  assert.ok(frames.some(frame => frame.includes("TRACKER MUSIC // CONTROLS")));
+  assert.ok(frames.some(frame => frame.includes("PATTERN 1/8") && frame.includes("TONE D#4")));
   const saved = files.read("/apps/tracker-music.dat").trimEnd().split("\n");
   assert.equal(saved.length, 58);
   //"2 1 4" is the default square/triangle/noise per channel, unchanged since this
@@ -1094,7 +1155,7 @@ test("Tracker Music switches and saves multiple patterns independently", async (
   const result = await runtime.run(source);
 
   assert.equal(result.ok, true, result.error?.message);
-  assert.ok(frames.some(frame => frame.includes("PAT 2/8") && frame.includes("TONE C 5")));
+  assert.ok(frames.some(frame => frame.includes("PATTERN 2/8") && frame.includes("TONE C 5")));
   const saved = files.read("/apps/tracker-music.dat").trimEnd().split("\n");
   //octave (5) is TM5's own header line; tone 48 is C5 ((octave-1)*12+semitone = 4*12+0)
   assert.deepEqual(saved.slice(0, 9),
@@ -1203,16 +1264,16 @@ test("Tracker Music's load browser opens on L, lists the last save location, and
   let loadFrame = 0;
   const answers = ["songs", "jam.dat"];
   const push = key => runtime.pushKey({ key, ctrlKey: false });
-  //the step-0 cell on the "SQR" (channel 1's default square-wave label) row: a
-  //fixed 2-column slot starting right after the label + gap, "D#"/"C " for a
+  //the step-0 cell on the "CH1 SQR" (channel 1's default square-wave label) row:
+  //a fixed 2-column slot beginning at column ten, "D#"/"C " for a
   //placed note or "." for empty. The cursor "@" only overlays it while the
   //cursor sits on step 0, which the ArrowRight below moves off of, so this
   //reads the real content for the rest of the run. Sliced by fixed column
   //rather than whitespace-stripped, since a natural note's trailing space
   //would otherwise collapse and throw off alignment.
   const step0Cell = frame => {
-    const line = frame.split("\n").find(l => l.startsWith("SQR"));
-    return line ? line.slice(4, 6).trim() : "";
+    const line = frame.split("\n").find(l => l.includes("CH1 SQR"));
+    return line ? line.slice(10, 12).trim() : "";
   };
   const io = {
     output() {}, clear() {}, status() {}, endCanvas() {}, waveStop() {},
@@ -1527,17 +1588,19 @@ test("Data profiles a local table and Today reads shared app files", async () =>
 
   answers = ["q"];
   outputs = [];
+  const frames = [];
   files = new MemoryFiles({
     "/apps/todo.txt": "[1] ship apps\n",
     "/apps/control.log": "[2] UP API HTTP=200 ms=4\n"
   });
   runtime = new DappRuntime({
-    output(text) { outputs.push(text); }, clear() {}, status() {}, canvas() {}, endCanvas() {}, waveStop() {},
+    output(text) { outputs.push(text); }, clear() {}, status() {},
+    canvas(canvas) { frames.push(chatCanvasText(canvas)); }, endCanvas() {}, waveStop() {},
     input(_prompt, resolve) { resolve(answers.shift()); }
   }, files);
   source = await readFile(new URL("../apps/today.dapp", import.meta.url), "utf8");
   result = await runtime.run(source);
   assert.equal(result.ok, true);
-  assert.ok(outputs.some(line => line.includes("ship apps")));
-  assert.ok(outputs.some(line => line.includes("UP API")));
+  assert.ok(frames.some(frame => frame.includes("ship apps")));
+  assert.ok(frames.some(frame => frame.includes("UP API")));
 });

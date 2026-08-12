@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id reader
 # @name Reader
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.5.0 <2.0.0
 # @echo off
 # @summary An offline web library with paging, search and saved reading positions
@@ -23,15 +23,15 @@
 # Reading: space/down advances, up goes back, / searches, L saves a linked page as
 # another library item, B/escape returns to the library and saves the position.
 
-SET pagesize 20
-SET linewidth 74
+SET pagesize 34
+SET linewidth 94
 SET slots 12
-DIM pagetext 1480
-DIM pagelen 20
+DIM pagetext 3196
+DIM pagelen 34
 
 SETSTR lastneedle ""
 
-CANVAS 80 26
+CANVAS 100 40
 GOTO menu
 
 # ---------------------------------------------------------------- library
@@ -73,14 +73,14 @@ GOTO mn_list
 
 :mn_done
 COLOR yellow
-PUT 0 22 "A add   R refresh   D delete   Q quit"
+PUT 0 35 "A add   R refresh   D delete   Q quit"
 COLOR cyan
-PUT 0 24 "type a slot number to read"
+PUT 0 38 "type a slot number to read"
 FLIP
 
 ENDCANVAS
 INPUT cmd "reader> "
-CANVAS 80 26
+CANVAS 100 40
 IFEQ $cmd "q" GOTO leave
 IFEQ $cmd "Q" GOTO leave
 IFEQ $cmd "a" GOTO add
@@ -116,7 +116,7 @@ SET gen 0
 SET oldgen 1
 GOSUB fetchslot
 :addcancel
-CANVAS 80 26
+CANVAS 100 40
 GOTO menu
 
 :libraryfull
@@ -125,7 +125,7 @@ COLOR red
 PRINT "reader: all twelve slots are full"
 COLOR white
 INPUT dummy "enter> "
-CANVAS 80 26
+CANVAS 100 40
 GOTO menu
 
 :refresh
@@ -143,7 +143,7 @@ SET oldgen $gen
 EXPR gen 1 - $gen
 GOSUB fetchslot
 :rf_done
-CANVAS 80 26
+CANVAS 100 40
 GOTO menu
 
 :delete
@@ -164,7 +164,7 @@ FDELETE "/apps/reader-$slot-0.lnk"
 FDELETE "/apps/reader-$slot-1.txt"
 FDELETE "/apps/reader-$slot-1.lnk"
 :dl_done
-CANVAS 80 26
+CANVAS 100 40
 GOTO menu
 
 # in: slot, title, url, gen, oldgen -- downloads and commits at position zero
@@ -265,7 +265,7 @@ GOTO rd_wait
 :rd_search
 ENDCANVAS
 INPUT needle "/"
-CANVAS 80 26
+CANVAS 100 40
 LEN n $needle
 IF $n = 0 GOTO rd_wait
 SETSTR lastneedle $needle
@@ -327,7 +327,7 @@ FCLOSE
 SET slot $article
 GOSUB loadmeta
 SET targetline $restore
-CANVAS 80 26
+CANVAS 100 40
 GOSUB gotoline
 GOSUB readpage
 GOSUB draw
@@ -377,7 +377,7 @@ RETURN
 :ds_notfound
 GOSUB draw
 COLOR red
-PUT 0 23 "not found: $needle"
+PUT 0 37 "not found: $needle"
 FLIP
 RETURN
 
@@ -535,13 +535,13 @@ GOTO dr_loop
 EXPR lastline $topline + $pagecount
 EXPR firstshown $topline + 1
 COLOR cyan
-PUT 0 23 "lines $firstshown..$lastline"
+PUT 0 37 "lines $firstshown..$lastline"
 IF $ateof = 0 GOTO dr_more
 COLOR yellow
-PUT 22 23 "end"
+PUT 22 37 "end"
 :dr_more
 COLOR yellow
-PUT 0 25 "space next  up prev  / find  n again  L save link  B back"
+PUT 0 39 "space next  up prev  / find  n again  L save link  B back"
 FLIP
 RETURN
 

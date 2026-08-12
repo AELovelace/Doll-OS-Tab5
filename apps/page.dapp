@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id page
 # @name Page
-# @version 1.0.1
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.4.2 <2.0.0
 # @echo off
 # @summary A full-screen text pager with line jump and search
@@ -29,18 +29,18 @@
 # and it wraps at most once (tracked by `wrapped`), so a search with no
 # match anywhere in the file terminates instead of looping forever.
 
-CANVAS 80 26
-SET pagesize 22
-SET linewidth 74
-DIM pagetext 1628
-DIM pagelen 22
+CANVAS 100 40
+SET pagesize 34
+SET linewidth 94
+DIM pagetext 3196
+DIM pagelen 34
 
 COLOR pink
-PUT 24 3 "P A G E"
+PUT 40 5 "P A G E"
 COLOR white
-PUT 10 6 "space/down next page   up previous page"
-PUT 10 7 "g goes to a line        / searches, n repeats"
-PUT 10 8 "f opens another file    esc quits"
+PUT 20 10 "SPACE/DOWN next page     UP previous page"
+PUT 20 12 "G goes to a line         / searches, N repeats"
+PUT 20 14 "F opens another file     ESC quits"
 FLIP
 WAIT 1600
 
@@ -95,7 +95,7 @@ ENDCANVAS
 COLOR white
 INPUT gotext "line number> "
 GOSUB str2num
-CANVAS 80 26
+CANVAS 100 40
 IF $got = 0 GOTO lp_wait
 EXPR target $num - 1
 IF $target < 0 GOTO lp_wait
@@ -109,7 +109,7 @@ GOTO lp_wait
 ENDCANVAS
 COLOR white
 INPUT needle "/"
-CANVAS 80 26
+CANVAS 100 40
 LEN needlelen $needle
 IF $needlelen = 0 GOTO lp_wait
 SETSTR lastneedle $needle
@@ -127,7 +127,7 @@ GOTO lp_wait
 ENDCANVAS
 COLOR white
 INPUT newpath "path> "
-CANVAS 80 26
+CANVAS 100 40
 LEN pl $newpath
 IF $pl = 0 GOTO lp_wait
 SETSTR path $newpath
@@ -181,7 +181,7 @@ RETURN
 :ds_notfound
 GOSUB draw
 COLOR red
-PUT 0 24 "not found: $needle"
+PUT 0 37 "not found: $needle"
 FLIP
 RETURN
 
@@ -346,19 +346,19 @@ GOTO dr_loop
 
 EXPR lastline $topline + $pagecount
 COLOR cyan
-PUT 0 23 "lines"
+PUT 0 37 "lines"
 COLOR white
 EXPR firstshown $topline + 1
-PUT 6 23 $firstshown
-PUT 10 23 ".."
-PUT 13 23 $lastline
+PUT 6 37 $firstshown
+PUT 10 37 ".."
+PUT 13 37 $lastline
 IF $ateof = 0 GOTO dr_notend
 COLOR yellow
-PUT 20 23 "(end of file)"
+PUT 20 37 "(end of file)"
 :dr_notend
 
 COLOR yellow
-PUT 0 25 "space next  up prev  g goto  / find  n again  f open  esc quit"
+PUT 0 39 "SPACE next   UP previous   G goto   / find   N again   F open   ESC quit"
 FLIP
 RETURN
 

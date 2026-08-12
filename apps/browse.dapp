@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id browse
 # @name Browse
-# @version 2.0.0
-# @boards fnk0104
+# @version 2.1.0
+# @boards m5stack-tab5
 # @runtime >=1.5.0 <2.0.0
 # @echo off
 # @summary A text-mode web browser: fetch, HTML to text, link following
@@ -24,9 +24,9 @@
 # transliterated to ASCII by the renderer because the panel font cannot draw anything
 # above 126 (see ansiFilterByte in Display.ino).
 
-SET wrapcol 76
+SET wrapcol 94
 SET maxlinks 200
-SET pagelines 20
+SET pagelines 34
 
 SETSTR textpath "/browse.txt"
 SETSTR linkpath "/browse.lnk"

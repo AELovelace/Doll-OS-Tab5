@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id contacts
 # @name Contacts
-# @version 1.0.1
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.4.2 <2.0.0
 # @echo off
 # @summary A persistent 36-entry address book using DS's larger memory budget
@@ -11,12 +11,12 @@
 # phone, email, room, or anything else. Stored in /apps/contacts.dat.
 
 SET slots 36
-SET namewidth 40
-SET detailwidth 80
+SET namewidth 48
+SET detailwidth 94
 DIM namelen 36
 DIM detaillen 36
-DIM names 1440
-DIM details 2880
+DIM names 1728
+DIM details 3384
 GOSUB load
 
 :menu

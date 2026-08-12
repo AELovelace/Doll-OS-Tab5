@@ -207,7 +207,7 @@
                                                       "steps":  250000
                                                   }
                                    },
-                   "fnk0104":  {
+    "fnk0104":  {
                                        "runtime":  "1.9.0",
                                    "limits":  {
                                                   "lines":  4000,
@@ -222,7 +222,24 @@
                                                   "canvas_rows":  60,
                                                   "steps":  1000000,
                                                   "buffer_bytes":  262144
-                                              }
                                }
-               }
+                },
+    "m5stack-tab5":  {
+                           "runtime":  "1.9.0",
+                           "limits":  {
+                                          "lines":  4000,
+                                          "labels":  512,
+                                          "numeric_variables":  128,
+                                          "string_variables":  64,
+                                          "string_length":  4096,
+                                          "arrays":  32,
+                                          "array_cells":  16384,
+                                          "call_depth":  64,
+                                          "canvas_columns":  120,
+                                          "canvas_rows":  60,
+                                          "steps":  1000000,
+                                          "buffer_bytes":  262144
+                                      }
+                }
+}
 }

@@ -70,6 +70,47 @@ writeback and trigger the blue underrun.
 6. Exit each app and confirm the terminal history returns without stale canvas
    rows.
 
+## Tab5-enhanced application regression
+
+Run these checks with the local Tab5 keyboard; touch must remain inert throughout.
+
+1. Run `calendar`. Confirm all seven weekday lanes, six possible week rows, the
+   selected date, reminder text, and shortcut footer fit together. Add and delete
+   a reminder, then restart the app and confirm its save file remains compatible.
+2. Run `files`. Browse a directory containing more than 28 entries, change pages,
+   enter and leave a directory, preview a file longer than one screen, and cancel
+   a delete. Confirm the title, size column, status line, and footer do not overlap.
+3. Run `today` with Todo and Control data present. Confirm focus/device, tasks,
+   and service events occupy three simultaneous panels; change the focus and
+   verify `/apps/today.focus` survives restart.
+4. Run `sheet`. Move through all twenty rows without viewport scrolling, enter a
+   label longer than five characters, evaluate a formula, save, wipe, and reload.
+5. Run `tracker-music`. Confirm all sixteen steps, three tracks, song chain, and
+   three shortcut rows remain visible. Exercise help plus the 24-entry save/load
+   browser and reload an existing TM5 song.
+6. Run `dappstore`. Confirm its two-column action desk appears, then browse and
+   inspect package details. Dapper output must switch cleanly to the terminal and
+   the canvas menu must return after the acknowledgement prompt.
+7. Run `paint`. Confirm the entire 56x28 artwork and permanent tool/palette panel
+   fit together. Save and reload existing `/apps/paint.dat` artwork unchanged.
+8. Run `grotto2`. Confirm the title is no longer clipped and the map, player,
+   status dashboard, movement legend, and zone name fit in the wide map frame.
+9. Exercise the expanded data canvases: `dappchat` at 100x40, `page` and `reader`
+   with 34 visible content rows, `plot` with its 98x30 graph, `synth` with 80-column
+   waveforms, and `sysmon` with its 90-sample/45-second heap history.
+10. Exercise the wide game set: `2048`, `four`, `habits`, `life`, `lightsout`,
+    `mastermind`, `mines`, `simon`, `snake`, `sudoku`, and `tetris`. Confirm every
+    board remains intact and each score/control panel occupies the new side space.
+11. Run `hex` and `lamp`; confirm their inspectors, live values, and instructions
+    remain visible together without covering editable data.
+12. In `browse`, `feeds`, `requests`, `data`, `contacts`, `drill`, `notes`, and
+    `passwords`, exercise the widened records/pages and confirm long values are not
+    truncated at the former Cardputer-era widths.
+13. Launch every remaining terminal-native app once and confirm its menu, prompt,
+    and output use the Tab5 terminal cleanly without horizontal clipping.
+14. Exit every app with its documented key and confirm the command bar, status bar,
+   and shell history are restored without stale pixels or a hidden caret.
+
 ## Game Boy display and ES8388 audio regression
 
 1. Launch the Tetris ROM in `fit` mode and play continuously for at least five

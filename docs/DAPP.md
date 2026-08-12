@@ -288,6 +288,14 @@ A canvas is at most 120 by 60 cells. `run tetris` is the worked example: a well
 in a 200-cell array, pieces rotated with `EXPR`, gravity paced off `$millis`, and
 every frame drawn cell by cell.
 
+Tab5 applications should normally use `84x36` for roomy calendar or grid views,
+or `100x40` for multi-panel tools. Those sizes retain readable glyphs on the
+1280x720 panel while exposing substantially more information than the inherited
+FNK layouts. The bundled Calendar and Sheet demonstrate `84x36`; Files, Today,
+Dappstore, and Paint demonstrate `100x40`. Touch is intentionally unavailable,
+so every visible action must remain reachable from the keyboard and the active
+focus or shortcut state must be written on the canvas.
+
 ## Files
 
 One file can be open at a time — `FOPEN` closes any previous one, and the app

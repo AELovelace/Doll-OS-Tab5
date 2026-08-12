@@ -1,23 +1,23 @@
 # @dapp-format 1
 # @id sysmon
 # @name Sysmon
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.1.0 <2.0.0
 # @summary Live heap, battery, network and uptime dashboard
 # /apps/sysmon.dapp
 # A live dashboard for the values a .dapp can see: free heap, battery,
 # network, uptime. R resets the peaks, escape quits.
 #
-# The heap graph is a scrolling window of the last 36 samples, one every
+# The heap graph is a scrolling window of the last 90 samples, one every
 # half second. The array is shifted left rather than used as a ring buffer:
-# 36 cells is nothing to move, and it means the drawing code can read the
+# 90 cells is little to move, and it means the drawing code can read the
 # samples in the order they happened instead of unwrapping an index. The
 # window is scaled to its own minimum and maximum, so the graph shows the
-# shape of the last eighteen seconds rather than a flat line near the top.
+# shape of the last forty-five seconds rather than a flat line near the top.
 
-CANVAS 40 15
-DIM hist 36
+CANVAS 100 40
+DIM hist 90
 
 SET hcount 0
 GOSUB resetpeaks
@@ -54,11 +54,11 @@ SET j 0
 EXPR j1 $j + 1
 SET hist[$j] $hist[$j1]
 ADD j 1
-IF $j < 35 GOTO sm_shift
-SET hist[35] $now
+IF $j < 89 GOTO sm_shift
+SET hist[89] $now
 ADD hcount 1
-IF $hcount <= 36 GOTO sm_done
-SET hcount 36
+IF $hcount <= 90 GOTO sm_done
+SET hcount 90
 :sm_done
 RETURN
 
@@ -82,75 +82,75 @@ COLOR white
 EXPR kb floor($now / 1024)
 PUT 13 0 "$kb kB"
 COLOR cyan
-PUT 22 0 "min"
+PUT 30 0 "min"
 COLOR white
 EXPR kb floor($lowest / 1024)
-PUT 26 0 $kb
+PUT 34 0 $kb
 COLOR cyan
-PUT 31 0 "max"
+PUT 48 0 "max"
 COLOR white
 EXPR kb floor($highest / 1024)
-PUT 35 0 $kb
+PUT 52 0 $kb
 
 GOSUB graph
 
 COLOR blue
-PUT 0 8 "+----------------------------------+"
+PUT 0 28 "+----------------------------------------------------------------------------------------+"
 COLOR white
-PUT 37 8 "18s"
+PUT 91 28 "45s"
 
 GOSUB battline
 GOSUB netline
 GOSUB clockstr
 
 COLOR cyan
-PUT 0 12 "up"
+PUT 0 35 "up"
 COLOR white
-PUT 5 12 $clock
+PUT 5 35 $clock
 COLOR cyan
-PUT 0 13 "cwd"
+PUT 32 35 "cwd"
 COLOR white
-PUT 5 13 "$cwd"
+PUT 37 35 "$cwd"
 
 COLOR yellow
-PUT 0 14 "r resets peaks          esc quits"
+PUT 0 39 "r resets peaks                                                      esc quits"
 FLIP
 RETURN
 
 # the window is scaled to its own extremes, with a floor of one so a heap
 # that never moves draws a flat line instead of dividing by zero
 :graph
-EXPR first 36 - $hcount
-SET lo $hist[35]
-SET hi $hist[35]
+EXPR first 90 - $hcount
+SET lo $hist[89]
+SET hi $hist[89]
 SET c $first
 :gr_range
 IF $hist[$c] < $lo GOSUB grlo
 IF $hist[$c] > $hi GOSUB grhi
 ADD c 1
-IF $c < 36 GOTO gr_range
+IF $c < 90 GOTO gr_range
 EXPR span $hi - $lo
 IF $span > 0 GOTO gr_draw
 SET span 1
 :gr_draw
 SET c $first
 :gr_col
-EXPR h floor(($hist[$c] - $lo) * 6 / $span + 0.5)
+EXPR h floor(($hist[$c] - $lo) * 24 / $span + 0.5)
 IF $h > 0 GOTO gr_bar
 SET h 1
 :gr_bar
 COLOR cyan
-IF $c = 35 GOSUB grnow
+IF $c = 89 GOSUB grnow
 SET lvl 1
 :gr_cell
 IF $lvl > $h GOTO gr_next
-EXPR gy 8 - $lvl
+EXPR gy 28 - $lvl
 PUT $c $gy "#"
 ADD lvl 1
 GOTO gr_cell
 :gr_next
 ADD c 1
-IF $c < 36 GOTO gr_col
+IF $c < 90 GOTO gr_col
 RETURN
 
 :grlo
@@ -165,9 +165,9 @@ RETURN
 
 :battline
 COLOR cyan
-PUT 0 9 "batt"
+PUT 0 31 "batt"
 COLOR white
-PUT 5 9 "$battery%"
+PUT 5 31 "$battery%"
 EXPR fill floor($battery / 10)
 SETSTR bar "["
 SET j 0
@@ -183,7 +183,7 @@ IF $j < 10 GOTO bl_cell
 APPEND bar "]"
 COLOR green
 IF $battery < 50 GOSUB battwarn
-PUT 12 9 $bar
+PUT 12 31 $bar
 RETURN
 
 :battwarn
@@ -195,16 +195,16 @@ RETURN
 
 :netline
 COLOR cyan
-PUT 0 10 "wifi"
+PUT 32 31 "wifi"
 IF $wifi = 1 GOTO nl_up
 COLOR red
-PUT 5 10 "offline"
+PUT 37 31 "offline"
 RETURN
 :nl_up
 COLOR green
-PUT 5 10 "online"
+PUT 37 31 "online"
 COLOR white
-PUT 13 10 "$ip"
+PUT 45 31 "$ip"
 RETURN
 
 # ---------------------------------------------------------------- uptime
