@@ -350,6 +350,28 @@ void drawDisplayFrame();
 int readBatteryPercent();
 int wifiIsConnected();
 
+//   Serializes the Tab5's *internal* I2C bus (GPIO31/32), which is shared by the
+//   ES8388 codec (0x10), both PI4IO expanders (0x43/0x44) and the INA226 the
+//   battery readings come from (0x41). M5Unified's I2C_Class does no locking of
+//   its own -- every method is a bare passthrough to m5gfx::i2c -- so two tasks
+//   using it concurrently interleave transactions on one hardware master.
+//
+//   That is not merely a garbled register read here. Radio.ino programs the codec
+//   from radioTask while the status bar polls the INA226 from loop() on every
+//   frame, and the amp-enable write is a read-modify-write of PI4IO1's output byte
+//   (0x05) -- the byte that also carries bit4=LCD Reset and bit5=GT911 touch reset
+//   (see M5GFX.cpp's Tab5 bring-up table). A read corrupted by an interleaved
+//   battery transaction writes those reset lines back low, dropping the panel into
+//   reset hard enough that only a physical power cycle recovers the board.
+//
+//   Every In_I2C access this firmware makes must be wrapped. Recursive, so a
+//   caller already holding the bus can still use the leaf helpers. Returns false
+//   if the bus could not be claimed within timeoutMs; callers decide whether that
+//   is fatal (codec bring-up) or skippable (a status-bar battery reading).
+void boardI2cBegin();
+bool boardI2cLock(uint32_t timeoutMs);
+void boardI2cUnlock();
+
 //heap instrumentation (see SysInfo.ino)
 const int HEAP_CHECKPOINT_MAX = 16;
 struct HeapCheckpoint {

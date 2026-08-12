@@ -98,11 +98,12 @@ writeback and trigger the blue underrun.
 ## Game Boy display and ES8388 audio regression
 
 1. Launch the Tetris ROM in `fit` mode and play continuously for at least five
-   minutes. Confirm falling pieces update without cyan flashes or partial frames.
+   minutes. Tab5 `fit` is a centered, integer-scaled 480x432 image; confirm
+   falling pieces update without a black screen, cyan flashes, or partial frames.
 2. Open and close the Escape settings menu several times. Confirm both the menu
    and resumed game replace the complete frame without stale pixels.
 3. Repeat the test in `1x` mode so the native emulator framebuffer also crosses
-   the strip-chunked push path.
+   the Game-Boy-only internal staging strip.
 4. Confirm the serial log reports `ES8388 codec up` and never attempts an ES8311
    address. Listen for correct Game Boy pitch and clean audio on launch and exit.
 5. After quitting, play radio or local music, then launch Tetris again. Confirm

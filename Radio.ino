@@ -143,21 +143,42 @@ struct AudioCodecRegister {
     uint8_t value;
 };
 
+//Both helpers below run on radioTask while loop() is polling the INA226 on the same
+//bus, so each holds boardI2cLock() across its whole transaction (see global.h). The
+//lock is taken *outside* the retry loop: a retry only makes sense if the bus is
+//genuinely busy, and releasing between attempts would let the racing reader back in.
 static bool audioCodecWrite(uint8_t reg, uint8_t value) {
-    for (int attempt = 0; attempt < 3; attempt++) {
-        if (M5.In_I2C.writeRegister8(TAB5_ES8388_ADDRESS, reg, value, AUDIO_I2C_SPEED)) {
-            return true;
-        }
-        delay(1);
+    if (!boardI2cLock(1000)) {
+        Serial.printf("[audio] I2C bus busy, skipped ES8388 register 0x%02X\n", reg);
+        return false;
     }
-    Serial.printf("[audio] ES8388 write failed at register 0x%02X\n", reg);
-    return false;
+    bool ok = false;
+    for (int attempt = 0; attempt < 3 && !ok; attempt++) {
+        ok = M5.In_I2C.writeRegister8(TAB5_ES8388_ADDRESS, reg, value, AUDIO_I2C_SPEED);
+        if (!ok) {
+            delay(1);
+        }
+    }
+    boardI2cUnlock();
+    if (!ok) {
+        Serial.printf("[audio] ES8388 write failed at register 0x%02X\n", reg);
+    }
+    return ok;
 }  // Writes one codec register with short retries for a busy shared internal bus.
 
+//PI4IO1 register 0x05 is a read-modify-write of a byte this board also keeps the LCD
+//reset (bit4) and touch reset (bit5) in, so an unlocked bitOn here can write those
+//lines back low and take the panel down with it. This is the access that made "radio
+//play" kill the tablet outright; the lock is what makes it safe, not the retry.
 static bool audioCodecSetAmp(bool enabled) {
+    if (!boardI2cLock(1000)) {
+        Serial.println("[audio] I2C bus busy, speaker amp left unchanged");
+        return false;
+    }
     bool ok = enabled
         ? M5.In_I2C.bitOn(TAB5_PI4IO1_ADDRESS, 0x05, 0b00000010, AUDIO_I2C_SPEED)
         : M5.In_I2C.bitOff(TAB5_PI4IO1_ADDRESS, 0x05, 0b00000010, AUDIO_I2C_SPEED);
+    boardI2cUnlock();
     if (!ok) {
         Serial.println("[audio] Tab5 speaker amplifier control failed");
     }
@@ -169,9 +190,10 @@ void audioCodecSetOutputEnabled(bool enabled) {
 }  // Lets emulator/synth owners mute the amp before releasing their I2S clocks.
 
 //Programs the Tab5 ES8388 once, then selects the clock ratio for the current I2S
-//owner. ESP32-audioI2S uses 384x while Game Boy's dedicated sink uses 128x, so the
-//ratio register must be refreshed whenever ownership changes. Caller already has MCLK
-//running because the ES8388 operates as an I2S slave. Not static: AudioOut.cpp reuses it.
+//owner. Both ESP32-audioI2S (patched at build time) and the Game Boy sink use the
+//board-native 128x MCLK, keeping the high-frequency clock out of the speaker's analog
+//noise floor. Caller already has MCLK running because the ES8388 operates as an I2S
+//slave. Not static: AudioOut.cpp reuses it.
 bool audioCodecEnsure(uint16_t mclkMultiple) {
     static bool codecRegsReady = false;
     static uint16_t configuredMclkMultiple = 0;
@@ -243,7 +265,7 @@ static bool radioEnsureCodec() {
         radioAnnounce("radio: audio engine could not attach I2S", C_RED);
         return false;
     }
-    if (!audioCodecEnsure(384)) {
+    if (!audioCodecEnsure(128)) {
         delete radioAudio;
         radioAudio = nullptr;
         radioAnnounce("radio: ES8388 codec init failed (see serial log)", C_RED);

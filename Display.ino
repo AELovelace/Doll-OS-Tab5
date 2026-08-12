@@ -40,6 +40,13 @@ static bool displayShadowValid = false;
 //one bounding rectangle per transaction, so pushing in bounded strips keeps a sparse
 //update from turning into one giant cache writeback that can starve continuous DSI scanout.
 static const int DISPLAY_PUSH_ROWS = 8;
+// Game Boy is the only caller of pushDisplayImageStaged(). Its scaled frame
+// lives in PSRAM, as does the Tab5 DSI framebuffer. Crossing a small internal
+// strip keeps the two external-memory operations separate without bringing
+// back the old 20 KB full-width shell staging allocation.
+static const int DISPLAY_IMAGE_STAGING_ROWS = 4;
+static uint16_t* displayImageStaging = nullptr;
+static int displayImageStagingPixels = 0;
 static DappCanvasCell* displayCanvasShadow = nullptr;
 static int displayCanvasShadowCols = 0;
 static int displayCanvasShadowRows = 0;
@@ -74,6 +81,21 @@ void pushDisplayImageStaged(int x, int y, int width, int height,
         return;
     }
 
+    const int wantedPixels = width * min(DISPLAY_IMAGE_STAGING_ROWS, height);
+    if (wantedPixels > displayImageStagingPixels) {
+        if (displayImageStaging) {
+            heap_caps_free(displayImageStaging);
+            displayImageStaging = nullptr;
+            displayImageStagingPixels = 0;
+        }
+        displayImageStaging = (uint16_t*)heap_caps_malloc(
+            (size_t)wantedPixels * sizeof(uint16_t),
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (displayImageStaging) {
+            displayImageStagingPixels = wantedPixels;
+        }
+    }
+
     //Each strip must complete its own M5GFX transaction. Panel_FrameBufferBase tracks one
     //bounding rectangle per transaction, so wrapping every strip together turns a sparse
     //update into one giant cache writeback that can starve continuous DSI scanout.
@@ -81,15 +103,22 @@ void pushDisplayImageStaged(int x, int y, int width, int height,
     tft.setSwapBytes(swapBytes);
     int pushed = 0;
     while (pushed < height) {
-        int rowsThisPush = min(DISPLAY_PUSH_ROWS, height - pushed);
+        int rowsThisPush = displayImageStaging
+            ? min(DISPLAY_IMAGE_STAGING_ROWS, height - pushed)
+            : min(DISPLAY_PUSH_ROWS, height - pushed);
         const uint16_t* src = pixels + (size_t)pushed * width;
+        if (displayImageStaging) {
+            memcpy(displayImageStaging, src,
+                   (size_t)rowsThisPush * width * sizeof(uint16_t));
+            src = displayImageStaging;
+        }
         tft.pushImage(x, y + pushed, width, rowsThisPush,
                       const_cast<uint16_t*>(src));
         pushed += rowsThisPush;
     }
     tft.setSwapBytes(oldSwapBytes);
     displayInvalidateShadow();
-}  // Pushes arbitrary RGB565 images from PSRAM-backed app buffers in bounded strips.
+}  // Pushes arbitrary RGB565 images through a small internal-RAM strip.
 
 static void pushDisplayRows(int y, int rowCount) {
     if (rowCount <= 0) {

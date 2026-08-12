@@ -97,16 +97,37 @@ void reportPsramStatus() {
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
 
+//   Unlike the M5Cardputer this was ported from, the Tab5 does *not* read the pack
+//   through a divided ADC pin: M5Unified routes both calls below to an INA226 on the
+//   shared internal I2C bus (Power_Class::getBatteryLevel -> Ina226.getBusVoltage,
+//   address 0x41). That makes them bus users, so both take boardI2cLock() -- the
+//   status bar calls readBatteryPercent() on every rendered frame, which is exactly
+//   the traffic that used to interleave with Radio.ino's codec bring-up.
+//
+//   A missed reading is not worth stalling a frame for, so the timeout is short and
+//   the last good value is reused. Codec bring-up holds the bus for ~30 register
+//   writes; the display simply shows a slightly stale percentage across those.
+static int batteryPercentCached = 0;
+static float batteryVoltageCached = 0.0f;
+
 float readBatteryVoltage() {
-    return M5.Power.getBatteryVoltage() / 1000.0f;
+    if (boardI2cLock(50)) {
+        batteryVoltageCached = M5.Power.getBatteryVoltage() / 1000.0f;
+        boardI2cUnlock();
+    }
+    return batteryVoltageCached;
 }
 
-//rough linear estimate between the configured empty/full voltage points --
-//there's no fuel-gauge chip on this board, just a divided ADC pin, so this is an
-//approximation the same way DOLL-OS's own M5Cardputer battery percent was
+//rough linear estimate between the configured empty/full voltage points -- there's no
+//dedicated fuel gauge, so this is an approximation the same way DOLL-OS's own
+//M5Cardputer battery percent was
 int readBatteryPercent() {
-    const int level = M5.Power.getBatteryLevel();
-    return level < 0 ? 0 : min(level, 100);
+    if (boardI2cLock(50)) {
+        const int level = M5.Power.getBatteryLevel();
+        batteryPercentCached = level < 0 ? 0 : min(level, 100);
+        boardI2cUnlock();
+    }
+    return batteryPercentCached;
 }
 
 void handleBatteryCommand(const String parts[], int partCount) {

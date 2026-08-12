@@ -5,6 +5,40 @@
 
 static bool systemLightSleepActive = false;
 
+//   Internal-I2C arbitration (contract and rationale in global.h). Lives here
+//   rather than in Radio.ino because the bus is board hardware, not an audio
+//   detail: the codec is only one of its four owners.
+//
+//   Created once from setup() instead of lazily on first use. Every bus user runs
+//   on either loop() or radioTask, and radioTask is not created until the shell
+//   runs "radio", so setup() is comfortably ahead of the first contended access --
+//   which avoids both a lazy-init race and a FreeRTOS call during static
+//   construction. A NULL handle (allocation failed) degrades to the old
+//   unsynchronized behaviour rather than disabling audio outright.
+static SemaphoreHandle_t boardI2cMutex = NULL;
+
+void boardI2cBegin() {
+    if (boardI2cMutex == NULL) {
+        boardI2cMutex = xSemaphoreCreateRecursiveMutex();
+        if (boardI2cMutex == NULL) {
+            Serial.println("[i2c] could not create internal-bus mutex; access stays unsynchronized");
+        }
+    }
+}
+
+bool boardI2cLock(uint32_t timeoutMs) {
+    if (boardI2cMutex == NULL) {
+        return true;
+    }
+    return xSemaphoreTakeRecursive(boardI2cMutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
+}
+
+void boardI2cUnlock() {
+    if (boardI2cMutex != NULL) {
+        xSemaphoreGiveRecursive(boardI2cMutex);
+    }
+}
+
 void enterSystemLightSleep() {
     if (systemLightSleepActive) {
         return;                                    // Ignore duplicate protocol bytes during transition.

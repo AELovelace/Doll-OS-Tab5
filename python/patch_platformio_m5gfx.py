@@ -125,6 +125,33 @@ def patch_esp_usb_host() -> None:
         print(f"[pio] EspUsbHost ESP-IDF 5.4 patch already active: {source_path}")
 
 
+def patch_esp32_audio_i2s() -> None:
+    """Uses the Tab5 speaker backend's native 128x MCLK instead of 384x."""
+    libdeps_dir = Path(env.subst("$PROJECT_LIBDEPS_DIR"))
+    candidates = list(libdeps_dir.glob("*/ESP32-audioI2S/src/Audio.cpp"))
+    if not candidates:
+        raise RuntimeError(f"ESP32-audioI2S source was not installed beneath {libdeps_dir}")
+
+    source_path = candidates[0]
+    source = source_path.read_text(encoding="utf-8")
+    original = source
+    upstream_clock = "m_i2s_std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;"
+    tab5_clock = "m_i2s_std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_128;"
+
+    if upstream_clock in source:
+        if source.count(upstream_clock) != 1:
+            raise RuntimeError("Expected exactly one ESP32-audioI2S 384x MCLK setting")
+        source = source.replace(upstream_clock, tab5_clock)
+    elif tab5_clock not in source:
+        raise RuntimeError("Expected ESP32-audioI2S MCLK setting was not found")
+
+    if source != original:
+        source_path.write_text(source, encoding="utf-8")
+        print(f"[pio] Patched ESP32-audioI2S for Tab5 128x MCLK: {source_path}")
+    else:
+        print(f"[pio] ESP32-audioI2S Tab5 128x MCLK already active: {source_path}")
+
+
 def verify_tab5_sdkconfig(source, target, env) -> None:
     """Rejects display regressions or automatic task-WDT initialization."""
     del source, target  # SCons supplies these action arguments, but this check only needs the environment.
@@ -140,24 +167,29 @@ def verify_tab5_sdkconfig(source, target, env) -> None:
         "#define CONFIG_CACHE_L2_CACHE_128KB 1",
         "#define CONFIG_CACHE_L2_CACHE_LINE_128B 1",
         "#define CONFIG_ESP_TASK_WDT_EN 1",
-        #Keeps the network stack from silently drifting back into internal SRAM.
-        "#define CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP 1",
-        "#define CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM 1",
     )
     missing = [setting for setting in required if setting not in config]
     if missing:
         raise RuntimeError(f"Unsafe Tab5 display configuration in {config_path}: {missing}")
 
-    forbidden = ("#define CONFIG_ESP_TASK_WDT_INIT 1",)
+    #WiFi/Hosted buffers and task stacks must remain internal: putting sustained
+    #STA traffic in PSRAM competes with the DSI driver's continuous framebuffer DMA.
+    forbidden = (
+        "#define CONFIG_ESP_TASK_WDT_INIT 1",
+        "#define CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP 1",
+        "#define CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM 1",
+        "#define CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM 1",
+    )
     enabled = [setting for setting in forbidden if setting in config]
     if enabled:
         raise RuntimeError(f"Task watchdog unexpectedly initialized in {config_path}: {enabled}")
 
-    print("[pio] Verified display bandwidth settings and inactive task watchdog")
+    print("[pio] Verified display bandwidth, internal WiFi/Hosted memory, and inactive task watchdog")
 
 
 configure_windows_archiver_response_file()
 configure_p4_tinyusb_headers()
 patch_m5gfx()
 patch_esp_usb_host()
+patch_esp32_audio_i2s()
 env.AddPostAction("$PROGPATH", verify_tab5_sdkconfig)  # Prevents flashing a silent low-bandwidth fallback.
