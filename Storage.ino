@@ -9,26 +9,6 @@
 #include <LittleFS.h>
 #include <FS.h>
 #include <SD_MMC.h>
-#include <esp_task_wdt.h>
-#include <esp_idf_version.h>
-
-//widens (or restores) the task watchdog timeout. Used instead of disableCore0WDT()/
-//enableCore0WDT() around SD_MMC.begin() below -- those legacy per-core shims don't
-//correctly re-subscribe the idle tasks on this IDF5-based core, which left the
-//watchdog itself in a broken state and caused a *delayed* panic ~20s later instead of
-//preventing one. Reconfiguring the timeout doesn't touch task subscriptions at all.
-static void setTaskWdtTimeout(uint32_t timeoutMs) {
-#if ESP_IDF_VERSION_MAJOR >= 5
-    esp_task_wdt_config_t wdtConfig = {
-        .timeout_ms = timeoutMs,
-        .idle_core_mask = 0x3,   //both cores' idle tasks
-        .trigger_panic = true,
-    };
-    esp_task_wdt_reconfigure(&wdtConfig);
-#else
-    esp_task_wdt_init(timeoutMs / 1000, true);
-#endif
-}
 
 bool ensureSystemConfDirectory() {
     const char* dirs[] = { "/system", "/system/conf" };
@@ -72,14 +52,9 @@ void initStorage() {
     ensureSystemConfDirectory();
     ensureDefaultAliases();
 
-    //with no card inserted, the SD_MMC driver's internal retry loop (sdmmc_init_ocr) can run
-    //long enough without yielding that the default ~5s watchdog timeout trips mid-retry --
-    //widen it just for this call so a missing card fails cleanly instead of resetting
     SD_MMC.setPins(SD_MMC_CLK_PIN, SD_MMC_CMD_PIN, SD_MMC_D0_PIN, SD_MMC_D1_PIN, SD_MMC_D2_PIN, SD_MMC_D3_PIN);
-    setTaskWdtTimeout(20000);
     sdCardMounted = SD_MMC.begin("/sdcard", false, false);
     ledSetSdMounted(sdCardMounted);
-    setTaskWdtTimeout(5000);
     if (!sdCardMounted) {
         Serial.println("SD: not detected");
     }

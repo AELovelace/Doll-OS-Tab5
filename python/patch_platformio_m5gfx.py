@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import re
 
 Import("env")
 
@@ -33,7 +34,7 @@ def configure_p4_tinyusb_headers() -> None:
 
 
 def patch_m5gfx(*_args, **_kwargs) -> None:
-    """Applies the tested ST7123 detection and conservative DSI timing patch."""
+    """Fixes ST7123 fallback detection while preserving M5GFX's native DSI timings."""
     libdeps_dir = Path(env.subst("$PROJECT_LIBDEPS_DIR"))
     candidates = list(libdeps_dir.glob("*/M5GFX/src/M5GFX.cpp"))
     if not candidates:
@@ -58,24 +59,37 @@ def patch_m5gfx(*_args, **_kwargs) -> None:
     elif matched_detection not in source:
         raise RuntimeError("Expected M5GFX ST7123 detection block was not found")
 
-    for old_clock in ("det.dpi_freq_mhz = 80;", "det.dpi_freq_mhz = 70;"):
-        source = source.replace(old_clock, "det.dpi_freq_mhz = 50;")
-    for old_lane in (
-        "bus_cfg.lane_mbps = hit_st7121 ? 900 : 1040;",
-        "bus_cfg.lane_mbps = hit_st7121 ? 900 : 1000;",
-    ):
-        source = source.replace(old_lane, "bus_cfg.lane_mbps = hit_st7121 ? 900 : 800;")
+    #Undo the earlier diagnostic underclock. Panel timings are deliberately matched to
+    #M5GFX 0.2.26: ILI9881C/ST7123 at 80MHz, ST7121 at 70MHz, and 1040Mbps for
+    #the non-ST7121 DSI path.
+    native_panel_clocks = (
+        ("Panel_ILI9881C", 80),
+        ("Panel_ST7121", 70),
+        ("Panel_ST7123", 80),
+    )
+    for panel_name, native_clock in native_panel_clocks:
+        timing_pattern = re.compile(
+            rf"(auto p = new {panel_name}\(\);\s+"
+            rf"_panel_last\.reset\(p\);\s+"
+            rf"auto det = p->config_detail\(\);\s+"
+            rf"det\.dpi_freq_mhz = )\d+;"
+        )
+        source, match_count = timing_pattern.subn(rf"\g<1>{native_clock};", source, count=1)
+        if match_count != 1:
+            raise RuntimeError(f"Expected one M5GFX timing block for {panel_name}, found {match_count}")
 
-    if "det.dpi_freq_mhz = 50;" not in source:
-        raise RuntimeError("Expected M5GFX ST7123 50MHz timing was not found")
-    if "bus_cfg.lane_mbps = hit_st7121 ? 900 : 800;" not in source:
-        raise RuntimeError("Expected M5GFX 800Mbps DSI lane timing was not found")
+    source = source.replace(
+        "bus_cfg.lane_mbps = hit_st7121 ? 900 : 800;",
+        "bus_cfg.lane_mbps = hit_st7121 ? 900 : 1040;",
+    )
+    if "bus_cfg.lane_mbps = hit_st7121 ? 900 : 1040;" not in source:
+        raise RuntimeError("Expected native M5GFX 1040Mbps DSI lane timing was not found")
 
     if source != original:
         source_path.write_text(source, encoding="utf-8")
-        print(f"[pio] Patched Tab5 M5GFX source: {source_path}")
+        print(f"[pio] Patched Tab5 M5GFX detection/native timings: {source_path}")
     else:
-        print(f"[pio] Tab5 M5GFX patch already active: {source_path}")
+        print(f"[pio] Tab5 M5GFX detection/native timings already active: {source_path}")
 
 
 def patch_esp_usb_host() -> None:
@@ -111,8 +125,35 @@ def patch_esp_usb_host() -> None:
         print(f"[pio] EspUsbHost ESP-IDF 5.4 patch already active: {source_path}")
 
 
+def patch_esp32_audio_i2s() -> None:
+    """Uses the Tab5 speaker backend's native 128x MCLK instead of 384x."""
+    libdeps_dir = Path(env.subst("$PROJECT_LIBDEPS_DIR"))
+    candidates = list(libdeps_dir.glob("*/ESP32-audioI2S/src/Audio.cpp"))
+    if not candidates:
+        raise RuntimeError(f"ESP32-audioI2S source was not installed beneath {libdeps_dir}")
+
+    source_path = candidates[0]
+    source = source_path.read_text(encoding="utf-8")
+    original = source
+    upstream_clock = "m_i2s_std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;"
+    tab5_clock = "m_i2s_std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_128;"
+
+    if upstream_clock in source:
+        if source.count(upstream_clock) != 1:
+            raise RuntimeError("Expected exactly one ESP32-audioI2S 384x MCLK setting")
+        source = source.replace(upstream_clock, tab5_clock)
+    elif tab5_clock not in source:
+        raise RuntimeError("Expected ESP32-audioI2S MCLK setting was not found")
+
+    if source != original:
+        source_path.write_text(source, encoding="utf-8")
+        print(f"[pio] Patched ESP32-audioI2S for Tab5 128x MCLK: {source_path}")
+    else:
+        print(f"[pio] ESP32-audioI2S Tab5 128x MCLK already active: {source_path}")
+
+
 def verify_tab5_sdkconfig(source, target, env) -> None:
-    """Rejects a firmware image if any display-bandwidth setting was dropped."""
+    """Rejects display regressions or automatic task-WDT initialization."""
     del source, target  # SCons supplies these action arguments, but this check only needs the environment.
     config_path = Path(env.subst("$BUILD_DIR")) / "config" / "sdkconfig.h"
     config = config_path.read_text(encoding="utf-8")
@@ -120,18 +161,35 @@ def verify_tab5_sdkconfig(source, target, env) -> None:
         "#define CONFIG_COMPILER_OPTIMIZATION_PERF 1",
         "#define CONFIG_SPIRAM_SPEED_200M 1",
         "#define CONFIG_SPIRAM_XIP_FROM_PSRAM 1",
-        "#define CONFIG_CACHE_L2_CACHE_256KB 1",
+        #128KB, not 256KB: the L2 cache is subtracted from internal SRAM by
+        #memory.ld.in, and the larger cache cost 128KB of the pool this firmware
+        #needs at runtime. The 128-byte line is what keeps scanout refills wide.
+        "#define CONFIG_CACHE_L2_CACHE_128KB 1",
         "#define CONFIG_CACHE_L2_CACHE_LINE_128B 1",
+        "#define CONFIG_ESP_TASK_WDT_EN 1",
     )
     missing = [setting for setting in required if setting not in config]
     if missing:
         raise RuntimeError(f"Unsafe Tab5 display configuration in {config_path}: {missing}")
 
-    print("[pio] Verified 200MHz PSRAM, PSRAM XIP, and the 256KB/128-byte L2 cache")
+    #WiFi/Hosted buffers and task stacks must remain internal: putting sustained
+    #STA traffic in PSRAM competes with the DSI driver's continuous framebuffer DMA.
+    forbidden = (
+        "#define CONFIG_ESP_TASK_WDT_INIT 1",
+        "#define CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP 1",
+        "#define CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM 1",
+        "#define CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM 1",
+    )
+    enabled = [setting for setting in forbidden if setting in config]
+    if enabled:
+        raise RuntimeError(f"Task watchdog unexpectedly initialized in {config_path}: {enabled}")
+
+    print("[pio] Verified display bandwidth, internal WiFi/Hosted memory, and inactive task watchdog")
 
 
 configure_windows_archiver_response_file()
 configure_p4_tinyusb_headers()
 patch_m5gfx()
 patch_esp_usb_host()
+patch_esp32_audio_i2s()
 env.AddPostAction("$PROGPATH", verify_tab5_sdkconfig)  # Prevents flashing a silent low-bandwidth fallback.

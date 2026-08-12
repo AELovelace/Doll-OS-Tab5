@@ -28,13 +28,25 @@
 //   mode: a null shadow just means every push is a full one, which is the old behaviour.
 static uint16_t* displayShadow = nullptr;
 static bool displayShadowValid = false;
-//The Tab5 panel framebuffer and frameSprite both live in PSRAM. M5GFX documents that
-//direct PSRAM-to-PSRAM copies can corrupt pixels on this target, so panel updates travel
-//through this small internal-RAM strip instead. Eight rows keep the allocation modest
-//while avoiding one push transaction per scanline.
-static const int DISPLAY_STAGING_ROWS = 8;
-static uint16_t* displayStagingRows = nullptr;
-static int displayStagingRowCapacity = 0;
+//The Tab5 panel framebuffer, frameSprite and displayShadow all live in PSRAM. Panel
+//updates used to detour through an internal-RAM strip because M5GFX warns about
+//PSRAM-to-PSRAM memcpy corruption -- but that warning is scoped to
+//Panel_FrameBufferBase::copyRect, which copies a region of the framebuffer onto itself.
+//Our pushes and shadow syncs have disjoint source and destination buffers, and the strip
+//was not what caused the panel blinking. It cost ~20KB of the scarce internal pool, so
+//transfers now read straight out of PSRAM.
+//
+//The row chunking survives for the other reason it existed: Panel_FrameBufferBase tracks
+//one bounding rectangle per transaction, so pushing in bounded strips keeps a sparse
+//update from turning into one giant cache writeback that can starve continuous DSI scanout.
+static const int DISPLAY_PUSH_ROWS = 8;
+// Game Boy is the only caller of pushDisplayImageStaged(). Its scaled frame
+// lives in PSRAM, as does the Tab5 DSI framebuffer. Crossing a small internal
+// strip keeps the two external-memory operations separate without bringing
+// back the old 20 KB full-width shell staging allocation.
+static const int DISPLAY_IMAGE_STAGING_ROWS = 4;
+static uint16_t* displayImageStaging = nullptr;
+static int displayImageStagingPixels = 0;
 static DappCanvasCell* displayCanvasShadow = nullptr;
 static int displayCanvasShadowCols = 0;
 static int displayCanvasShadowRows = 0;
@@ -69,6 +81,21 @@ void pushDisplayImageStaged(int x, int y, int width, int height,
         return;
     }
 
+    const int wantedPixels = width * min(DISPLAY_IMAGE_STAGING_ROWS, height);
+    if (wantedPixels > displayImageStagingPixels) {
+        if (displayImageStaging) {
+            heap_caps_free(displayImageStaging);
+            displayImageStaging = nullptr;
+            displayImageStagingPixels = 0;
+        }
+        displayImageStaging = (uint16_t*)heap_caps_malloc(
+            (size_t)wantedPixels * sizeof(uint16_t),
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (displayImageStaging) {
+            displayImageStagingPixels = wantedPixels;
+        }
+    }
+
     //Each strip must complete its own M5GFX transaction. Panel_FrameBufferBase tracks one
     //bounding rectangle per transaction, so wrapping every strip together turns a sparse
     //update into one giant cache writeback that can starve continuous DSI scanout.
@@ -76,14 +103,14 @@ void pushDisplayImageStaged(int x, int y, int width, int height,
     tft.setSwapBytes(swapBytes);
     int pushed = 0;
     while (pushed < height) {
-        int rowsThisPush = displayStagingRows
-            ? min(displayStagingRowCapacity, height - pushed)
-            : height - pushed;
+        int rowsThisPush = displayImageStaging
+            ? min(DISPLAY_IMAGE_STAGING_ROWS, height - pushed)
+            : min(DISPLAY_PUSH_ROWS, height - pushed);
         const uint16_t* src = pixels + (size_t)pushed * width;
-        if (displayStagingRows) {
-            memcpy(displayStagingRows, src,
+        if (displayImageStaging) {
+            memcpy(displayImageStaging, src,
                    (size_t)rowsThisPush * width * sizeof(uint16_t));
-            src = displayStagingRows;
+            src = displayImageStaging;
         }
         tft.pushImage(x, y + pushed, width, rowsThisPush,
                       const_cast<uint16_t*>(src));
@@ -91,7 +118,7 @@ void pushDisplayImageStaged(int x, int y, int width, int height,
     }
     tft.setSwapBytes(oldSwapBytes);
     displayInvalidateShadow();
-}  // Pushes arbitrary RGB565 images safely from PSRAM-backed app buffers.
+}  // Pushes arbitrary RGB565 images through a small internal-RAM strip.
 
 static void pushDisplayRows(int y, int rowCount) {
     if (rowCount <= 0) {
@@ -103,25 +130,18 @@ static void pushDisplayRows(int y, int rowCount) {
         return;
     }
 
-    //The source strip stays in internal RAM so M5GFX never memcpy()s PSRAM to PSRAM.
+    //Sprite rows go to the panel directly. The strip bound is transaction sizing, not a copy.
     bool oldSwapBytes = tft.getSwapBytes();
     tft.setSwapBytes(false);
     int pushed = 0;
     while (pushed < rowCount) {
-        int rowsThisPush = displayStagingRows
-            ? min(displayStagingRowCapacity, rowCount - pushed)
-            : rowCount - pushed;
+        int rowsThisPush = min(DISPLAY_PUSH_ROWS, rowCount - pushed);
         uint16_t* src = frame + (size_t)(y + pushed) * DISPLAY_WIDTH;
-        if (displayStagingRows) {
-            memcpy(displayStagingRows, src,
-                   (size_t)rowsThisPush * DISPLAY_WIDTH * sizeof(uint16_t));
-            src = displayStagingRows;
-        }
         tft.pushImage(0, y + pushed, DISPLAY_WIDTH, rowsThisPush, src);
         pushed += rowsThisPush;
     }
     tft.setSwapBytes(oldSwapBytes);
-}  // Copies complete sprite rows to the panel without unsafe PSRAM-to-PSRAM transfers.
+}  // Copies complete sprite rows to the panel in bounded-writeback strips.
 
 static void pushDappDirtyRows() {
     int row = 0;
@@ -146,25 +166,17 @@ static void pushDappDirtyRows() {
 
 static bool copyDisplayRowsToShadow(int y, int rowCount) {
     uint16_t* frame = (uint16_t*)frameSprite.getBuffer();
-    if (!frame || !displayShadow || !displayStagingRows || rowCount <= 0) {
+    if (!frame || !displayShadow || rowCount <= 0) {
         return false;
     }
 
-    //Both the canvas and its shadow are PSRAM allocations. M5GFX's own Tab5
-    //framebuffer implementation warns that PSRAM-to-PSRAM memcpy can corrupt data,
-    //so the shadow must cross the same internal-RAM strip as panel updates.
-    int copied = 0;
-    while (copied < rowCount) {
-        int rowsThisCopy = min(displayStagingRowCapacity, rowCount - copied);
-        size_t words = (size_t)rowsThisCopy * DISPLAY_WIDTH;
-        const uint16_t* src = frame + (size_t)(y + copied) * DISPLAY_WIDTH;
-        uint16_t* dst = displayShadow + (size_t)(y + copied) * DISPLAY_WIDTH;
-        memcpy(displayStagingRows, src, words * sizeof(uint16_t));
-        memcpy(dst, displayStagingRows, words * sizeof(uint16_t));
-        copied += rowsThisCopy;
-    }
+    //The sprite and its shadow are two distinct PSRAM allocations, so one straight memcpy
+    //is safe: M5GFX's corruption warning covers copying a framebuffer region onto itself.
+    const size_t offset = (size_t)y * DISPLAY_WIDTH;
+    memcpy(displayShadow + offset, frame + offset,
+           (size_t)rowCount * DISPLAY_WIDTH * sizeof(uint16_t));
     return true;
-}  // Synchronizes the diff shadow without a corrupting PSRAM-to-PSRAM copy.
+}  // Synchronizes the diff shadow with the sprite rows just sent to the panel.
 
 void pushDisplayFrame() {
     uint16_t* frame = (uint16_t*)frameSprite.getBuffer();
@@ -178,8 +190,8 @@ void pushDisplayFrame() {
     }
 
     if (!displayShadow || !displayShadowValid) {
-        //pushDisplayRows commits each internal-RAM strip separately. Combining the full
-        //frame into one transaction would force a 1.84MB cache writeback burst.
+        //pushDisplayRows commits each strip as its own transaction. Combining the full
+        //frame into one would force a 1.84MB cache writeback burst.
         pushDisplayRows(0, DISPLAY_HEIGHT);
         displayShadowValid = copyDisplayRowsToShadow(0, DISPLAY_HEIGHT);
         return;
@@ -236,40 +248,25 @@ void initDisplay() {
                   displayShadow ? "PSRAM (partial frame pushes enabled)"
                                 : "unavailable (full frame pushes)");
 
-    //The staging strip must stay in internal RAM; putting it in PSRAM would recreate the
-    //same source/destination memory pairing that causes the intermittent cyan frames.
-    displayStagingRows = (uint16_t*)heap_caps_malloc(
-        (size_t)DISPLAY_WIDTH * DISPLAY_STAGING_ROWS * sizeof(uint16_t),
-        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    displayStagingRowCapacity = displayStagingRows ? DISPLAY_STAGING_ROWS : 0;
-    if (!displayStagingRows) {
-        //A one-row fallback still prevents PSRAM-to-PSRAM copying on a fragmented heap.
-        displayStagingRows = (uint16_t*)heap_caps_malloc(
-            (size_t)DISPLAY_WIDTH * sizeof(uint16_t),
-            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        displayStagingRowCapacity = displayStagingRows ? 1 : 0;
-    }
-    Serial.printf("[display] row staging: %u bytes -> %s\n",
-                  (unsigned)((size_t)DISPLAY_WIDTH * displayStagingRowCapacity * sizeof(uint16_t)),
-                  displayStagingRows ? "internal RAM" : "unavailable (direct panel copies)");
-
-    //A canvas cell is only two bytes, so its complete maximum-size snapshot fits in
-    //internal RAM. Comparing final cells before touching the PSRAM sprite means Tetris
-    //usually redraws only the old and new piece cells instead of clearing 1.6MB per FLIP.
+    //Comparing final cells before touching the PSRAM sprite means Tetris usually redraws
+    //only the old and new piece cells instead of clearing 1.6MB per FLIP. The snapshot is
+    //read once per changed cell and never DMA'd, so PSRAM is the right pool for it --
+    //internal RAM is the scarce one and this is ~14KB of it.
     displayCanvasShadow = (DappCanvasCell*)heap_caps_malloc(
         (size_t)DAPP_CANVAS_MAX_COLS * DAPP_CANVAS_MAX_ROWS * sizeof(DappCanvasCell),
-        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        MALLOC_CAP_SPIRAM);
     displayInvalidateDappCanvas();
     Serial.printf("[display] dapp canvas shadow: %u bytes -> %s\n",
                   (unsigned)((size_t)DAPP_CANVAS_MAX_COLS * DAPP_CANVAS_MAX_ROWS *
                              sizeof(DappCanvasCell)),
-                  displayCanvasShadow ? "internal RAM (changed-cell redraws enabled)"
+                  displayCanvasShadow ? "PSRAM (changed-cell redraws enabled)"
                                       : "unavailable (full canvas redraws)");
 
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
     frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
     frameSprite.fillSprite(TFT_BLACK);
-    pushDisplayFrame();
+    //setup() draws the boot splash immediately after initDisplay(). Avoid a redundant
+    //full black commit immediately before that first cyan frame.
 }
 
 void displaySetSleeping(bool sleeping) {
@@ -884,17 +881,17 @@ void drawDisplayCommandBar() {
     }
     frameSprite.drawString(shown, textX, y + DISPLAY_PADDING);
 
-    //blinking caret at the edit position. commandCursorPos indexes the full buffer; subtract
+    //Solid caret at the edit position. On the Tab5, blinking this by committing the DSI
+    //framebuffer every 500 ms can interrupt panel scanout even when no UI content changed.
+    //commandCursorPos indexes the full buffer; subtract
     //the dropped head to land in `shown`, then clamp so a cursor scrolled off the left edge
     //parks at the start of the visible window rather than drawing off-panel.
-    if (((millis() / DISPLAY_CURSOR_BLINK_MS) & 1UL) == 0) {
-        int caretInShown = commandCursorPos - (int)droppedFromHead;
-        if (caretInShown < 0) caretInShown = 0;
-        if (caretInShown > (int)shown.length()) caretInShown = shown.length();
-        int caretX = textX + (int)frameSprite.textWidth(shown.substring(0, caretInShown));
-        if (caretX > textX + maxWidth) caretX = textX + maxWidth;
-        frameSprite.drawFastVLine(caretX, y + DISPLAY_PADDING, frameSprite.fontHeight(), TFT_WHITE);
-    }
+    int caretInShown = commandCursorPos - (int)droppedFromHead;
+    if (caretInShown < 0) caretInShown = 0;
+    if (caretInShown > (int)shown.length()) caretInShown = shown.length();
+    int caretX = textX + (int)frameSprite.textWidth(shown.substring(0, caretInShown));
+    if (caretX > textX + maxWidth) caretX = textX + maxWidth;
+    frameSprite.drawFastVLine(caretX, y + DISPLAY_PADDING, frameSprite.fontHeight(), TFT_WHITE);
 }
 
 //   paints a running .dapp's CANVAS grid over the terminal area (AppRunner.ino's FLIP).
@@ -914,11 +911,8 @@ void drawDappCanvas() {
     const int cellW = max(1, (DISPLAY_WIDTH - DISPLAY_PADDING * 2) / dappCanvasCols);
     const int cellH = max(1, (height - DISPLAY_PADDING * 2) / dappCanvasRows);
 
-    //the built-in font is 6x8 at size 1, so this is how many whole multiples of it fit in
-    //a cell -- a small grid gets big glyphs instead of a lot of empty space
-    int textSize = min(cellW / 6, cellH / 8);
-    if (textSize < 1) textSize = 1;
-    if (textSize > 4) textSize = 4;
+    //Keep AppRunner glyphs at the user-selected compact built-in size.
+    const int textSize = 1;
 
     //center the grid in the area it didn't divide evenly into
     const int originX = (DISPLAY_WIDTH - cellW * dappCanvasCols) / 2;
@@ -982,16 +976,10 @@ void drawDappCanvas() {
 }
 
 void drawDisplayFrame() {
-    unsigned long now = millis();
-    bool statusRefreshDue = (now - displayLastStatusRefresh) >= DISPLAY_STATUS_REFRESH_MS;
-    bool cursorPhase = ((now / DISPLAY_CURSOR_BLINK_MS) & 1UL) == 0;
-    bool cursorBlinkDue = (cursorPhase != displayLastCursorPhase);
-    if (!displayDirty && !statusRefreshDue && !cursorBlinkDue) {
-        return;   //nothing changed since the last push -- skip the full-frame redraw + SPI blit
+    if (!displayDirty) {
+        return;   //nothing changed: do not disturb the live DSI framebuffer while idle
     }
     displayDirty = false;
-    displayLastStatusRefresh = now;
-    displayLastCursorPhase = cursorPhase;
 
     if (dappCanvasActive) {
         //A canvas FLIP already knows exactly which cells changed. Preserve that knowledge

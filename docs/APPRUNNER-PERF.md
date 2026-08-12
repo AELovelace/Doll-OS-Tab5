@@ -339,9 +339,10 @@ Implemented in one pass and verified to compile clean for
 
 ### Latency
 
-- **`appRuntimeYield(false)` no longer sleeps 1ms per call.** It feeds the watchdog and
-  returns, with a real yield paced by `DAPP_YIELD_INTERVAL_MS` on the clock. This is the
-  ~3ms that every 800-cell `FLIP` was spending asleep before drawing anything.
+- **`appRuntimeYield(false)` no longer sleeps or feeds the task watchdog.** The task-WDT
+  API remains compiled for Arduino linkage but is not initialized for this frame-drop
+  diagnostic, and bulk-work checkpoints now return immediately. The service path still
+  polls abort/input and board services but does not call `delay(1)`.
 - **Partial frame pushes.** `pushDisplayFrame` ([Display.ino:17](Display.ino#L17)) diffs the
   sprite against a PSRAM shadow of what the panel was last sent and transfers only the rows
   that changed, coalesced into runs. A canvas app that moves one character now moves a few

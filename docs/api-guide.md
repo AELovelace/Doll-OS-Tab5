@@ -57,7 +57,7 @@ Declared once, used everywhere. The ones you'll actually touch:
 | `cwd` | `String` | current working directory in the unified storage namespace |
 | `SD_MOUNT` | `const String` | `"/sd"` — where the SD card appears in that namespace |
 | `sdCardMounted` | `bool` | set by `initStorage()` |
-| `displayDirty` | `bool` | set via `markDisplayDirty()`; `drawDisplayFrame()` skips its redraw+SPI push unless this (or a blink/status timer) is due |
+| `displayDirty` | `bool` | set via `markDisplayDirty()`; `drawDisplayFrame()` skips its redraw and DSI framebuffer commit unless this is set |
 | `displayScrollOffset` | `int` | how far back the panel is scrolled from the live tail; 0 = pinned |
 | `dappCanvasActive` | `bool` | swap the panel's terminal area for a `.dapp` canvas grid |
 | `C_RESET`, `C_WHITE`, `C_RED`, `C_GREEN`, `C_YELLOW`, `C_BLUE`, `C_MAGENTA`, `C_CYAN`, `C_PINK` | `const int` | ANSI SGR codes — the color vocabulary for `outLine()` |
@@ -145,8 +145,8 @@ SGR ints. History is a 200-row ring of fixed 128-char rows
 (`DISPLAY_HISTORY_ROW_MAX_CHARS`), allocated in PSRAM at boot — longer rows are
 truncated with an ellipsis, not wrapped, at that layer.
 
-`frameSprite` (a full-screen `TFT_eSprite`, `global.h`) is the drawing target
-for everything. A takeover may borrow it freely and push with
+`frameSprite` (a full-screen 1280x720 RGB565 `M5Canvas`, `global.h`) is the drawing
+target for everything. A takeover may borrow it freely and push with
 `pushDisplayFrame()`; `drawDisplayFrame()` rebuilds it from scratch whenever
 `displayDirty` is set, so nothing is lost. That path is panel-variant-agnostic —
 drawing to the raw `tft` object instead (as `Gameboy.ino` does) only compiles on
@@ -677,8 +677,8 @@ What matters from the C++ side:
 - `WAVE` delegates continuous PCM generation to `DappSynth.ino`, which borrows
   `AudioOut` after `radioReleaseAudio()` and is unconditionally stopped during
   AppRunner cleanup.
-- Long compute loops yield every `DAPP_STEPS_PER_YIELD` steps to feed the
-  watchdog, and `appPollAbortChord()` uses `keyboardPeekRawByte()` specifically
+- Long compute loops service the board every `DAPP_STEPS_PER_YIELD` steps, and
+  `appPollAbortChord()` uses `keyboardPeekRawByte()` specifically
   so it doesn't steal bytes a script's own `KEY`/`INPUT` is about to read.
 
 ## 17. Build-time config (`config.h`)

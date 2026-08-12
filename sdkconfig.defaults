@@ -1,5 +1,8 @@
 # Match the stable M5Tab5 UserDemo baseline.
 CONFIG_IDF_TARGET="esp32p4"
+# PlatformIO does not forward the board JSON variant when Arduino is an IDF
+# component, so select Arduino's ESP32-P4 pins/include variant explicitly.
+CONFIG_ARDUINO_VARIANT="esp32p4"
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
@@ -11,14 +14,52 @@ CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 CONFIG_AUTOSTART_ARDUINO=y
 CONFIG_FREERTOS_HZ=1000
 
-# These four settings are the display-bandwidth fix used by M5Stack's UserDemo
+# Diagnostic build: compile the task-WDT API required by Arduino, but do not initialize
+# the watchdog or subscribe idle tasks at runtime.
+CONFIG_ESP_TASK_WDT_EN=y
+# CONFIG_ESP_TASK_WDT_INIT is not set
+
+# These settings are the display-bandwidth fix used by M5Stack's UserDemo
 # and recommended by Espressif for PSRAM-backed MIPI-DSI scanout.
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_SPIRAM_XIP_FROM_PSRAM=y
-CONFIG_CACHE_L2_CACHE_256KB=y
+# The L2 cache is carved out of internal SRAM, not added to it:
+# esp_system/ld/esp32p4/memory.ld.in defines SRAM_HIGH_SIZE as
+# 0x80000 - CONFIG_CACHE_L2_CACHE_SIZE. The former 256KB setting therefore spent
+# 128KB of the scarce internal pool that this firmware needs for hosted WiFi,
+# mbedTLS and the USB host. Back to IDF's 128KB default, keeping the 128-byte
+# line so PSRAM scanout still refills in wide bursts.
+CONFIG_CACHE_L2_CACHE_128KB=y
 CONFIG_CACHE_L2_CACHE_LINE_128B=y
+
+# Keep sustained STA traffic off the same PSRAM bus used by continuous DSI
+# scanout. This STA-only build has enough internal heap because Audio/I2S is
+# constructed only after WiFi is up; the old pre-setup Audio allocation and
+# always-on softAP that originally exhausted internal RAM are both gone.
+# CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP is not set
+# CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM is not set
+# CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM is not set
+# Keep a small internal reserve for allocations that explicitly require DMA or
+# internal capabilities; normal WiFi/Hosted allocations use the remaining pool.
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=16384
+
+# ESP-Hosted SDIO link to the ESP32-C6.
+#
+# The stock 40000 kHz is the documented ceiling for an ESP32-P4 host ("Clock
+# frequency for ESP32-P4 as host <= 40MHz"), and on this board it does not hold:
+# under sustained traffic the host's sdio_write_task fails with ESP_ERR_TIMEOUT
+# (258), ESP-Hosted declares "Unrecoverable host sdio state" and calls esp_restart(),
+# rebooting the tablet mid-radio-stream. Nothing faults, so there is no panic dump --
+# the transport reboots the host deliberately.
+#
+# Halving the clock trades throughput this firmware does not need (an internet radio
+# stream is ~128 kbps against a 4-bit bus) for the signal margin it evidently does.
+# Deeper queues give the write path more slack before a stall becomes a timeout.
+CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=20000
+CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=40
+CONFIG_ESP_HOSTED_SDIO_RX_Q_SIZE=40
 
 # Arduino's NetworkClientSecure requires at least one PSK exchange mode.
 CONFIG_MBEDTLS_PSK_MODES=y

@@ -47,10 +47,9 @@
 
 static GameBoyHost gbHost;
 
-// Output rectangle on the panel. "fit" scales 160x144 up to the tallest box
-// that fits DISPLAY_HEIGHT while keeping aspect (letterboxed left/right); "1x"
-// is native 160x144 centered (much smaller, but the cheapest to push -- use it
-// if the scaled frame rate feels low). Chosen per-launch: `gb <rom> [1x|fit]`.
+// Output rectangle on the panel. "fit" selects the board's largest safe scale
+// (a centered integer 3x on Tab5); "1x" is native 160x144 centered. Chosen
+// per-launch: `gb <rom> [1x|fit]`.
 static const int GB_W = GameBoyHost::kWidth;    // 160
 static const int GB_H = GameBoyHost::kHeight;   // 144
 
@@ -84,7 +83,34 @@ static void gbFreeScale() {
 // PSRAM for the scaled frame couldn't be had -- caller falls back to 1x, which
 // needs no scale buffer at all.
 static bool gbSetupScale() {
-#ifdef FNK0104N_3P5_320x480_ST77922
+#if defined(DOLL_BOARD_TAB5)
+    // The Tab5's panel is a continuously scanned PSRAM framebuffer. Scaling a
+    // 160x144 frame all the way to 800x720 makes every drawn emulator frame
+    // rewrite 1.15 MB of that same PSRAM and can starve DSI scanout, leaving
+    // only gbClearPanel()'s black frame visible. A crisp 3x image is 480x432
+    // (414 KB), large enough on the 7-inch panel while leaving scanout headroom.
+    const int scale = gbFitMode ? 3 : 1;
+    gbOutW = GB_W * scale;
+    gbOutH = GB_H * scale;
+    gbOutX = (DISPLAY_WIDTH - gbOutW) / 2;
+    gbOutY = (DISPLAY_HEIGHT - gbOutH) / 2;
+
+    if (!gbFitMode) {
+        return true;
+    }
+
+    gbColMap = (int16_t*)heap_caps_malloc(gbOutW * sizeof(int16_t), MALLOC_CAP_8BIT);
+    gbRowMap = (int16_t*)heap_caps_malloc(gbOutH * sizeof(int16_t), MALLOC_CAP_8BIT);
+    gbScaleBuf = (uint16_t*)heap_caps_malloc((size_t)gbOutW * gbOutH * sizeof(uint16_t),
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!gbColMap || !gbRowMap || !gbScaleBuf) {
+        gbFreeScale();
+        return false;
+    }
+    for (int x = 0; x < gbOutW; x++) gbColMap[x] = x / scale;
+    for (int y = 0; y < gbOutH; y++) gbRowMap[y] = y / scale;
+    return true;
+#elif defined(FNK0104N_3P5_320x480_ST77922)
     // Use an exact 2x fit on N. It leaves a small letterbox, but avoids the
     // generic 355x320 resampler and produces a four-aligned native region.
     if (gbFitMode) {
@@ -573,8 +599,13 @@ static void gbPrintUsage() {
     outLine("Usage: gb [rom.gb|.gbc] [1x|fit]", C_CYAN);
     outLine("  Bare 'gb' opens the /sd/gb ROM picker.", C_CYAN);
     outLine("  ROM path is a normal DOLL-OS path (e.g. /sd/roms/zelda.gb).", C_CYAN);
+#if defined(DOLL_BOARD_TAB5)
+    outLine("  fit (default) is a centered 3x image (480x432); 1x is native", C_CYAN);
+    outLine("  160x144. The bounded scale keeps DSI scanout stable.", C_CYAN);
+#else
     outLine("  fit (default) fills the panel but costs ~38ms of SPI per push,", C_CYAN);
     outLine("  so most frames go undrawn; 1x is small but near-smooth.", C_CYAN);
+#endif
     outLine("  Controls (BLE keyboard via slave): WASD/arrows=D-pad, N=A,", C_CYAN);
     outLine("  M=B, Enter=Start, \\=Select, Ctrl+T=quit.", C_CYAN);
     outLine("  Xbox pad via slave: stick/d-pad, A=A, B=B, Menu=Start,", C_CYAN);
@@ -729,8 +760,13 @@ static bool gbRunMenu(uint8_t& buttons) {
             case GB_MENU_DISPLAY:
                 // Left/right and A all just flip it -- there are only two modes.
                 gbSetDisplayMode(!gbFitMode);
+#if defined(DOLL_BOARD_TAB5)
+                note = gbFitMode ? "fit: centered 3x, DSI-safe"
+                                 : "1x: native 160x144";
+#else
                 note = gbFitMode ? "fit: fills the panel, most frames skipped"
                                  : "1x: small but near-smooth";
+#endif
                 break;
             case GB_MENU_VOLUME:
                 // The same level the shell's "radio vol" and Ctrl+Up/Down set --
@@ -838,7 +874,9 @@ void handleGbCommand(const String parts[], int partCount) {
     const uint32_t frameUs = 16743;   // ~59.7 Hz, true GB frame period
     uint32_t nextFrame = micros() + frameUs;   // deadline for the frame about to run
     uint32_t framesRun = 0, framesDrawn = 0;
-    int skipRun = 0;
+    // Guarantee that the first emulated frame is rendered even if launch-time
+    // housekeeping happens to put the deadline slightly in the past.
+    int skipRun = kMaxFrameSkip;
     const uint32_t startedMs = millis();
 
     for (;;) {
