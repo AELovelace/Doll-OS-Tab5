@@ -12,11 +12,13 @@
 //   "ftp" command; it stays off until asked for.
 //
 //   Storage backend + credentials: the library is a separately-compiled translation
-//   unit, so the SD_MMC selection lives in its config header (libraries/
-//   SimpleFTPServer/FtpServerKey.h -> DEFAULT_STORAGE_TYPE_ESP32 STORAGE_SD_MMC),
-//   not here. begin() does NOT re-mount SD_MMC -- it uses the card Storage.ino
-//   already mounted with this board's custom pins. Creds default from config.h
-//   (FTP_USER/FTP_PASS) but can be overridden without recompiling via
+//   unit, so the SD_MMC selection can't be made from this file -- it comes from
+//   -DDEFAULT_STORAGE_TYPE_ESP32=STORAGE_SD_MMC in platformio.ini's build_flags,
+//   which every translation unit including FtpServer.h sees. Without it the library
+//   falls back to its own default of STORAGE_FFAT and serves an unmounted FFat
+//   partition instead of the card. begin() does NOT re-mount SD_MMC -- it uses the
+//   card Storage.ino already mounted with this board's custom pins. Creds default
+//   from config.h (FTP_USER/FTP_PASS) but can be overridden without recompiling via
 //   "settings set ftp.user/ftp.pass" (Settings.ino).
 #include <Arduino.h>
 #include <SimpleFTPServer.h>
@@ -31,6 +33,15 @@
 static FtpServer* ftpSrv = nullptr;
 static bool ftpSrvUsesPlacementStorage = false;
 static bool ftpActive = false;
+
+//FtpServer::begin() does not copy the credentials -- it stores the two const char*
+//it was handed (FtpServer.h: "const char* user; const char* pass;") and dereferences
+//them later, when a client actually sends USER/PASS. Passing c_str() of a local
+//String left it comparing against freed heap, so every login failed with 530 and the
+//client was dropped the moment it connected. These file-scope copies outlive the
+//server object, so the pointers stay valid for as long as FTP is up.
+static String ftpUserHeld;
+static String ftpPassHeld;
 
 static bool ftpEnsureServer() {
     if (ftpSrv != nullptr) {
@@ -90,12 +101,27 @@ static void ftpStart() {
         outLine("ftp: not enough memory for server", C_RED);
         return;
     }
-    //begin() only starts the listeners + allocates the transfer buffer; the SD card
-    //stays mounted exactly as Storage.ino left it. Creds can be overridden at runtime
-    //via "settings set ftp.user/ftp.pass" without recompiling -- see Settings.ino.
+    //Creds can be overridden at runtime via "settings set ftp.user/ftp.pass" without
+    //recompiling -- see Settings.ino. begin() silently ignores a credential that is
+    //empty or >= FTP_CRED_SIZE (16) chars, and its constructor never initialises the
+    //pointers, so an out-of-range value would leave the server matching against
+    //whatever the PSRAM allocation happened to contain. Reject it here instead.
     String ftpUser = settingsGet("ftp.user", FTP_USER);
     String ftpPass = settingsGet("ftp.pass", FTP_PASS);
-    ftpSrv->begin(ftpUser.c_str(), ftpPass.c_str());
+    if (ftpUser.length() == 0 || ftpUser.length() >= FTP_CRED_SIZE ||
+        ftpPass.length() == 0 || ftpPass.length() >= FTP_CRED_SIZE) {
+        outLine("ftp: user and pass must each be 1-" + String(FTP_CRED_SIZE - 1) + " chars", C_RED);
+        outLine("  set them with: settings set ftp.user <name> / settings set ftp.pass <pw>");
+        ftpReleaseServer();
+        return;
+    }
+
+    //begin() only starts the listeners + allocates the transfer buffer; the SD card
+    //stays mounted exactly as Storage.ino left it. The credential Strings must stay
+    //alive for the lifetime of the server -- see ftpUserHeld/ftpPassHeld above.
+    ftpUserHeld = ftpUser;
+    ftpPassHeld = ftpPass;
+    ftpSrv->begin(ftpUserHeld.c_str(), ftpPassHeld.c_str());
     ftpActive = true;
     ledSetFtpActive(true);
 

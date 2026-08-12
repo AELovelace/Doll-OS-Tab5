@@ -151,6 +151,7 @@ static const CommandEntry commandTable[] = {
     { "free",   handleFreeCommand },
     { "ftp",    handleFtpCommand },
     { "gb",     handleGbCommand },
+    { "gba",    handleGbaCommand },
     { "help",   helpCommandHandler },
     { "ip",     handleIpCommand },
     { "ls",     handleLsCommand },
