@@ -1042,6 +1042,19 @@ static void gbaRunBootSession() {
                           static_cast<unsigned long>(coreStats.sound_dma_state),
                           static_cast<unsigned long>(coreStats.sound_fifo_empty_reads),
                           static_cast<unsigned long>(coreStats.sound_fifo_short_reads));
+            // Compare the producer cursors with the host read cursor, and show
+            // whether each live DirectSound FIFO actually contains PCM data.
+            Serial.printf("[gba mixbuf] idx=%lu/%lu/%lu/%lu ticks=%lu/%lu data=%lu:%lu/%lu:%lu\n",
+                          static_cast<unsigned long>(coreStats.sound_buffer_base),
+                          static_cast<unsigned long>(coreStats.sound_gbc_buffer_index),
+                          static_cast<unsigned long>(coreStats.sound_direct_buffer_a),
+                          static_cast<unsigned long>(coreStats.sound_direct_buffer_b),
+                          static_cast<unsigned long>(coreStats.sound_timer_calls_a),
+                          static_cast<unsigned long>(coreStats.sound_timer_calls_b),
+                          static_cast<unsigned long>(coreStats.sound_fifo_nonzero_a),
+                          static_cast<unsigned long>(coreStats.sound_fifo_peak_a),
+                          static_cast<unsigned long>(coreStats.sound_fifo_nonzero_b),
+                          static_cast<unsigned long>(coreStats.sound_fifo_peak_b));
             modeStart = coreStats;
             Serial.flush();
             coreTimeUs = 0;

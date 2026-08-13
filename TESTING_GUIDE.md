@@ -174,16 +174,17 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    must likewise show `V:L2`; a PSRAM marker fails the hot-memory placement test.
    Record the JIT capacity selected after those allocations—192, 160, 128, 96,
    or a smaller safe fallback—alongside every benchmark result.
-3. During title-transition diagnosis, confirm the CPU engine initially reads
-   `JIT trace` and `[gba jitdbg]` reports engine 2. This mode continuously validates
-   every generated block and intentionally sacrifices speed. Run a
+3. Confirm the CPU engine initially reads `Turbo` and `[gba jitdbg]` reports
+   engine 3. Every new block is validated before trust, and a mismatch must
+   quarantine only that block while engine 3 continues. Run a
    Thumb-heavy game for at least five minutes, then open the Escape menu twice
    and confirm emulated FPS, core time, and JIT hit/miss counts continue moving.
    In each 120-frame report, `jit=used/capacity`, `ops`, `build`, `full`, `reuse`,
    and `wait/reject/probe` must remain internally consistent; gameplay must not
    freeze when `full` changes to one or adaptive `reuse` begins advancing. The
-   paired `[gba jitdbg]` line must retain engine 2 with zero resets, bad PCs, and
-   guard trips. JIT counters must advance while Batch counters remain zero.
+   paired `[gba jitdbg]` line must retain engine 3 with zero resets and bad PCs.
+   Batch and JIT counters must both advance; guard trips may rise only when the
+   matching block is rejected and normal execution continues.
 4. Save and reload a state, then resume for another two minutes. This flushes
    the executable cache; graphics, controls, timers, and audio must remain
    deterministic while the blocks pass their eight validation runs again.

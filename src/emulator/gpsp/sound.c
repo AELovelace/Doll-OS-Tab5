@@ -60,7 +60,8 @@ void gba_sound_scratch_term(void)
 #else
 static s16 sound_buffer[BUFFER_SIZE];
 #endif
-static u32 sound_buffer_base;
+u32 sound_buffer_base;
+u32 sound_timer_calls[2];
 u32 sound_read_calls;
 u32 sound_samples_requested;
 u32 sound_samples_returned;
@@ -124,6 +125,7 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
   int ret = 0;
   u32 sample_status = DIRECT_SOUND_INACTIVE;
   direct_sound_struct *ds = &direct_sound_channel[channel];
+  sound_timer_calls[channel]++;
 
   fixed8_24 fifo_fractional = ds->fifo_fractional;
   u32 buffer_index = ds->buffer_index;
@@ -629,6 +631,7 @@ void reset_sound(void)
 
   sound_on = 0;
   sound_buffer_base = 0;
+  sound_timer_calls[0] = sound_timer_calls[1] = 0;
   sound_read_calls = 0;
   sound_samples_requested = 0;
   sound_samples_returned = 0;

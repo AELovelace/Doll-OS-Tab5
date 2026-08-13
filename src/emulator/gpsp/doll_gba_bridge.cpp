@@ -250,10 +250,10 @@ bool doll_gba_core_load(const char* rom_path) {
   previousDebugButtons = 0;
   transitionDebugFrames = 0;
   transitionDebugSequence = 0;
-  // This diagnostic build continuously validates every generated block. It is
-  // intentionally slower than Turbo so the title-to-game divergence cannot hide
-  // inside a previously trusted block; the menu still exposes every CPU mode.
-  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_JIT_DEBUG);
+  // Turbo validates every new block before trust and now quarantines only a bad
+  // block. Start accelerated while retaining the A-triggered transition capture;
+  // JIT trace remains in the menu for continuous validation when needed.
+  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_TURBO);
   gba_rom_page_loads = gba_rom_page_prefetches = 0;
   selected_boot_mode = boot_game;
   reset_gba();
@@ -420,6 +420,32 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
       ((dma[1].direct_sound_channel & 3U) << 4U) |
       ((dma[2].start_type & 7U) << 8U) |
       ((dma[2].direct_sound_channel & 3U) << 12U);
+  stats->sound_buffer_base = sound_buffer_base;
+  stats->sound_gbc_buffer_index = gbc_sound_buffer_index;
+  stats->sound_direct_buffer_a = direct_sound_channel[0].buffer_index;
+  stats->sound_direct_buffer_b = direct_sound_channel[1].buffer_index;
+  stats->sound_timer_calls_a = sound_timer_calls[0];
+  stats->sound_timer_calls_b = sound_timer_calls[1];
+  stats->sound_fifo_nonzero_a = 0;
+  stats->sound_fifo_nonzero_b = 0;
+  stats->sound_fifo_peak_a = 0;
+  stats->sound_fifo_peak_b = 0;
+  for (uint32_t channel = 0; channel < 2; ++channel) {
+    const direct_sound_struct& direct = direct_sound_channel[channel];
+    const uint32_t depth = (direct.fifo_top - direct.fifo_base) & 31U;
+    for (uint32_t offset = 0; offset < depth; ++offset) {
+      const int32_t sample = direct.fifo[(direct.fifo_base + offset) & 31U];
+      const uint32_t magnitude = sample < 0 ? static_cast<uint32_t>(-sample)
+                                             : static_cast<uint32_t>(sample);
+      if (sample) {
+        if (channel == 0) ++stats->sound_fifo_nonzero_a;
+        else ++stats->sound_fifo_nonzero_b;
+      }
+      uint32_t& peak = channel == 0 ? stats->sound_fifo_peak_a
+                                    : stats->sound_fifo_peak_b;
+      if (magnitude > peak) peak = magnitude;
+    }
+  }
   stats->sound_fifo_empty_reads = sound_fifo_empty_reads;
   stats->sound_fifo_short_reads = sound_fifo_short_reads;
   stats->guest_reset_prev_pc = gba_guest_reset_prev_pc;

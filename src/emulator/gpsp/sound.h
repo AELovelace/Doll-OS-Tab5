@@ -98,6 +98,8 @@ extern u32 gbc_sound_last_cpu_ticks;
 
 extern const u32 sound_frequency;
 extern u32 sound_on;
+extern u32 sound_buffer_base;
+extern u32 sound_timer_calls[2];
 extern u32 sound_read_calls;
 extern u32 sound_samples_requested;
 extern u32 sound_samples_returned;
