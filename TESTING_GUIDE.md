@@ -210,10 +210,11 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
 6. From the Escape menu, activate `CPU engine` and confirm it remains
    `Isolated JIT (locked)` with a batch/fast-dispatch quarantine note. Do not
    enable Batch or Turbo until the title-state corruption is isolated.
-   Stack and WRAM JIT operations are enabled only with the byte-overlay validator.
-   The reference pass must place PUSH, SP-relative, and WRAM stores in its shadow
-   transaction, then compare generated RAM with that expected result. On any
-   mismatch it restores the original bytes before stock gpSP retries the block.
+   Stack writes and WRAM reads are enabled only with the byte-overlay validator.
+   The reference pass must place PUSH and SP-relative stores in its shadow
+   transaction, then compare generated RAM with that expected result. General
+   WRAM stores remain disabled after `STRB` at `08001008` failed reason `50`.
+   On any mismatch the validator restores original bytes before stock gpSP retries.
 7. Confirm `[gb audio] ready, primed 1280 frames`, an `ES8388 readback ... OK`
    line, and an amp report ending in `pin driving`. During three performance
    windows, `[gba i2s]` pushed frames must keep advancing without drops and
