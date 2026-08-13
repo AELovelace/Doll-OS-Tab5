@@ -578,7 +578,7 @@ static String gbaMenuValue(int item) {
         return String(radioGetVolume()) + "/" + String(RADIO_VOLUME_MAX);
     }
     if (item == GBA_MENU_CPU_ENGINE) {
-        return "Isolated JIT (locked)";
+        return "Fast dispatch only (locked)";
     }
     return "";
 }
@@ -722,8 +722,8 @@ static bool gbaRunMenu(uint8_t& legacyButtons, uint16_t& touchButtons) {
                 break;
             }
             case GBA_MENU_CPU_ENGINE: {
-                doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_JIT_ISOLATED);
-                note = "JIT only: batch and fast dispatcher quarantined";
+                doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_FAST_ISOLATED);
+                note = "fast dispatcher only: JIT and batch quarantined";
                 break;
             }
             case GBA_MENU_VOLUME:
@@ -947,7 +947,7 @@ static void gbaRunBootSession() {
             const uint32_t jitAttempts = coreStats.jit_attempts - modeStart.jit_attempts;
             const uint32_t jitCompiles = coreStats.jit_compiles - modeStart.jit_compiles;
             const uint32_t jitOps = coreStats.jit_ops - modeStart.jit_ops;
-            Serial.printf("[gba perf] mode=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus audio=%lluus blit=%lluus arm/thumb/halt=%lu/%lu/%lu pc=%08lx cpsr=%08lx jit=%lu/%luK hit/miss/try=%lu/%lu/%lu ops=%lu build=%lu full=%lu reuse=%lu wait/reject/probe=%lu/%lu/%lu break=%02lx:%lu batch=%lu/%lu vram=%s rom=%lu+%lu cpu=%luMHz\n",
+            Serial.printf("[gba perf] mode=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus audio=%lluus blit=%lluus arm/thumb/halt=%lu/%lu/%lu pc=%08lx cpsr=%08lx jit=%lu/%luK hit/miss/try=%lu/%lu/%lu ops=%lu build=%lu full=%lu reuse=%lu wait/reject/probe=%lu/%lu/%lu break=%02lx:%lu batch=%lu/%lu fast=%lu/%lu vram=%s rom=%lu+%lu cpu=%luMHz\n",
                           gbaScale,
                           gbaFrameSkip,
                           static_cast<unsigned long>(emuFps10 / 10),
@@ -980,6 +980,8 @@ static void gbaRunBootSession() {
                            static_cast<unsigned long>(coreStats.jit_top_break_count),
                            static_cast<unsigned long>(coreStats.thumb_batch_ops - modeStart.thumb_batch_ops),
                            static_cast<unsigned long>(coreStats.thumb_batch_runs - modeStart.thumb_batch_runs),
+                           static_cast<unsigned long>(coreStats.thumb_fast_hits - modeStart.thumb_fast_hits),
+                           static_cast<unsigned long>(coreStats.thumb_fast_misses - modeStart.thumb_fast_misses),
                            coreStats.vram_internal ? "L2" : "PSRAM",
                            static_cast<unsigned long>(coreStats.rom_page_loads),
                            static_cast<unsigned long>(coreStats.rom_page_prefetches),

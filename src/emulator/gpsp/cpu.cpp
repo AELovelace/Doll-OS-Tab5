@@ -106,6 +106,8 @@ u32 gba_thumb_jit_top_break_count = 0;
 u32 gba_thumb_batch_runs = 0;
 u32 gba_thumb_batch_ops = 0;
 u32 gba_thumb_batch_enabled = 0;
+u32 gba_thumb_fast_hits = 0;
+u32 gba_thumb_fast_misses = 0;
 // The hand-written ARM and Thumb fast paths ran unconditionally, so "Safe" was
 // never the stock interpreter. Clearing this drops both back to gpSP's own
 // decode, which is what the mode is supposed to mean when a game misbehaves.
@@ -858,6 +860,8 @@ extern "C" void gba_p4_thumb_jit_reset_stats(void)
   gba_thumb_jit_top_break_count = 0;
   gba_thumb_batch_runs = 0;
   gba_thumb_batch_ops = 0;
+  gba_thumb_fast_hits = 0;
+  gba_thumb_fast_misses = 0;
   gba_thumb_jit_guard_trips = 0;
   gba_thumb_jit_last_pc = 0;
   gba_thumb_jit_last_end_pc = 0;
@@ -10386,6 +10390,10 @@ thumb_loop:
        {
           int fast_result = gba_thumb_execute_fast_dispatch(opcode, n_flag, z_flag,
              c_flag, v_flag, cpu_alert, cycles_remaining);
+          if(fast_result)
+             gba_thumb_fast_hits++;
+          else
+             gba_thumb_fast_misses++;
           if(fast_result == 1)
              goto thumb_instruction_done;
           if(fast_result == 2)

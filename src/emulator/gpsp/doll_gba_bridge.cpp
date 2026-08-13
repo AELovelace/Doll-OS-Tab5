@@ -142,6 +142,8 @@ extern u32 gba_thumb_jit_top_break_count;
 extern u32 gba_thumb_batch_runs;
 extern u32 gba_thumb_batch_ops;
 extern u32 gba_thumb_batch_enabled;
+extern u32 gba_thumb_fast_hits;
+extern u32 gba_thumb_fast_misses;
 extern u32 gba_interp_fast_enabled;
 extern u32 gba_thumb_jit_runtime_enabled;
 extern u32 gba_thumb_jit_debug_validate;
@@ -256,10 +258,9 @@ bool doll_gba_core_load(const char* rom_path) {
   transitionDebugFrames = 0;
   transitionDebugSequence = 0;
   transitionCaptureConsumed = false;
-  // Run the JIT without the batch engine or hand-written fast interpreter. Each
-  // ROM block is checked eight times against stock gpSP before becoming trusted,
-  // isolating useful code generation from the path that corrupted the title.
-  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_JIT_ISOLATED);
+  // Test only the hand-written dispatcher that was implicitly active during the
+  // original full-speed captures; JIT generation and batching stay disabled.
+  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_FAST_ISOLATED);
   gba_rom_page_loads = gba_rom_page_prefetches = 0;
   selected_boot_mode = boot_game;
   reset_gba();
@@ -335,15 +336,17 @@ void doll_gba_core_set_cpu_mode(uint32_t mode) {
   // path. Continuous comparison is intentionally off so this build measures the
   // acceleration we can actually ship rather than diagnostic double execution.
   gba_thumb_jit_debug_validate = 0;
-  // Only the explicitly unsafe combined mode may enter the hand-written ARM or
-  // Thumb dispatcher. Isolated JIT always falls back to stock gpSP per opcode.
-  gba_interp_fast_enabled = mode == DOLL_GBA_CPU_TURBO;
+  // Fast-only reproduces the former implicit accelerator without allowing the
+  // batch loop or JIT to obscure its correctness and performance results.
+  gba_interp_fast_enabled =
+      mode == DOLL_GBA_CPU_FAST_ISOLATED || mode == DOLL_GBA_CPU_TURBO;
 }  // Selects isolated accelerators, a checked JIT, or combined turbo execution.
 
 uint32_t doll_gba_core_get_cpu_mode(void) {
   if (gba_thumb_jit_runtime_enabled && gba_thumb_batch_enabled) return DOLL_GBA_CPU_TURBO;
   if (gba_thumb_jit_runtime_enabled) return DOLL_GBA_CPU_JIT_ISOLATED;
   if (gba_thumb_batch_enabled) return DOLL_GBA_CPU_BATCH;
+  if (gba_interp_fast_enabled) return DOLL_GBA_CPU_FAST_ISOLATED;
   return DOLL_GBA_CPU_SAFE;
 }  // Reports the active accelerator combination to the diagnostic menu.
 
@@ -390,6 +393,8 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
   stats->jit_top_break_count = gba_thumb_jit_top_break_count;
   stats->thumb_batch_runs = gba_thumb_batch_runs;
   stats->thumb_batch_ops = gba_thumb_batch_ops;
+  stats->thumb_fast_hits = gba_thumb_fast_hits;
+  stats->thumb_fast_misses = gba_thumb_fast_misses;
   stats->vram_internal = gbsp_memory && esp_ptr_internal(gbsp_memory->p_vram);
   stats->cpu_mode = doll_gba_core_get_cpu_mode();
   stats->softreset_count = gba_swi_hle_softreset_count;

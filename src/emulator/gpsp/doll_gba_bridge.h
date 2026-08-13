@@ -22,7 +22,8 @@ enum {
   DOLL_GBA_CPU_BATCH = 1,
   DOLL_GBA_CPU_JIT_ISOLATED = 2,
   DOLL_GBA_CPU_TURBO = 3,
-  DOLL_GBA_CPU_MODE_COUNT = 4,
+  DOLL_GBA_CPU_FAST_ISOLATED = 4,
+  DOLL_GBA_CPU_MODE_COUNT = 5,
 };
 
 typedef struct {
@@ -44,6 +45,8 @@ typedef struct {
   uint32_t jit_top_break_count;
   uint32_t thumb_batch_runs;
   uint32_t thumb_batch_ops;
+  uint32_t thumb_fast_hits;
+  uint32_t thumb_fast_misses;
   uint32_t vram_internal;
   uint32_t cpu_mode;
   uint32_t softreset_count;

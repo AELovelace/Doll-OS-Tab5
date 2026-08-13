@@ -174,10 +174,18 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    must likewise show `V:L2`; a PSRAM marker fails the hot-memory placement test.
    Record the JIT capacity selected after those allocations—192, 160, 128, 96,
    or a smaller safe fallback—alongside every benchmark result.
-3. Confirm the CPU engine initially reads `Isolated JIT (locked)` and
-   `[gba jitdbg]` reports engine 2. This mode enables only Thumb JIT generation:
-   batch execution and the hand-written ARM/Thumb fast dispatcher must remain
-   disabled. Every new JIT block is validated eight times against the stock
+3. Confirm the CPU engine initially reads `Fast dispatch only (locked)` and
+   `[gba jitdbg]` reports engine 4. This diagnostic mode enables only the
+   hand-written ARM/Thumb fast dispatcher: JIT generation and batch execution
+   must remain disabled. Every `[gba perf]` line must therefore retain zero JIT
+   operations/builds, `batch=0/0`, and advancing `fast=hits/misses` counters.
+   Compare emulated FPS at the intro, title, and Birch sequence with the earlier
+   isolated-JIT captures. If the title restarts, preserve the input line and the
+   first performance/reset reports after it; this localizes the original fault
+   to the dispatcher without JIT or batch interference.
+
+   In the separately selectable isolated-JIT mode, every new JIT block is
+   validated eight times against the stock
    interpreter before trust, and a mismatch must quarantine only that block while
    engine 2 continues. Run a
    Thumb-heavy game for at least five minutes, then open the Escape menu twice
@@ -198,7 +206,7 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    `[gba-input]`. A contact with `pressed=1` and `buttons=000` missed the hitbox.
    Use Start for the diagnostic title transition: the first Start edge emits
    `[gba-step] start=080` and arms one 600-frame capture while leaving CPU mode
-   at 2. Normal A presses never arm or extend the expensive trace, so gameplay
+   at 4. Normal A presses never arm or extend the expensive trace, so gameplay
    returns to representative performance logging when the capture completes.
    If it does, preserve the first `[gba-jit] guard` line and all following
    `[gba-jit] trace` lines before relaunching. Reason `53575253` is SoftReset,
@@ -208,8 +216,8 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    engine 2, and leave the title/game state intact. SoftReset and bad-fetch guards may fall
    back to engine 0 because they indicate a wider CPU-state failure.
 6. From the Escape menu, activate `CPU engine` and confirm it remains
-   `Isolated JIT (locked)` with a batch/fast-dispatch quarantine note. Do not
-   enable Batch or Turbo until the title-state corruption is isolated.
+   `Fast dispatch only (locked)` with a JIT/batch quarantine note. Do not enable
+   Batch or Turbo until the title-state corruption is isolated.
    Stack writes and WRAM reads are enabled only with the byte-overlay validator.
    The reference pass must place PUSH and SP-relative stores in its shadow
    transaction, then compare generated RAM with that expected result. General

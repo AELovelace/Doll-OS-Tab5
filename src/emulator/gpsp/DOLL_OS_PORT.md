@@ -39,8 +39,11 @@ Build policy:
   in the batched interpreter. The JIT ends immediately before them, preventing an
   idle input-loop outcome from becoming trusted before its pressed path is seen.
 - The in-game CPU engine selector separates `Safe`, `Batch`, isolated JIT, and
-  `Turbo`. The current locked default is isolated JIT: no batching and no
-  hand-written ARM/Thumb fast dispatch. Each generated ROM block is compared
+  `Turbo`, plus a dedicated fast-dispatch isolation mode. The current locked
+  diagnostic default is fast dispatch only: no batching and no JIT generation.
+  Serial performance reports include fast-path hit/miss counts so this test can
+  prove whether the formerly implicit dispatcher produced the full-speed run.
+  Isolated JIT remains available in the core: each generated ROM block is compared
   with the stock interpreter eight times before direct trusted execution. A
   failed validation quarantines only that ROM block, leaving safe per-opcode
   fallback without discarding acceleration everywhere else. The reference model
