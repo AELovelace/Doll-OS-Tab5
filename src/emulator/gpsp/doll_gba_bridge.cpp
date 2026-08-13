@@ -200,7 +200,10 @@ bool doll_gba_core_load(const char* rom_path) {
   }
   gba_p4_thumb_jit_reset();
   gba_p4_thumb_jit_reset_stats();
-  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_BATCH);
+  // The transition-corruption bugs were in BIOS CpuFastSet/LZ77 HLE rather than
+  // the validated JIT. Start with both proven accelerators so gameplay retains
+  // the measured near-2x uplift; Safe and Batch remain available in the menu.
+  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_TURBO);
   gba_rom_page_loads = gba_rom_page_prefetches = 0;
   selected_boot_mode = boot_game;
   reset_gba();

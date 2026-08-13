@@ -27,6 +27,8 @@ bool begin();
 void end();
 bool available();
 void onSamples(void* buf, size_t len);   // gb_audio_cb_t shape; len = mono int16 count
+void onStereoSamples(const int16_t* buf, size_t frames, size_t cadenceFrames);
+                                            // Downmixes GBA stereo and pads one clocked frame.
 void setDiscard(bool on);                // true = swallow samples (paused/quitting)
 void stats(uint32_t& pushed, uint32_t& dropped, uint32_t& underruns);
 }  // namespace AudioOut

@@ -44,19 +44,15 @@ bool GameBoyAdvanceHost::allocateCoreMemory() {
   frame_ = static_cast<uint16_t*>(allocBuffer(DOLL_GBA_FRAME_BYTES, false));
   stereoScratch_ = static_cast<int16_t*>(
       allocBuffer(kAudioMaxFrames * 2 * sizeof(int16_t), false));
-  monoScratch_ = static_cast<int16_t*>(
-      allocBuffer(kAudioMaxFrames * sizeof(int16_t), false));
-  return frame_ && stereoScratch_ && monoScratch_;
-}
+  return frame_ && stereoScratch_;
+}  // Allocates the framebuffer and one native-stereo audio transfer buffer.
 
 void GameBoyAdvanceHost::releaseCoreMemory() {
   if (frame_) heap_caps_free(frame_);
   if (stereoScratch_) heap_caps_free(stereoScratch_);
-  if (monoScratch_) heap_caps_free(monoScratch_);
   frame_ = nullptr;
   stereoScratch_ = nullptr;
-  monoScratch_ = nullptr;
-}
+}  // Releases every foreground-only GBA host allocation.
 
 bool GameBoyAdvanceHost::begin() {
   if (ready_) return true;
@@ -134,13 +130,11 @@ void GameBoyAdvanceHost::submitAudio() {
   audioRemainder_ %= kGbaClockHz;
   if (frames > kAudioMaxFrames) frames = kAudioMaxFrames;
   const uint32_t produced = doll_gba_core_read_audio(stereoScratch_, frames);
-  for (uint32_t i = 0; i < produced; ++i) {
-    const int32_t mixed = static_cast<int32_t>(stereoScratch_[i * 2]) +
-                          static_cast<int32_t>(stereoScratch_[i * 2 + 1]);
-    monoScratch_[i] = static_cast<int16_t>(mixed / 2);
-  }
-  AudioOut::onSamples(monoScratch_, produced);
-}
+  // The core intentionally withholds its newest samples while interpolation can
+  // still touch them. Pad that short startup read so I2S receives a full clocked
+  // frame and the preloaded DMA cushion does not drain before audio catches up.
+  AudioOut::onStereoSamples(stereoScratch_, produced, frames);
+}  // Transfers exactly one emulated frame of paced audio to the board sink.
 
 void GameBoyAdvanceHost::runFrame(bool draw) {
   if (!loaded_) return;

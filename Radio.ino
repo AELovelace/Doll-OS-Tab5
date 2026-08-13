@@ -228,7 +228,7 @@ bool audioCodecEnsure(uint16_t mclkMultiple) {
     bool& codecRegsReady = audioCodecRegsReady;
     uint16_t& configuredMclkMultiple = audioCodecConfiguredMclk;
     static constexpr AudioCodecRegister initRegisters[] = {
-        {0, 0x80}, {0, 0x00}, {0, 0x00}, {0, 0x0E},
+        {0, 0x0E},
         {1, 0x00}, {2, 0x0A}, {3, 0xFF}, {4, 0x3C},
         {5, 0x00}, {6, 0x00}, {7, 0x7C}, {8, 0x00},
         {23, 0x18}, {25, 0x20}, {26, 0x00}, {27, 0x00},
@@ -238,11 +238,49 @@ bool audioCodecEnsure(uint16_t mclkMultiple) {
     };
 
     if (!codecRegsReady) {
+        // The ES8388 has its own supply, so esp_restart() leaves it holding
+        // whatever the previous session left behind -- unlike a cold boot, where
+        // it comes up at defaults. Assert the soft reset on its own and give it
+        // time to settle before programming, otherwise the config lands on a
+        // chip that is still resetting and only a physical power cycle recovers.
+        if (!audioCodecWrite(0, 0x80)) {
+            Serial.println("[audio] ES8388 soft reset failed (expected at I2C 0x10)");
+            return false;
+        }
+        delay(2);
+        if (!audioCodecWrite(0, 0x00)) {
+            Serial.println("[audio] ES8388 reset release failed (expected at I2C 0x10)");
+            return false;
+        }
+        delay(10);
+
         for (const AudioCodecRegister& setting : initRegisters) {
             if (!audioCodecWrite(setting.reg, setting.value)) {
                 Serial.println("[audio] ES8388 codec init failed (expected at I2C 0x10)");
                 return false;
             }
+        }
+        // Prove the chip actually took the configuration. A warm restart that
+        // reads back defaults (or garbage) means the writes are landing on a
+        // codec that never accepted them.
+        if (!boardI2cLock(1000)) {
+            Serial.println("[audio] ES8388 readback skipped: I2C bus busy");
+            return false;
+        }
+        const uint8_t r0  = M5.In_I2C.readRegister8(0x10, 0, AUDIO_I2C_SPEED);
+        const uint8_t r2  = M5.In_I2C.readRegister8(0x10, 2, AUDIO_I2C_SPEED);
+        const uint8_t r25 = M5.In_I2C.readRegister8(0x10, 25, AUDIO_I2C_SPEED);
+        const uint8_t r46 = M5.In_I2C.readRegister8(0x10, 46, AUDIO_I2C_SPEED);
+        const uint8_t r47 = M5.In_I2C.readRegister8(0x10, 47, AUDIO_I2C_SPEED);
+        boardI2cUnlock();
+        const bool registersMatch = r0 == 0x0E && r2 == 0x0A && r25 == 0x20 &&
+                                    r46 == 0x21 && r47 == 0x21;
+        Serial.printf("[audio] ES8388 readback r0=0x%02X r2=0x%02X r25=0x%02X "
+                      "r46=0x%02X r47=0x%02X %s\n",
+                      r0, r2, r25, r46, r47, registersMatch ? "OK" : "MISMATCH");
+        if (!registersMatch) {
+            Serial.println("[audio] ES8388 configuration did not latch");
+            return false;
         }
         codecRegsReady = true;
         Serial.println("[audio] ES8388 codec up");

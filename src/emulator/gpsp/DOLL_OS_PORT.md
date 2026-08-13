@@ -41,14 +41,17 @@ Build policy:
 - The in-game CPU engine selector separates `Safe`, `Batch`, `JIT trace`, and
   `Turbo`. `JIT trace` enables the JIT without batching and continuously compares
   every generated result with the C safety model, even after a block has warmed.
-  It is the default while the Pokemon transition failure is under investigation.
+  `Turbo` is the default now that the transition failure was traced to and fixed
+  in BIOS CpuFastSet/LZ77 HLE; it combines batching with trusted validated blocks.
 - A 16-entry JIT flight recorder captures each compiled block's start/end PC,
   SP, LR, return word, and first/last opcode signature. A model mismatch,
   unexpected straight-line PC, SoftReset, or bad fetch disables both accelerators
   and emits `[gba-jit] guard` plus ordered `[gba-jit] trace` lines to serial.
 - The 32 KB read-memory page map and 96 KB VRAM are reserved in internal L2 before
   the JIT, with fallbacks reported in the launch log and `V:L2`/`V:P` in the menu.
-- `GBA_SOUND_FREQUENCY=32768` matches Doll-OS `AudioOut`.
+- `GBA_SOUND_FREQUENCY=32768` matches Doll-OS `AudioOut`. The sink primes five
+  DMA descriptors with silence before enabling the amp and pads the core's short
+  startup read, preserving the queue cushion through panel-update bursts.
 
 Runtime lifecycle:
 

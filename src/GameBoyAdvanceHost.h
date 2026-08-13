@@ -45,7 +45,6 @@ class GameBoyAdvanceHost {
 
   uint16_t* frame_ = nullptr;
   int16_t* stereoScratch_ = nullptr;
-  int16_t* monoScratch_ = nullptr;
   String savePath_;
   String status_;
   uint16_t buttons_ = 0;

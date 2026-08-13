@@ -174,15 +174,15 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    must likewise show `V:L2`; a PSRAM marker fails the hot-memory placement test.
    Record the JIT capacity selected after those allocations—192, 160, 128, 96,
    or a smaller safe fallback—alongside every benchmark result.
-3. Confirm the CPU engine initially reads `JIT trace`. This mode runs the JIT
-   without the batch interpreter and checks every generated block. Run a
+3. Confirm the CPU engine initially reads `Turbo` and `[gba jitdbg]` reports
+   engine 3. This mode combines the batch interpreter with trusted JIT blocks. Run a
    Thumb-heavy game for at least five minutes, then open the Escape menu twice
    and confirm emulated FPS, core time, and JIT hit/miss counts continue moving.
    In each 120-frame report, `jit=used/capacity`, `ops`, `build`, `full`, `reuse`,
    and `wait/reject/probe` must remain internally consistent; gameplay must not
    freeze when `full` changes to one or adaptive `reuse` begins advancing. The
-   paired `[gba jitdbg]` line must say engine 2 with zero resets, bad PCs, and
-   guard trips. Batch counters must remain zero in this isolated JIT test.
+   paired `[gba jitdbg]` line must retain engine 3 with zero resets, bad PCs, and
+   guard trips. Batch and JIT counters must both advance in this combined test.
 4. Save and reload a state, then resume for another two minutes. This flushes
    the executable cache; graphics, controls, timers, and audio must remain
    deterministic while the blocks pass their eight validation runs again.
@@ -197,31 +197,36 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    same title-to-game transition. Safe isolates the exact interpreter, Batch
    isolates the batching loop, and Turbo combines batching with trusted JIT.
    Record the engine number from `[gba jitdbg]` with each result.
-7. Choose Quit ROM. Confirm the battery save is written, the device reboots once,
+7. Confirm `[gb audio] ready, primed 1280 frames`, an `ES8388 readback ... OK`
+   line, and an amp report ending in `pin driving`. During three performance
+   windows, `[gba i2s]` pushed frames must keep advancing without drops and
+   `[gba audio]` must report nonzero samples. Listen for continuous, correctly
+   pitched sound through drawn-frame bursts and after opening/resuming the menu.
+8. Choose Quit ROM. Confirm the battery save is written, the device reboots once,
    and the ordinary Doll-OS shell returns with display history, WiFi, and telnet
    initialized normally. Launch a different ROM, then return to the first ROM;
    no compiled block or rejection state may leak between rebooted sessions.
-8. Repeat with a ROM larger than the 8 MB cache. Confirm `rom=loads+prefetches`
+9. Repeat with a ROM larger than the 8 MB cache. Confirm `rom=loads+prefetches`
    advances without crashes and compare average core time against an 8 MB-or-
    smaller ROM so SD paging is not mistaken for a JIT regression.
-9. Record at least three consecutive 120-frame `[gba perf]` lines for the same
+10. Record at least three consecutive 120-frame `[gba perf]` lines for the same
    gameplay segment before and after a JIT or memory-placement change. Compare
    core time and emulated FPS separately from audio and blit time; use the
    per-window hit/miss/try and `ops` deltas rather than lifetime totals. Record
    `break=group:count` so unsupported-opcode work is not confused with cache churn.
-10. While a ROM is running, press the hardware reset once. The following boot must
+11. While a ROM is running, press the hardware reset once. The following boot must
    log that the previous game-mode boot did not exit cleanly, clear the ticket,
    fully reset/wake the ST7123 panel, and enter Doll-OS instead of relaunching the
    ROM. Reset again to confirm the display lights on both software-reset boots,
    normal boots remain normal, and no crash loop is possible.
-11. Remove the SD card after scheduling a launch, or test with an unreadable ROM.
+12. Remove the SD card after scheduling a launch, or test with an unreadable ROM.
    Minimal mode must show a bounded launch failure, clear its ticket, and reboot
    to Doll-OS. Reinserting the card must not unexpectedly relaunch that ROM.
-12. Compare free PSRAM/internal heap from the old in-shell launch and minimal
+13. Compare free PSRAM/internal heap from the old in-shell launch and minimal
     launch logs. Minimal mode must omit allocation of the ~1.8 MB `frameSprite`
     and ~1.8 MB `displayShadow`; the bare-panel Escape menu and touch controls
     must still redraw completely at 1x, 2x, and 3x.
-13. For every shell-to-GBA and GBA-to-shell transition, confirm serial prints
+14. For every shell-to-GBA and GBA-to-shell transition, confirm serial prints
     `[display] restart fence: panel reset held low` before reset. The ST7123 must
     light without removing USB power; a dark panel that recovers only after a
     cold boot fails this test even when emulator performance logs continue.
