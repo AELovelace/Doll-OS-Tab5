@@ -258,9 +258,9 @@ bool doll_gba_core_load(const char* rom_path) {
   transitionDebugFrames = 0;
   transitionDebugSequence = 0;
   transitionCaptureConsumed = false;
-  // Test only the hand-written dispatcher that was implicitly active during the
-  // original full-speed captures; JIT generation and batching stay disabled.
-  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_FAST_ISOLATED);
+  // Test only the bounded 16-op Thumb batch loop; JIT generation and the
+  // standalone per-op fast dispatcher stay disabled for an unambiguous result.
+  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_BATCH);
   gba_rom_page_loads = gba_rom_page_prefetches = 0;
   selected_boot_mode = boot_game;
   reset_gba();
