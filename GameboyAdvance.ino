@@ -555,7 +555,6 @@ static bool gbaPickRom(String& romLogical) {
 enum GbaMenuItem : uint8_t {
     GBA_MENU_DISPLAY,
     GBA_MENU_FRAME_SKIP,
-    GBA_MENU_CPU_ENGINE,
     GBA_MENU_VOLUME,
     GBA_MENU_SAVE_STATE,
     GBA_MENU_LOAD_STATE,
@@ -577,10 +576,6 @@ static String gbaMenuValue(int item) {
     }
     if (item == GBA_MENU_VOLUME) {
         return String(radioGetVolume()) + "/" + String(RADIO_VOLUME_MAX);
-    }
-    if (item == GBA_MENU_CPU_ENGINE) {
-        return doll_gba_core_get_cpu_mode() == DOLL_GBA_CPU_JIT_ISOLATED
-            ? "JIT only" : "Batch + fast";
     }
     return "";
 }
@@ -606,7 +601,6 @@ static void gbaDrawMenuTo(lgfx::LGFXBase& surface, int selected, const String& n
         switch (item) {
             case GBA_MENU_DISPLAY: label = "Display"; break;
             case GBA_MENU_FRAME_SKIP: label = "Frame skip"; break;
-            case GBA_MENU_CPU_ENGINE: label = "CPU engine"; break;
             case GBA_MENU_VOLUME: label = "Volume"; break;
             case GBA_MENU_SAVE_STATE: label = "Save state"; break;
             case GBA_MENU_LOAD_STATE: label = "Load state"; break;
@@ -633,15 +627,15 @@ static void gbaDrawMenuTo(lgfx::LGFXBase& surface, int selected, const String& n
         left, footY);
     surface.drawString(
         "Audio " + String(gbaLastAudioUs / 1000) + "ms  blit " +
-        String(gbaLastBlitUs / 1000) + "ms  JIT " + String(perf.jit_bytes / 1024) +
-        "K " + String(perf.jit_hits) + "/" + String(perf.jit_misses) +
+        String(gbaLastBlitUs / 1000) + "ms  PRE " +
+        String(perf.thumb_predecode_bytes / 1024) + "K " +
+        String(perf.thumb_predecode_hits) + "/" +
+        String(perf.thumb_predecode_misses) +
         " V:" + (perf.vram_internal ? "L2" : "P"),
         left, footY + 16);
     surface.drawString(
-        "Guard " + String(perf.jit_guard_trips) + " reset/pc " +
-        String(perf.softreset_count) + "/" + String(perf.bad_pc_count) +
-        " last " + String(perf.jit_last_pc, HEX) + ">" +
-        String(perf.jit_last_end_pc, HEX),
+        "Batch+fast  reset/pc " + String(perf.softreset_count) + "/" +
+        String(perf.bad_pc_count),
         left, footY + 32);
     if (note.length()) {
         surface.setTextColor(TFT_GREENYELLOW, TFT_BLACK);
@@ -723,16 +717,6 @@ static bool gbaRunMenu(uint8_t& legacyButtons, uint16_t& touchButtons) {
                       " emulated frames; panel remains capped at 66ms";
                 break;
             }
-            case GBA_MENU_CPU_ENGINE: {
-                const bool useJit =
-                    doll_gba_core_get_cpu_mode() != DOLL_GBA_CPU_JIT_ISOLATED;
-                doll_gba_core_set_cpu_mode(useJit ? DOLL_GBA_CPU_JIT_ISOLATED
-                                                   : DOLL_GBA_CPU_BATCH_FAST);
-                note = useJit
-                    ? "A/B: isolated JIT; batch + fast disabled"
-                    : "A/B: batch + fast dispatch; JIT disabled";
-                break;
-            }
             case GBA_MENU_VOLUME:
                 if (left) radioAdjustVolume(-1);
                 else if (right) radioAdjustVolume(1);
@@ -768,7 +752,7 @@ static void gbaPrintUsage() {
     outLine("Usage: gba [rom.gba|.agb|.bin] [1x|2x|3x]", C_CYAN);
     outLine("  Bare 'gba' opens the recursive /sd/gba ROM picker.", C_CYAN);
     outLine("  3x is default; display scale can also be changed in-game.", C_CYAN);
-    outLine("  Escape/touch MENU: display, CPU engine, volume, states, quit.", C_CYAN);
+    outLine("  Escape/touch MENU: display, frame skip, volume, states, quit.", C_CYAN);
     outLine("  States sit next to the ROM as <name>.gstate.", C_CYAN);
     outLine("  Controls: arrows/WASD, A/B, Enter, Backspace; touch adds L/R.", C_WHITE);
     outLine("  Quit: Ctrl+T, or choose Quit ROM from the menu.", C_WHITE);
@@ -1157,7 +1141,7 @@ static void gbaRunBootSession() {
             const uint64_t avgUpdateUs = perfFrames ? updateUs / perfFrames : 0;
             const uint64_t avgCpuUs = perfFrames && coreTimeUs > updateUs
                 ? (coreTimeUs - updateUs) / perfFrames : 0;
-            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/update/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu batch=%lu/%lu rom=%lu+%lu cpu=%luMHz\n",
+            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/update/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu batch=%lu/%lu pre=%lu/%lu/%lu/%lu/%lu rom=%lu+%lu cpu=%luMHz\n",
                           gbaScale,
                           gbaFrameSkip,
                           static_cast<unsigned long>(emuFps10 / 10),
@@ -1183,10 +1167,15 @@ static void gbaRunBootSession() {
                           static_cast<unsigned long>(coreStats.jit_bytes / 1024),
                           static_cast<unsigned long>(jitHits),
                           static_cast<unsigned long>(jitMisses),
-                          static_cast<unsigned long>(jitOps),
-                          static_cast<unsigned long>(coreStats.thumb_batch_ops - modeStart.thumb_batch_ops),
-                          static_cast<unsigned long>(coreStats.thumb_batch_runs - modeStart.thumb_batch_runs),
-                          static_cast<unsigned long>(coreStats.rom_page_loads),
+                           static_cast<unsigned long>(jitOps),
+                           static_cast<unsigned long>(coreStats.thumb_batch_ops - modeStart.thumb_batch_ops),
+                           static_cast<unsigned long>(coreStats.thumb_batch_runs - modeStart.thumb_batch_runs),
+                           static_cast<unsigned long>(coreStats.thumb_predecode_hits - modeStart.thumb_predecode_hits),
+                           static_cast<unsigned long>(coreStats.thumb_predecode_misses - modeStart.thumb_predecode_misses),
+                           static_cast<unsigned long>(coreStats.thumb_predecode_ops - modeStart.thumb_predecode_ops),
+                           static_cast<unsigned long>(coreStats.thumb_predecode_builds - modeStart.thumb_predecode_builds),
+                           static_cast<unsigned long>(coreStats.thumb_predecode_drops - modeStart.thumb_predecode_drops),
+                           static_cast<unsigned long>(coreStats.rom_page_loads),
                           static_cast<unsigned long>(coreStats.rom_page_prefetches),
                           static_cast<unsigned long>(getCpuFrequencyMhz()));
 #endif

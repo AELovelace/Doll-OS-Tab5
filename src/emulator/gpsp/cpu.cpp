@@ -41,6 +41,14 @@ extern "C" {
 #define GBA_DECODED_BLOCK_CACHE 0
 #endif
 
+#ifndef GBA_P4_ASYNC_PREDECODE
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+#define GBA_P4_ASYNC_PREDECODE 1
+#else
+#define GBA_P4_ASYNC_PREDECODE 0
+#endif
+#endif
+
 #ifndef GBA_P4_THUMB_DYNAREC
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
 #define GBA_P4_THUMB_DYNAREC 1
@@ -51,6 +59,9 @@ extern "C" {
 
 #ifndef GBA_THUMB_PROFILE
 #define GBA_THUMB_PROFILE 0
+#endif
+#ifndef GBA_THUMB_MIX_PROFILE
+#define GBA_THUMB_MIX_PROFILE 0
 #endif
 #ifndef GBA_SWI_HLE
 #define GBA_SWI_HLE 0
@@ -109,6 +120,13 @@ u32 gba_thumb_jit_top_break_count = 0;
 u32 gba_thumb_batch_runs = 0;
 u32 gba_thumb_batch_ops = 0;
 u32 gba_thumb_batch_enabled = 0;
+u32 gba_thumb_predecode_bytes = 0;
+u32 gba_thumb_predecode_hits = 0;
+u32 gba_thumb_predecode_misses = 0;
+u32 gba_thumb_predecode_ops = 0;
+u32 gba_thumb_predecode_builds = 0;
+u32 gba_thumb_predecode_requests = 0;
+u32 gba_thumb_predecode_drops = 0;
 u32 gba_thumb_fast_hits = 0;
 u32 gba_thumb_fast_misses = 0;
 // The hand-written ARM and Thumb fast paths ran unconditionally, so "Safe" was
@@ -220,6 +238,15 @@ static inline void gba_arm_profile_exact_opcode(u32 pc, u32 opcode)
 #define gba_profile_thumb_swi(swinum) do { } while(0)
 #define gba_profile_arm_swi(swinum) do { } while(0)
 #define gba_arm_profile_opcode(opcode) do { } while(0)
+#endif
+
+#if GBA_THUMB_MIX_PROFILE
+#define GBA_THUMB_MIX_COUNT(counter) do { (counter)++; } while(0)
+#else
+// These counters are useful for short profiling builds, but every increment is
+// an internal-memory write in the hottest interpreter path. Keep them compiled
+// out in performance firmware once the representative opcode mix is known.
+#define GBA_THUMB_MIX_COUNT(counter) do { } while(0)
 #endif
 }
 
@@ -368,6 +395,210 @@ static inline void gba_block_cache_touch_thumb(u32 pc, u8 *pc_address_block)
 #else
 #define gba_block_cache_touch_arm(pc, pc_address_block)   do { } while(0)
 #define gba_block_cache_touch_thumb(pc, pc_address_block) do { } while(0)
+#endif
+
+#if GBA_P4_ASYNC_PREDECODE
+#define GBA_THUMB_PREDECODE_SETS       1024U
+#define GBA_THUMB_PREDECODE_WAYS       2U
+#define GBA_THUMB_PREDECODE_OPS        8U
+#define GBA_THUMB_PREDECODE_QUEUE      32U
+#define GBA_THUMB_PREDECODE_HOT_SLOTS  2048U
+#define GBA_THUMB_PREDECODE_HOT_COUNT  24U
+#define GBA_THUMB_PREDECODE_STATE_MASK 0xFFU
+#define GBA_THUMB_PREDECODE_COUNT_SHIFT 8U
+
+enum gba_thumb_predecode_state
+{
+  GBA_THUMB_PREDECODE_EMPTY = 0,
+  GBA_THUMB_PREDECODE_BUILDING = 1,
+  GBA_THUMB_PREDECODE_READY = 2,
+};
+
+enum gba_thumb_predecode_kind
+{
+  GBA_THUMB_PRE_NONE = 0,
+  GBA_THUMB_PRE_HOT,
+  GBA_THUMB_PRE_LSL_IMM,
+  GBA_THUMB_PRE_LOW,
+  GBA_THUMB_PRE_ADDSUB_REG,
+  GBA_THUMB_PRE_ADDSUB_IMM3,
+  GBA_THUMB_PRE_IMM,
+  GBA_THUMB_PRE_ALU,
+  GBA_THUMB_PRE_HIREG,
+  GBA_THUMB_PRE_GENERIC,
+  GBA_THUMB_PRE_PCLDR,
+  GBA_THUMB_PRE_MEM_REG,
+  GBA_THUMB_PRE_LDSB_REG,
+  GBA_THUMB_PRE_LDSH_REG,
+  GBA_THUMB_PRE_STORE_IMM,
+  GBA_THUMB_PRE_LDR_IMM,
+  GBA_THUMB_PRE_LDRB_IMM,
+  GBA_THUMB_PRE_LDRH_IMM,
+  GBA_THUMB_PRE_SPMEM,
+  GBA_THUMB_PRE_ADD_PCSP,
+  GBA_THUMB_PRE_ADD_SP,
+  GBA_THUMB_PRE_PUSHPOP,
+  GBA_THUMB_PRE_BLOCKMEM,
+  GBA_THUMB_PRE_BRANCH,
+  GBA_THUMB_PRE_UNCOND_BRANCH,
+};
+
+typedef struct
+{
+  volatile u32 state;
+  u32 pc;
+  u16 opcode[GBA_THUMB_PREDECODE_OPS];
+  u8 kind[GBA_THUMB_PREDECODE_OPS];
+} gba_thumb_predecode_entry_t;
+
+// 2048 compact eight-op entries occupy 64 KB. Batch+fast no longer reserves a
+// 120 KB executable arena, so this spends only part of that recovered L2 on
+// broader immutable block coverage and leaves the rest available to the core.
+static_assert(sizeof(gba_thumb_predecode_entry_t) == 32,
+    "Thumb predecode entry must stay compact");
+
+typedef struct
+{
+  u32 pc;
+  u16 opcode[GBA_THUMB_PREDECODE_OPS];
+  u8 count;
+  u8 reserved[3];
+} gba_thumb_predecode_request_t;
+
+typedef struct
+{
+  u32 pc;
+  u16 count;
+  u16 queued;
+} gba_thumb_predecode_hot_t;
+
+static gba_thumb_predecode_entry_t *gba_thumb_predecode_cache;
+static gba_thumb_predecode_request_t
+    gba_thumb_predecode_queue[GBA_THUMB_PREDECODE_QUEUE];
+static volatile u32 gba_thumb_predecode_head;
+static volatile u32 gba_thumb_predecode_tail;
+// This admission filter is touched only by the emulation core. The worker sees
+// only the bounded SPSC request queue, so counting a hot PC needs no atomics.
+static gba_thumb_predecode_hot_t
+    gba_thumb_predecode_hot[GBA_THUMB_PREDECODE_HOT_SLOTS];
+
+static inline u32 gba_thumb_predecode_set(u32 pc)
+{
+  return ((pc >> 1) ^ (pc >> 9) ^ (pc >> 17)) &
+      (GBA_THUMB_PREDECODE_SETS - 1U);
+}
+
+static inline bool gba_thumb_predecode_rom_pc(u32 pc)
+{
+  u32 region = pc >> 24;
+  return region >= 0x08 && region <= 0x0D;
+}
+
+static inline bool gba_thumb_predecode_block_ends(u32 opcode)
+{
+  if((opcode & 0xFF87U) == 0x4700U)
+    return true;
+  return (opcode >> 8) >= 0xD0U;
+}
+
+extern "C" bool gba_thumb_predecode_init(void)
+{
+  if(gba_thumb_predecode_cache)
+    return true;
+
+  const size_t bytes = sizeof(*gba_thumb_predecode_cache) *
+      GBA_THUMB_PREDECODE_SETS * GBA_THUMB_PREDECODE_WAYS;
+  gba_thumb_predecode_cache = (gba_thumb_predecode_entry_t *)heap_caps_calloc(
+      1, bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if(!gba_thumb_predecode_cache)
+    return false;
+
+  gba_thumb_predecode_bytes = (u32)bytes;
+  return true;
+}
+
+extern "C" void gba_thumb_predecode_reset(void)
+{
+  if(gba_thumb_predecode_cache)
+    memset(gba_thumb_predecode_cache, 0, gba_thumb_predecode_bytes);
+  memset(gba_thumb_predecode_queue, 0, sizeof(gba_thumb_predecode_queue));
+  memset(gba_thumb_predecode_hot, 0, sizeof(gba_thumb_predecode_hot));
+  __atomic_store_n(&gba_thumb_predecode_head, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&gba_thumb_predecode_tail, 0, __ATOMIC_RELEASE);
+  gba_thumb_predecode_hits = 0;
+  gba_thumb_predecode_misses = 0;
+  gba_thumb_predecode_ops = 0;
+  gba_thumb_predecode_builds = 0;
+  gba_thumb_predecode_requests = 0;
+  gba_thumb_predecode_drops = 0;
+}
+
+extern "C" void gba_thumb_predecode_shutdown(void)
+{
+  if(gba_thumb_predecode_cache)
+    heap_caps_free(gba_thumb_predecode_cache);
+  gba_thumb_predecode_cache = NULL;
+  gba_thumb_predecode_bytes = 0;
+  gba_thumb_predecode_reset();
+}
+
+static inline void gba_thumb_predecode_request(u32 pc, u8 *pc_address_block)
+{
+  if(!gba_thumb_predecode_cache || !pc_address_block ||
+      !gba_thumb_predecode_rom_pc(pc))
+    return;
+
+  const u32 hot_index = ((pc >> 1) ^ (pc >> 10) ^ (pc >> 18)) &
+      (GBA_THUMB_PREDECODE_HOT_SLOTS - 1U);
+  gba_thumb_predecode_hot_t *hot = &gba_thumb_predecode_hot[hot_index];
+  if(hot->pc != pc)
+  {
+    hot->pc = pc;
+    hot->count = 1;
+    hot->queued = 0;
+    return;
+  }
+  if(hot->queued)
+    return;
+  if(hot->count < GBA_THUMB_PREDECODE_HOT_COUNT)
+    hot->count++;
+  if(hot->count < GBA_THUMB_PREDECODE_HOT_COUNT)
+    return;
+
+  u32 head = __atomic_load_n(&gba_thumb_predecode_head, __ATOMIC_RELAXED);
+  u32 tail = __atomic_load_n(&gba_thumb_predecode_tail, __ATOMIC_ACQUIRE);
+  if(head - tail >= GBA_THUMB_PREDECODE_QUEUE)
+  {
+    // Retry only after the block proves hot again; do not hammer a full queue
+    // on every execution like the first experiment did.
+    hot->count = GBA_THUMB_PREDECODE_HOT_COUNT / 2U;
+    gba_thumb_predecode_drops++;
+    return;
+  }
+
+  gba_thumb_predecode_request_t *request =
+      &gba_thumb_predecode_queue[head & (GBA_THUMB_PREDECODE_QUEUE - 1U)];
+  request->pc = pc;
+  request->count = 0;
+  u32 offset = pc & 0x7FFFU;
+  for(u32 i = 0; i < GBA_THUMB_PREDECODE_OPS && offset <= 0x7FFEU;
+      i++, offset += 2)
+  {
+    u32 opcode = readaddress16(pc_address_block, offset);
+    request->opcode[i] = (u16)opcode;
+    request->count++;
+    if(gba_thumb_predecode_block_ends(opcode))
+      break;
+  }
+
+  __atomic_store_n(&gba_thumb_predecode_head, head + 1U, __ATOMIC_RELEASE);
+  hot->queued = 1;
+  gba_thumb_predecode_requests++;
+}
+#else
+extern "C" bool gba_thumb_predecode_init(void) { return false; }
+extern "C" void gba_thumb_predecode_reset(void) {}
+extern "C" void gba_thumb_predecode_shutdown(void) {}
 #endif
 
 #if GBA_THUMB_PROFILE
@@ -4042,7 +4273,7 @@ static inline bool gba_thumb_execute_low_fast(u32 opcode, u32 &n_flag, u32 &z_fl
   }
 
   reg[REG_PC] += 2;
-  gba_thumb_low_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_low_fast_ops);
   return true;
 }
 
@@ -4062,7 +4293,7 @@ static inline __attribute__((always_inline)) bool gba_thumb_execute_lsl_imm_fast
   z_flag = dest == 0;
   reg[rd] = dest;
   reg[REG_PC] += 2;
-  gba_thumb_low_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_low_fast_ops);
   return true;
 }
 
@@ -4095,7 +4326,7 @@ static inline __attribute__((always_inline)) bool gba_thumb_execute_addsub_reg_f
 
   reg[rd] = dest;
   reg[REG_PC] += 2;
-  gba_thumb_low_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_low_fast_ops);
   return true;
 }
 
@@ -4127,7 +4358,7 @@ static inline __attribute__((always_inline)) bool gba_thumb_execute_addsub_imm3_
 
   reg[rd] = dest;
   reg[REG_PC] += 2;
-  gba_thumb_low_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_low_fast_ops);
   return true;
 }
 
@@ -4184,7 +4415,7 @@ static inline bool gba_thumb_execute_imm_fast(u32 opcode, u32 &n_flag, u32 &z_fl
   }
 
   reg[REG_PC] += 2;
-  gba_thumb_imm_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_imm_fast_ops);
   return true;
 }
 
@@ -4404,7 +4635,7 @@ static inline __attribute__((always_inline)) bool gba_thumb_execute_alu_fast(u32
   }
 
   reg[REG_PC] += 2;
-  gba_thumb_alu_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_alu_fast_ops);
   return true;
 }
 
@@ -4422,7 +4653,7 @@ static inline bool gba_thumb_execute_hireg_fast(u32 opcode, u32 &n_flag,
   {
     reg[rd] = reg[rs];
     reg[REG_PC] += 2;
-    gba_thumb_hireg_fast_ops++;
+    GBA_THUMB_MIX_COUNT(gba_thumb_hireg_fast_ops);
     return true;
   }
 
@@ -4437,7 +4668,7 @@ static inline bool gba_thumb_execute_hireg_fast(u32 opcode, u32 &n_flag,
     c_flag = lhs >= rhs;
     v_flag = ((lhs ^ rhs) & (lhs ^ dest)) >> 31;
     reg[REG_PC] += 2;
-    gba_thumb_hireg_fast_ops++;
+    GBA_THUMB_MIX_COUNT(gba_thumb_hireg_fast_ops);
     return true;
   }
 
@@ -4445,13 +4676,13 @@ static inline bool gba_thumb_execute_hireg_fast(u32 opcode, u32 &n_flag,
   if(rd == REG_PC)
   {
     reg[REG_PC] = dest & ~1U;
-    gba_thumb_hireg_fast_ops++;
+    GBA_THUMB_MIX_COUNT(gba_thumb_hireg_fast_ops);
     return true;
   }
   else
     reg[rd] = dest;
   reg[REG_PC] += 2;
-  gba_thumb_hireg_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_hireg_fast_ops);
   return true;
 }
 
@@ -4484,7 +4715,7 @@ static inline bool gba_thumb_execute_branch_fast(u32 opcode, u32 n_flag,
   s32 offset = (s8)(opcode & 0xFF);
   reg[REG_PC] += taken ? ((offset * 2) + 4) : 2;
   cycles_remaining -= ws_cyc_nseq[reg[REG_PC] >> 24][0];
-  gba_thumb_branch_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_branch_fast_ops);
   return true;
 }
 
@@ -4525,7 +4756,7 @@ static inline bool gba_thumb_execute_ldrb_imm_fast(u32 opcode, s32 &cycles_remai
     value = readaddress8(map, address & 0x7FFF);
 
   reg[rd] = value;
-  gba_thumb_ldrb_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_ldrb_fast_ops);
   return true;
 }
 
@@ -4562,7 +4793,7 @@ static inline bool gba_thumb_execute_ldr_imm_fast(u32 opcode, s32 &cycles_remain
     value = readaddress32(map, address & 0x7FFF);
 
   reg[rd] = value;
-  gba_thumb_ldr_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_ldr_fast_ops);
   return true;
 }
 
@@ -4599,7 +4830,7 @@ static inline bool gba_thumb_execute_ldrh_imm_fast(u32 opcode, s32 &cycles_remai
     value = readaddress16(map, address & 0x7FFF);
 
   reg[rd] = value;
-  gba_thumb_ldrh_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_ldrh_fast_ops);
   return true;
 }
 
@@ -4632,7 +4863,7 @@ static inline bool gba_thumb_execute_pcldr_fast(u32 opcode, s32 &cycles_remainin
     value = readaddress32(map, address & 0x7FFF);
 
   reg[rd] = value;
-  gba_thumb_pcldr_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_pcldr_fast_ops);
   return true;
 }
 
@@ -4713,7 +4944,7 @@ static inline bool gba_thumb_execute_store_imm_fast(u32 opcode,
     }
     if(!gba_thumb_store_direct_u16_fast(aligned_address, reg[rd]))
       cpu_alert |= write_memory16(aligned_address, reg[rd]);
-    gba_thumb_strh_fast_ops++;
+    GBA_THUMB_MIX_COUNT(gba_thumb_strh_fast_ops);
   }
   else if(op >= 0x70)
   {
@@ -4726,7 +4957,7 @@ static inline bool gba_thumb_execute_store_imm_fast(u32 opcode,
     }
     if(!gba_thumb_store_direct_u8_fast(aligned_address, reg[rd]))
       cpu_alert |= write_memory8(aligned_address, reg[rd]);
-    gba_thumb_strb_fast_ops++;
+    GBA_THUMB_MIX_COUNT(gba_thumb_strb_fast_ops);
   }
   else
   {
@@ -4739,7 +4970,7 @@ static inline bool gba_thumb_execute_store_imm_fast(u32 opcode,
     }
     if(!gba_thumb_store_direct_u32_fast(aligned_address, reg[rd]))
       cpu_alert |= write_memory32(aligned_address, reg[rd]);
-    gba_thumb_str_fast_ops++;
+    GBA_THUMB_MIX_COUNT(gba_thumb_str_fast_ops);
   }
 
   return true;
@@ -5079,7 +5310,7 @@ static inline bool gba_thumb_execute_pushpop_fast(u32 opcode,
         gba_thumb_store_aligned32_fast(address, reg[REG_LR], cpu_alert, cycles_remaining);
     }
 
-    gba_thumb_push_fast_ops++;
+    GBA_THUMB_MIX_COUNT(gba_thumb_push_fast_ops);
     return true;
   }
 
@@ -5126,7 +5357,7 @@ static inline bool gba_thumb_execute_pushpop_fast(u32 opcode,
       reg[REG_PC] = gba_thumb_load_aligned32_fast(address, cycles_remaining) & ~1U;
   }
 
-  gba_thumb_pop_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_pop_fast_ops);
   return true;
 }
 
@@ -5177,7 +5408,7 @@ static inline bool gba_thumb_execute_blockmem_fast(u32 opcode,
         }
       }
     }
-    gba_thumb_pop_fast_ops++;
+    GBA_THUMB_MIX_COUNT(gba_thumb_pop_fast_ops);
   }
   else
   {
@@ -5209,7 +5440,7 @@ static inline bool gba_thumb_execute_blockmem_fast(u32 opcode,
     }
     if((reglist & (1U << rn)) && ((reglist & ((1U << rn) - 1)) == 0))
       reg[rn] = endaddr;
-    gba_thumb_push_fast_ops++;
+    GBA_THUMB_MIX_COUNT(gba_thumb_push_fast_ops);
   }
 
   return true;
@@ -5230,12 +5461,12 @@ static inline bool gba_thumb_execute_spmem_fast(u32 opcode,
   if(op < 0x98)
   {
     gba_thumb_store_aligned32_fast(address, reg[rd], cpu_alert, cycles_remaining);
-    gba_thumb_str_fast_ops++;
+    GBA_THUMB_MIX_COUNT(gba_thumb_str_fast_ops);
   }
   else
   {
     reg[rd] = gba_thumb_load_aligned32_fast(address, cycles_remaining);
-    gba_thumb_ldr_fast_ops++;
+    GBA_THUMB_MIX_COUNT(gba_thumb_ldr_fast_ops);
   }
 
   return true;
@@ -5252,7 +5483,7 @@ static inline bool gba_thumb_execute_uncond_branch_fast(u32 opcode,
   s32 br_offset = ((s32)(offset << 21) >> 20) + 4;
   reg[REG_PC] += br_offset;
   cycles_remaining -= ws_cyc_nseq[reg[REG_PC] >> 24][0];
-  gba_thumb_branch_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_branch_fast_ops);
   return true;
 }
 
@@ -5269,7 +5500,7 @@ static inline bool gba_thumb_execute_add_sp_fast(u32 opcode)
     reg[REG_SP] += imm;
 
   reg[REG_PC] += 2;
-  gba_thumb_imm_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_imm_fast_ops);
   return true;
 }
 
@@ -5283,7 +5514,7 @@ static inline bool gba_thumb_execute_add_pcsp_fast(u32 opcode)
   u32 base = (op < 0xA8) ? ((reg[REG_PC] & ~2U) + 4) : reg[REG_SP];
   reg[rd] = base + ((opcode & 0xFF) * 4);
   reg[REG_PC] += 2;
-  gba_thumb_imm_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_imm_fast_ops);
   return true;
 }
 
@@ -5301,7 +5532,7 @@ static inline bool gba_thumb_execute_ldsh_reg_fast(u32 opcode,
 
   reg[REG_PC] += 2;
   reg[rd] = gba_thumb_load_s16_fast(address, cycles_remaining);
-  gba_thumb_ldrh_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_ldrh_fast_ops);
   return true;
 }
 
@@ -5319,7 +5550,7 @@ static inline bool gba_thumb_execute_ldsb_reg_fast(u32 opcode,
 
   reg[REG_PC] += 2;
   reg[rd] = gba_thumb_load_s8_fast(address, cycles_remaining);
-  gba_thumb_ldrb_fast_ops++;
+  GBA_THUMB_MIX_COUNT(gba_thumb_ldrb_fast_ops);
   return true;
 }
 
@@ -5341,32 +5572,32 @@ static inline __attribute__((always_inline)) bool gba_thumb_execute_mem_reg_fast
   {
     case 0x00:
       gba_thumb_store_u32_fast(address, reg[rd], cpu_alert, cycles_remaining);
-      gba_thumb_str_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_str_fast_ops);
       return true;
 
     case 0x02:
       gba_thumb_store_u16_fast(address, reg[rd], cpu_alert, cycles_remaining);
-      gba_thumb_strh_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_strh_fast_ops);
       return true;
 
     case 0x04:
       gba_thumb_store_u8_fast(address, reg[rd], cpu_alert, cycles_remaining);
-      gba_thumb_strb_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_strb_fast_ops);
       return true;
 
     case 0x08:
       reg[rd] = gba_thumb_load_u32_fast(address, cycles_remaining);
-      gba_thumb_ldr_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_ldr_fast_ops);
       return true;
 
     case 0x0A:
       reg[rd] = gba_thumb_load_u16_fast(address, cycles_remaining);
-      gba_thumb_ldrh_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_ldrh_fast_ops);
       return true;
 
     case 0x0C:
       reg[rd] = gba_thumb_load_u8_fast(address, cycles_remaining);
-      gba_thumb_ldrb_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_ldrb_fast_ops);
       return true;
 
     default:
@@ -6444,7 +6675,7 @@ static inline __attribute__((always_inline)) int gba_thumb_execute_hot_exact_fas
       z_flag = dest == 0;
       reg[rd] = dest;
       reg[REG_PC] += 2;
-      gba_thumb_low_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_low_fast_ops);
       return 1;
     }
 
@@ -6464,7 +6695,7 @@ static inline __attribute__((always_inline)) int gba_thumb_execute_hot_exact_fas
       v_flag = (~(lhs ^ rhs) & (lhs ^ dest)) >> 31;
       reg[rd] = dest;
       reg[REG_PC] += 2;
-      gba_thumb_low_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_low_fast_ops);
       return 1;
     }
 
@@ -6482,7 +6713,7 @@ static inline __attribute__((always_inline)) int gba_thumb_execute_hot_exact_fas
       v_flag = (~(lhs ^ rhs) & (lhs ^ dest)) >> 31;
       reg[rd] = dest;
       reg[REG_PC] += 2;
-      gba_thumb_low_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_low_fast_ops);
       return 1;
     }
 
@@ -6497,7 +6728,7 @@ static inline __attribute__((always_inline)) int gba_thumb_execute_hot_exact_fas
       c_flag = src >= imm;
       v_flag = ((src ^ imm) & (src ^ dest)) >> 31;
       reg[REG_PC] += 2;
-      gba_thumb_imm_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_imm_fast_ops);
       return 1;
     }
 
@@ -6555,7 +6786,7 @@ static inline __attribute__((always_inline)) int gba_thumb_execute_hot_exact_fas
       z_flag = dest == 0;
       reg[rd] = dest;
       reg[REG_PC] += 2;
-      gba_thumb_alu_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_alu_fast_ops);
       return 1;
     }
 
@@ -6568,7 +6799,7 @@ static inline __attribute__((always_inline)) int gba_thumb_execute_hot_exact_fas
 
       reg[rd] = reg[rs];
       reg[REG_PC] += 2;
-      gba_thumb_hireg_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_hireg_fast_ops);
       return 1;
     }
 
@@ -6601,7 +6832,7 @@ static inline __attribute__((always_inline)) int gba_thumb_execute_hot_exact_fas
         value = readaddress8(map, address & 0x7FFF);
 
       reg[rd] = value;
-      gba_thumb_ldrb_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_ldrb_fast_ops);
       return 1;
     }
 
@@ -6612,7 +6843,7 @@ static inline __attribute__((always_inline)) int gba_thumb_execute_hot_exact_fas
       s32 offset = (s8)(opcode & 0xFF);
       reg[REG_PC] += taken ? ((offset * 2) + 4) : 2;
       cycles_remaining -= ws_cyc_nseq[reg[REG_PC] >> 24][0];
-      gba_thumb_branch_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_branch_fast_ops);
       return 1;
     }
 
@@ -6659,7 +6890,7 @@ static inline __attribute__((always_inline)) int gba_thumb_execute_fast_dispatch
       u32 rs = (opcode >> 3) & 0x0F;
       reg[REG_PC] += 4;
       u32 src = reg[rs];
-      gba_thumb_hireg_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_hireg_fast_ops);
       if(src & 0x01)
       {
         reg[REG_PC] = src - 1;
@@ -6725,7 +6956,7 @@ static inline __attribute__((always_inline)) int gba_thumb_execute_fast_dispatch
       {
         reg[REG_PC] += 2;
         cycles_remaining -= 64;
-        gba_thumb_branch_fast_ops++;
+        GBA_THUMB_MIX_COUNT(gba_thumb_branch_fast_ops);
         return 1;
       }
       return 0;
@@ -6749,7 +6980,7 @@ static inline __attribute__((always_inline)) int gba_thumb_execute_fast_dispatch
         reg[REG_PC] = newpc;
         cycles_remaining -= ws_cyc_nseq[newpc >> 24][0];
       }
-      gba_thumb_branch_fast_ops++;
+      GBA_THUMB_MIX_COUNT(gba_thumb_branch_fast_ops);
       return 1;
     }
 
@@ -6757,6 +6988,286 @@ static inline __attribute__((always_inline)) int gba_thumb_execute_fast_dispatch
       return 0;
   }
 }
+
+#if GBA_P4_ASYNC_PREDECODE
+static inline u8 gba_thumb_predecode_classify(u32 opcode)
+{
+  const u32 top = (opcode >> 8) & 0xFFU;
+  if(top == 0x00 || top == 0x18 || top == 0x19 || top == 0x1C ||
+      top == 0x28 || top == 0x40 || top == 0x78 || top == 0xD0 ||
+      top == 0xD1)
+    return GBA_THUMB_PRE_HOT;
+
+  if(top == 0x46)
+  {
+    u32 rs = (opcode >> 3) & 0x0F;
+    u32 rd = ((opcode >> 4) & 0x08) | (opcode & 0x07);
+    if(rd != REG_PC && rs != REG_PC)
+      return GBA_THUMB_PRE_HOT;
+  }
+
+  if(top <= 0x07) return GBA_THUMB_PRE_LSL_IMM;
+  if(top <= 0x17) return GBA_THUMB_PRE_LOW;
+  if(top <= 0x1B) return GBA_THUMB_PRE_ADDSUB_REG;
+  if(top <= 0x1F) return GBA_THUMB_PRE_ADDSUB_IMM3;
+  if(top <= 0x3F) return GBA_THUMB_PRE_IMM;
+  if(top <= 0x43) return GBA_THUMB_PRE_ALU;
+  if(top <= 0x46) return GBA_THUMB_PRE_HIREG;
+  if(top == 0x47) return GBA_THUMB_PRE_GENERIC;
+  if(top <= 0x4F) return GBA_THUMB_PRE_PCLDR;
+  if((top >= 0x50 && top <= 0x55) || (top >= 0x58 && top <= 0x5D))
+    return GBA_THUMB_PRE_MEM_REG;
+  if(top <= 0x57) return GBA_THUMB_PRE_LDSB_REG;
+  if(top <= 0x5F) return GBA_THUMB_PRE_LDSH_REG;
+  if((top >= 0x60 && top <= 0x67) || (top >= 0x70 && top <= 0x77) ||
+      (top >= 0x80 && top <= 0x87))
+    return GBA_THUMB_PRE_STORE_IMM;
+  if(top >= 0x68 && top <= 0x6F) return GBA_THUMB_PRE_LDR_IMM;
+  if(top >= 0x78 && top <= 0x7F) return GBA_THUMB_PRE_LDRB_IMM;
+  if(top >= 0x88 && top <= 0x8F) return GBA_THUMB_PRE_LDRH_IMM;
+  if(top >= 0x90 && top <= 0x9F) return GBA_THUMB_PRE_SPMEM;
+  if(top >= 0xA0 && top <= 0xAF) return GBA_THUMB_PRE_ADD_PCSP;
+  if(top >= 0xB0 && top <= 0xB3) return GBA_THUMB_PRE_ADD_SP;
+  if((top >= 0xB4 && top <= 0xB5) || (top >= 0xBC && top <= 0xBD))
+    return GBA_THUMB_PRE_PUSHPOP;
+  if(top >= 0xC0 && top <= 0xCF) return GBA_THUMB_PRE_BLOCKMEM;
+  if(top >= 0xD0 && top <= 0xDD) return GBA_THUMB_PRE_BRANCH;
+  if(top == 0xDF || top >= 0xF0) return GBA_THUMB_PRE_GENERIC;
+  if(top >= 0xE0 && top <= 0xE7) return GBA_THUMB_PRE_UNCOND_BRANCH;
+  return GBA_THUMB_PRE_NONE;
+}
+
+static inline __attribute__((always_inline)) int gba_thumb_execute_predecoded(
+    u32 kind, u32 opcode, u32 &n_flag, u32 &z_flag, u32 &c_flag,
+    u32 &v_flag, cpu_alert_type &cpu_alert, s32 &cycles_remaining)
+{
+  switch(kind)
+  {
+    case GBA_THUMB_PRE_HOT:
+      return gba_thumb_execute_hot_exact_fast((opcode >> 8) & 0xFFU, opcode,
+          n_flag, z_flag, c_flag, v_flag, cycles_remaining);
+    case GBA_THUMB_PRE_LSL_IMM:
+      return gba_thumb_execute_lsl_imm_fast(opcode, n_flag, z_flag, c_flag);
+    case GBA_THUMB_PRE_LOW:
+      return gba_thumb_execute_low_fast(opcode, n_flag, z_flag, c_flag, v_flag);
+    case GBA_THUMB_PRE_ADDSUB_REG:
+      return gba_thumb_execute_addsub_reg_fast(opcode, n_flag, z_flag, c_flag, v_flag);
+    case GBA_THUMB_PRE_ADDSUB_IMM3:
+      return gba_thumb_execute_addsub_imm3_fast(opcode, n_flag, z_flag, c_flag, v_flag);
+    case GBA_THUMB_PRE_IMM:
+      return gba_thumb_execute_imm_fast(opcode, n_flag, z_flag, c_flag, v_flag);
+    case GBA_THUMB_PRE_ALU:
+      return gba_thumb_execute_alu_fast(opcode, n_flag, z_flag, c_flag, v_flag);
+    case GBA_THUMB_PRE_HIREG:
+      return gba_thumb_execute_hireg_fast(opcode, n_flag, z_flag, c_flag, v_flag);
+    case GBA_THUMB_PRE_PCLDR:
+      return gba_thumb_execute_pcldr_fast(opcode, cycles_remaining);
+    case GBA_THUMB_PRE_MEM_REG:
+      return gba_thumb_execute_mem_reg_fast(opcode, cpu_alert, cycles_remaining);
+    case GBA_THUMB_PRE_LDSB_REG:
+      return gba_thumb_execute_ldsb_reg_fast(opcode, cycles_remaining);
+    case GBA_THUMB_PRE_LDSH_REG:
+      return gba_thumb_execute_ldsh_reg_fast(opcode, cycles_remaining);
+    case GBA_THUMB_PRE_STORE_IMM:
+      return gba_thumb_execute_store_imm_fast(opcode, cpu_alert, cycles_remaining);
+    case GBA_THUMB_PRE_LDR_IMM:
+      return gba_thumb_execute_ldr_imm_fast(opcode, cycles_remaining);
+    case GBA_THUMB_PRE_LDRB_IMM:
+      return gba_thumb_execute_ldrb_imm_fast(opcode, cycles_remaining);
+    case GBA_THUMB_PRE_LDRH_IMM:
+      return gba_thumb_execute_ldrh_imm_fast(opcode, cycles_remaining);
+    case GBA_THUMB_PRE_SPMEM:
+      return gba_thumb_execute_spmem_fast(opcode, cpu_alert, cycles_remaining);
+    case GBA_THUMB_PRE_ADD_PCSP:
+      return gba_thumb_execute_add_pcsp_fast(opcode);
+    case GBA_THUMB_PRE_ADD_SP:
+      return gba_thumb_execute_add_sp_fast(opcode);
+    case GBA_THUMB_PRE_PUSHPOP:
+      return gba_thumb_execute_pushpop_fast(opcode, cpu_alert, cycles_remaining);
+    case GBA_THUMB_PRE_BLOCKMEM:
+      return gba_thumb_execute_blockmem_fast(opcode, cpu_alert, cycles_remaining);
+    case GBA_THUMB_PRE_BRANCH:
+      return gba_thumb_execute_branch_fast(opcode, n_flag, z_flag, c_flag,
+          v_flag, cycles_remaining);
+    case GBA_THUMB_PRE_UNCOND_BRANCH:
+      return gba_thumb_execute_uncond_branch_fast(opcode, cycles_remaining);
+    case GBA_THUMB_PRE_GENERIC:
+      return gba_thumb_execute_fast_dispatch(opcode, n_flag, z_flag, c_flag,
+          v_flag, cpu_alert, cycles_remaining);
+    default:
+      return 0;
+  }
+}
+
+static inline const gba_thumb_predecode_entry_t *gba_thumb_predecode_lookup(
+    u32 pc, u32 &count)
+{
+  if(!gba_thumb_predecode_cache || !gba_thumb_predecode_rom_pc(pc))
+    return NULL;
+
+  const u32 set = gba_thumb_predecode_set(pc);
+  for(u32 way = 0; way < GBA_THUMB_PREDECODE_WAYS; way++)
+  {
+    gba_thumb_predecode_entry_t *entry = &gba_thumb_predecode_cache[
+        set * GBA_THUMB_PREDECODE_WAYS + way];
+    const u32 state = __atomic_load_n(&entry->state, __ATOMIC_ACQUIRE);
+    if((state & GBA_THUMB_PREDECODE_STATE_MASK) !=
+        GBA_THUMB_PREDECODE_READY || entry->pc != pc)
+      continue;
+    // READY entries are never replaced until the ROM stops, so execution is a
+    // read-only cache hit with no cross-core ownership writeback.
+    count = state >> GBA_THUMB_PREDECODE_COUNT_SHIFT;
+    return entry;
+  }
+  return NULL;
+}
+
+static inline int gba_thumb_predecode_try_execute(u32 &n_flag, u32 &z_flag,
+    u32 &c_flag, u32 &v_flag, cpu_alert_type &cpu_alert,
+    s32 &cycles_remaining)
+{
+  u32 entry_count = 0;
+  const gba_thumb_predecode_entry_t *entry =
+      gba_thumb_predecode_lookup(reg[REG_PC], entry_count);
+  if(!entry)
+  {
+    gba_thumb_predecode_misses++;
+    return 0;
+  }
+
+  gba_thumb_predecode_hits++;
+  if(!entry_count)
+    return 4;
+
+  u32 batch_ops = 0;
+  int outcome = 1;
+  while(batch_ops < entry_count)
+  {
+    const u32 expected_pc = entry->pc + batch_ops * 2U;
+    if(reg[REG_PC] != expected_pc)
+      break;
+
+    u32 opcode = entry->opcode[batch_ops];
+    gba_thumb_profile_opcode(opcode);
+    int fast_result = gba_thumb_execute_predecoded(entry->kind[batch_ops],
+        opcode, n_flag, z_flag, c_flag, v_flag, cpu_alert, cycles_remaining);
+    if(!fast_result)
+    {
+      outcome = 4;
+      break;
+    }
+
+    batch_ops++;
+    if(fast_result == 2)
+    {
+      outcome = 2;
+      break;
+    }
+
+    cycles_remaining -= ws_cyc_seq[(reg[REG_PC] >> 24) & 0xF][0];
+    if(reg[REG_PC] == idle_loop_target_pc && cycles_remaining > 0)
+      cycles_remaining = 0;
+    if(cpu_alert & (CPU_ALERT_HALT | CPU_ALERT_IRQ))
+    {
+      outcome = 3;
+      break;
+    }
+    if(cycles_remaining <= 0 || reg[REG_PC] != expected_pc + 2U)
+      break;
+  }
+
+  if(batch_ops)
+  {
+    gba_thumb_batch_runs++;
+    gba_thumb_batch_ops += batch_ops;
+    gba_thumb_predecode_ops += batch_ops;
+  }
+  return outcome;
+}
+
+extern "C" u32 gba_thumb_predecode_worker_run(u32 max_requests)
+{
+  if(!gba_thumb_predecode_cache)
+    return 0;
+
+  u32 tail = __atomic_load_n(&gba_thumb_predecode_tail, __ATOMIC_RELAXED);
+  u32 head = __atomic_load_n(&gba_thumb_predecode_head, __ATOMIC_ACQUIRE);
+  u32 processed = 0;
+  while(tail != head && processed < max_requests)
+  {
+    gba_thumb_predecode_request_t *request =
+        &gba_thumb_predecode_queue[tail & (GBA_THUMB_PREDECODE_QUEUE - 1U)];
+    const u32 pc = request->pc;
+    const u32 set = gba_thumb_predecode_set(pc);
+    gba_thumb_predecode_entry_t *target = NULL;
+    bool needs_build = false;
+
+    for(u32 way = 0; way < GBA_THUMB_PREDECODE_WAYS; way++)
+    {
+      gba_thumb_predecode_entry_t *entry = &gba_thumb_predecode_cache[
+          set * GBA_THUMB_PREDECODE_WAYS + way];
+      u32 state = __atomic_load_n(&entry->state, __ATOMIC_ACQUIRE);
+      if((state & GBA_THUMB_PREDECODE_STATE_MASK) !=
+          GBA_THUMB_PREDECODE_EMPTY && entry->pc == pc)
+      {
+        target = entry;
+        break;
+      }
+    }
+
+    if(!target)
+    {
+      for(u32 way = 0; way < GBA_THUMB_PREDECODE_WAYS; way++)
+      {
+        gba_thumb_predecode_entry_t *entry = &gba_thumb_predecode_cache[
+            set * GBA_THUMB_PREDECODE_WAYS + way];
+        u32 expected = GBA_THUMB_PREDECODE_EMPTY;
+        if(__atomic_compare_exchange_n(&entry->state, &expected,
+            GBA_THUMB_PREDECODE_BUILDING, false, __ATOMIC_ACQ_REL,
+            __ATOMIC_RELAXED))
+        {
+          target = entry;
+          needs_build = true;
+          break;
+        }
+      }
+
+      if(target && needs_build)
+      {
+        target->pc = pc;
+        u32 target_count = 0;
+        for(u32 i = 0; i < request->count; i++)
+        {
+          u8 kind = gba_thumb_predecode_classify(request->opcode[i]);
+          if(kind == GBA_THUMB_PRE_NONE)
+            break;
+          target->opcode[target_count] = request->opcode[i];
+          target->kind[target_count] = kind;
+          target_count++;
+        }
+        const u32 ready_state = GBA_THUMB_PREDECODE_READY |
+            (target_count << GBA_THUMB_PREDECODE_COUNT_SHIFT);
+        __atomic_store_n(&target->state, ready_state, __ATOMIC_RELEASE);
+        gba_thumb_predecode_builds++;
+      }
+      else
+        gba_thumb_predecode_drops++;
+    }
+    tail++;
+    processed++;
+    __atomic_store_n(&gba_thumb_predecode_tail, tail, __ATOMIC_RELEASE);
+    head = __atomic_load_n(&gba_thumb_predecode_head, __ATOMIC_ACQUIRE);
+  }
+
+  return head - tail;
+}
+#else
+extern "C" u32 gba_thumb_predecode_worker_run(u32 max_requests)
+{
+  (void)max_requests;
+  return 0;
+}
+#endif
 
 
 #define arm_decode_data_proc_reg(opcode)                                      \
@@ -10367,6 +10878,25 @@ thumb_loop:
        using_instruction(thumb);
        check_pc_region();
        reg[REG_PC] &= ~0x01;
+       bool predecode_missed = false;
+#if GBA_P4_ASYNC_PREDECODE && !defined(TRACE_INSTRUCTIONS) && \
+    !defined(REGISTER_USAGE_ANALYZE) && !GBA_DECODED_BLOCK_CACHE
+       if(gba_thumb_batch_enabled && cycles_remaining >= 32)
+       {
+          int predecode_result = gba_thumb_predecode_try_execute(n_flag, z_flag,
+              c_flag, v_flag, cpu_alert, cycles_remaining);
+          if(predecode_result == 1)
+             continue;
+          if(predecode_result == 2)
+          {
+             collapse_flags();
+             goto arm_loop;
+          }
+          if(predecode_result == 3)
+             goto alert;
+          predecode_missed = predecode_result == 0;
+       }
+#endif
        bool opcode_prefetched = false;
        if(pc_address_block)
        {
@@ -10404,6 +10934,10 @@ thumb_loop:
        bool fast_dispatch_already_missed = false;
        bool opcode_already_profiled = false;
 #if !defined(TRACE_INSTRUCTIONS) && !defined(REGISTER_USAGE_ANALYZE) && !GBA_DECODED_BLOCK_CACHE
+#if GBA_P4_ASYNC_PREDECODE
+       if(predecode_missed)
+          gba_thumb_predecode_request(reg[REG_PC], pc_address_block);
+#endif
        if(gba_thumb_batch_enabled && opcode_prefetched && cycles_remaining >= 32)
        {
           constexpr u32 GBA_THUMB_BATCH_MAX = 16;

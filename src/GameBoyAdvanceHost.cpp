@@ -44,7 +44,7 @@ bool writeExactFile(const char* path, const void* data, size_t size) {
 bool GameBoyAdvanceHost::allocateCoreMemory() {
   // These buffers exist only while gba owns the foreground. Keep them in
   // PSRAM so the shell/network stack retains its scarce internal heap and the
-  // P4 JIT can reserve a small executable working set.
+  // expanded batch predecoder can use internal L2 for hot ROM blocks.
   frames_[0] = static_cast<uint16_t*>(allocBuffer(DOLL_GBA_FRAME_BYTES, false));
   frames_[1] = static_cast<uint16_t*>(allocBuffer(DOLL_GBA_FRAME_BYTES, false));
   stereoScratch_ = static_cast<int16_t*>(
@@ -67,7 +67,7 @@ void GameBoyAdvanceHost::releaseCoreMemory() {
 bool GameBoyAdvanceHost::begin() {
   if (ready_) return true;
   // Reserve the low-priority save task's small internal stack before gpSP asks
-  // the executable heap for a second JIT bank.
+  // L2 for its foreground-only working set.
   renderFrame_ = 0;
   if (!allocateCoreMemory() || !startSaveTask() || !doll_gba_core_begin(frames_[0])) {
     stopSaveTask();
@@ -80,8 +80,8 @@ bool GameBoyAdvanceHost::begin() {
   status_ = "GBA core ready";
   doll_gba_perf_stats_t perf = {};
   doll_gba_core_get_perf(&perf);
-  Serial.printf("[gba] P4 gpSP core ready, 8 MB ROM cache, Thumb JIT=%luK\n",
-                static_cast<unsigned long>(perf.jit_bytes / 1024));
+  Serial.printf("[gba] P4 gpSP core ready, 8 MB ROM cache, predecode=%luK, JIT=off\n",
+                static_cast<unsigned long>(perf.thumb_predecode_bytes / 1024));
   return true;
 }
 
@@ -139,9 +139,11 @@ bool GameBoyAdvanceHost::startSaveTask() {
 
 void GameBoyAdvanceHost::saveTaskEntry(void* argument) {
   auto* host = static_cast<GameBoyAdvanceHost*>(argument);
+  bool predecodePending = false;
   for (;;) {
     uint32_t notifications = 0;
-    xTaskNotifyWait(0, UINT32_MAX, &notifications, portMAX_DELAY);
+    xTaskNotifyWait(0, UINT32_MAX, &notifications,
+                    predecodePending ? 0 : portMAX_DELAY);
     if ((notifications & kWorkerStop) ||
         __atomic_load_n(&host->saveStop_, __ATOMIC_ACQUIRE)) {
       break;
@@ -182,6 +184,12 @@ void GameBoyAdvanceHost::saveTaskEntry(void* argument) {
       __atomic_store_n(&host->saveFailed_, !ok, __ATOMIC_RELEASE);
       __atomic_store_n(&host->saveBusy_, false, __ATOMIC_RELEASE);
     }
+
+    // The emulation core only queues immutable ROM snapshots. Decode a bounded
+    // group on core 0 and immediately loop while work remains, still checking
+    // task notifications between groups so touch and DSI presentation stay
+    // responsive. Core 1 never waits for a decoded block.
+    predecodePending = doll_gba_core_predecode_worker(8) != 0;
   }
   __atomic_store_n(&host->saveStopped_, true, __ATOMIC_RELEASE);
   vTaskDelete(nullptr);

@@ -123,6 +123,10 @@ void gba_p4_thumb_jit_preinit(void);
 void gba_p4_thumb_jit_reset(void);
 void gba_p4_thumb_jit_reset_stats(void);
 void gba_p4_thumb_jit_shutdown(void);
+bool gba_thumb_predecode_init(void);
+void gba_thumb_predecode_reset(void);
+void gba_thumb_predecode_shutdown(void);
+u32 gba_thumb_predecode_worker_run(u32 max_requests);
 bool gba_video_scratch_init(void);
 void gba_video_scratch_term(void);
 extern u32 gba_thumb_jit_bytes;
@@ -144,6 +148,13 @@ extern u32 gba_thumb_jit_top_break_count;
 extern u32 gba_thumb_batch_runs;
 extern u32 gba_thumb_batch_ops;
 extern u32 gba_thumb_batch_enabled;
+extern u32 gba_thumb_predecode_bytes;
+extern u32 gba_thumb_predecode_hits;
+extern u32 gba_thumb_predecode_misses;
+extern u32 gba_thumb_predecode_ops;
+extern u32 gba_thumb_predecode_builds;
+extern u32 gba_thumb_predecode_requests;
+extern u32 gba_thumb_predecode_drops;
 extern u32 gba_thumb_fast_hits;
 extern u32 gba_thumb_fast_misses;
 extern u32 gba_interp_fast_enabled;
@@ -193,8 +204,8 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
   }
 
   // Keep the CPU's working RAM, page map, and emulated VRAM in L2. Drawn frames
-  // touch VRAM far more consistently than the low-coverage JIT, so protect it
-  // before allowing the executable arena to consume the remaining internal heap.
+  // touch VRAM far more consistently than cold emulator data, so protect it
+  // before allocating the expanded batch predecode cache.
   gbsp_memory->p_iwram = static_cast<u8*>(allocRegion(GBA_IWRAM_SIZE, true));
   // The 32 KB read map is consulted by instruction fetches and most emulated
   // loads. Reserve it before the JIT and VRAM so normal operation keeps this
@@ -207,7 +218,7 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
   gbsp_memory->p_io_registers = static_cast<u16*>(allocRegion(512 * sizeof(u16), true));
 
   gbsp_memory->p_vram = static_cast<u8*>(allocRegion(GBA_VRAM_SIZE, true));
-  gba_p4_thumb_jit_preinit();
+  (void)gba_thumb_predecode_init();
 
   // The large EWRAM and ROM backing stores remain the right PSRAM residents.
   gbsp_memory->p_ewram = static_cast<u8*>(allocRegion(GBA_EWRAM_SIZE, false));
@@ -218,6 +229,7 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
       !gbsp_memory->p_bios_rom || !gbsp_memory->p_gamepak_backup ||
       !gbsp_memory->p_palette_ram || !gbsp_memory->p_oam_ram ||
       !gbsp_memory->p_palette_ram_converted || !gbsp_memory->p_io_registers) {
+    gba_thumb_predecode_shutdown();
     gba_p4_thumb_jit_shutdown();
     gba_video_scratch_term();
     gba_sound_scratch_term();
@@ -226,11 +238,12 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
     return false;
   }
 
-  ESP_LOGI("gba", "memory IWRAM=%s MAP=%s VRAM=%s IO=%s JIT=%luK",
+  ESP_LOGI("gba", "memory IWRAM=%s MAP=%s VRAM=%s IO=%s PRE=%luK JIT=%luK",
            esp_ptr_internal(gbsp_memory->p_iwram) ? "L2" : "PSRAM",
            esp_ptr_internal(gbsp_memory->p_memory_map_read) ? "L2" : "PSRAM",
            esp_ptr_internal(gbsp_memory->p_vram) ? "L2" : "PSRAM",
            esp_ptr_internal(gbsp_memory->p_io_registers) ? "L2" : "PSRAM",
+           static_cast<unsigned long>(gba_thumb_predecode_bytes / 1024),
            static_cast<unsigned long>(gba_thumb_jit_bytes / 1024));
 
   gba_screen_pixels = framebuffer;
@@ -264,15 +277,15 @@ bool doll_gba_core_load(const char* rom_path) {
   }
   gba_p4_thumb_jit_reset();
   gba_p4_thumb_jit_reset_stats();
+  gba_thumb_predecode_reset();
 #if DOLL_GBA_VERBOSE_DIAGNOSTICS
   previousDebugButtons = 0;
   transitionDebugFrames = 0;
   transitionDebugSequence = 0;
   transitionCaptureConsumed = false;
 #endif
-  // The short ROM JIT blocks do not amortize their lookup/call overhead on P4.
-  // Start on the fully inline batch path; the in-game CPU menu can toggle to
-  // isolated JIT live for an identical-scene A/B comparison.
+  // Short generated blocks did not amortize their lookup/call overhead on P4.
+  // Batch+fast is the only accelerated engine in this build.
   doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_BATCH_FAST);
   gba_rom_page_loads = gba_rom_page_prefetches = 0;
   selected_boot_mode = boot_game;
@@ -283,6 +296,7 @@ bool doll_gba_core_load(const char* rom_path) {
 
 void doll_gba_core_stop(void) {
   if (!gbsp_memory) {
+    gba_thumb_predecode_shutdown();
     gba_p4_thumb_jit_shutdown();
     gba_video_scratch_term();
     gba_sound_scratch_term();
@@ -295,6 +309,7 @@ void doll_gba_core_stop(void) {
   gba_sound_scratch_term();
   gba_memory_scratch_term();
   releaseCoreMemory();
+  gba_thumb_predecode_shutdown();
   gba_p4_thumb_jit_shutdown();
   gba_screen_pixels = nullptr;
 }
@@ -342,6 +357,10 @@ void doll_gba_core_run(uint16_t buttons, bool draw) {
 #endif
 }
 
+uint32_t doll_gba_core_predecode_worker(uint32_t max_requests) {
+  return gba_thumb_predecode_worker_run(max_requests);
+}
+
 bool doll_gba_core_debug_capture_active(void) {
 #if DOLL_GBA_VERBOSE_DIAGNOSTICS
   return transitionDebugFrames != 0;
@@ -352,29 +371,23 @@ bool doll_gba_core_debug_capture_active(void) {
 
 void doll_gba_core_set_cpu_mode(uint32_t mode) {
   if (mode >= DOLL_GBA_CPU_MODE_COUNT) mode = DOLL_GBA_CPU_SAFE;
+  if (mode == DOLL_GBA_CPU_JIT_ISOLATED || mode == DOLL_GBA_CPU_TURBO) {
+    mode = DOLL_GBA_CPU_BATCH_FAST;
+  }
   gba_thumb_batch_enabled = mode == DOLL_GBA_CPU_BATCH ||
-      mode == DOLL_GBA_CPU_BATCH_FAST || mode == DOLL_GBA_CPU_TURBO;
-  gba_thumb_jit_runtime_enabled =
-      mode == DOLL_GBA_CPU_JIT_ISOLATED || mode == DOLL_GBA_CPU_TURBO;
-  // Isolated JIT validates each block eight times, then permits the trusted hot
-  // path. Continuous comparison is intentionally off so this build measures the
-  // acceleration we can actually ship rather than diagnostic double execution.
+      mode == DOLL_GBA_CPU_BATCH_FAST;
+  gba_thumb_jit_runtime_enabled = 0;
   gba_thumb_jit_debug_validate = 0;
-  // Batch+fast covers short end-of-timeslice runs and ARM instructions without
-  // involving generated code, while the isolation modes remain available.
   gba_interp_fast_enabled =
-      mode == DOLL_GBA_CPU_FAST_ISOLATED || mode == DOLL_GBA_CPU_BATCH_FAST ||
-      mode == DOLL_GBA_CPU_TURBO;
+      mode == DOLL_GBA_CPU_FAST_ISOLATED || mode == DOLL_GBA_CPU_BATCH_FAST;
   printf("[gba cpu] requested=%lu active=%lu jit=%lu batch=%lu fast=%lu\n",
       (unsigned long)mode, (unsigned long)doll_gba_core_get_cpu_mode(),
       (unsigned long)gba_thumb_jit_runtime_enabled,
       (unsigned long)gba_thumb_batch_enabled,
       (unsigned long)gba_interp_fast_enabled);
-}  // Selects isolated accelerators, a checked JIT, or combined turbo execution.
+}  // Selects only interpreter/batch engines; JIT modes map to batch+fast.
 
 uint32_t doll_gba_core_get_cpu_mode(void) {
-  if (gba_thumb_jit_runtime_enabled && gba_thumb_batch_enabled) return DOLL_GBA_CPU_TURBO;
-  if (gba_thumb_jit_runtime_enabled) return DOLL_GBA_CPU_JIT_ISOLATED;
   if (gba_thumb_batch_enabled && gba_interp_fast_enabled) return DOLL_GBA_CPU_BATCH_FAST;
   if (gba_thumb_batch_enabled) return DOLL_GBA_CPU_BATCH;
   if (gba_interp_fast_enabled) return DOLL_GBA_CPU_FAST_ISOLATED;
@@ -424,6 +437,13 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
   stats->jit_top_break_count = gba_thumb_jit_top_break_count;
   stats->thumb_batch_runs = gba_thumb_batch_runs;
   stats->thumb_batch_ops = gba_thumb_batch_ops;
+  stats->thumb_predecode_bytes = gba_thumb_predecode_bytes;
+  stats->thumb_predecode_hits = gba_thumb_predecode_hits;
+  stats->thumb_predecode_misses = gba_thumb_predecode_misses;
+  stats->thumb_predecode_ops = gba_thumb_predecode_ops;
+  stats->thumb_predecode_builds = gba_thumb_predecode_builds;
+  stats->thumb_predecode_requests = gba_thumb_predecode_requests;
+  stats->thumb_predecode_drops = gba_thumb_predecode_drops;
   stats->thumb_fast_hits = gba_thumb_fast_hits;
   stats->thumb_fast_misses = gba_thumb_fast_misses;
   stats->vram_internal = gbsp_memory && esp_ptr_internal(gbsp_memory->p_vram);

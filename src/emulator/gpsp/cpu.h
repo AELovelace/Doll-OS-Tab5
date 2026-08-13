@@ -110,6 +110,10 @@ typedef enum
 extern u32 instruction_count;
 
 void execute_arm(u32 cycles);
+bool gba_thumb_predecode_init(void);
+void gba_thumb_predecode_reset(void);
+void gba_thumb_predecode_shutdown(void);
+u32 gba_thumb_predecode_worker_run(u32 max_requests);
 u32 check_and_raise_interrupts(void);
 cpu_alert_type check_interrupt(void);
 cpu_alert_type flag_interrupt(irq_type irq_raised);
