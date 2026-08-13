@@ -38,19 +38,15 @@ Build policy:
 - Conditional/unconditional branches, calls, returns, and explicit PC writes stay
   in the batched interpreter. The JIT ends immediately before them, preventing an
   idle input-loop outcome from becoming trusted before its pressed path is seen.
-- The in-game CPU engine selector separates `Safe`, `Batch`, `JIT trace`, and
-  `Turbo`. `JIT trace` enables the JIT without batching and continuously compares
-  every generated result with the C safety model, even after a block has warmed.
-  `Safe` is temporarily the default and the runtime selector is locked because
-  every accelerated mode shares the hand-written Thumb dispatch implicated in
-  title-state corruption. Batch/JIT remain compiled for dedicated diagnostics,
-  but cannot be enabled accidentally during a playable session. `JIT trace`
-  continuously checks every execution when deeper diagnosis
-  is needed. A failed validation quarantines only that ROM block, allowing safe
-  interpreter fallback there without discarding acceleration everywhere else.
-  WRAM loads and stores stay in the interpreter while the title-transition
-  investigation is active. This keeps generated validation side-effect free and
-  removes mutable RAM reads as a source of trusted-block divergence.
+- The in-game CPU engine selector separates `Safe`, `Batch`, isolated JIT, and
+  `Turbo`. The current locked default is isolated JIT: no batching and no
+  hand-written ARM/Thumb fast dispatch. Each generated ROM block is compared
+  with the stock interpreter eight times before direct trusted execution. A
+  failed validation quarantines only that ROM block, leaving safe per-opcode
+  fallback without discarding acceleration everywhere else. WRAM stores remain
+  in the interpreter so validation has no memory side effects; enabled WRAM loads
+  can bail back to the stock interpreter when their live address is unsuitable.
+  Batch and the broad fast dispatcher remain compiled only for later diagnostics.
 - A 128-entry JIT flight recorder captures each compiled block's start/end PC,
   SP, LR, return word, and first/last opcode signature. A model mismatch disables
   JIT for that block and falls back locally; SoftReset or a bad fetch disables
@@ -76,8 +72,8 @@ Runtime lifecycle:
 - Quit flushes the battery save, shuts down gpSP/audio, clears the ticket, and
   restarts into Doll-OS. GBA ROM launches are intentionally SD-only in this mode.
 - Touch contact changes print raw coordinates and their mapped button mask. An A
-  or Start edge arms a 600-frame transition trace in the stock Safe interpreter,
-  after which the previous CPU engine is restored. Idle performance logs use a
+  or Start edge arms a 600-frame transition trace without changing CPU engine,
+  so the input-dependent path is tested under the selected accelerator. Idle performance logs use a
   300-frame window; capture windows use ten frames so terminal copies retain the
   useful transition instead of filling with repeated intro telemetry.
 - Direct Sound diagnostics include cumulative nonzero FIFO bytes and nonzero

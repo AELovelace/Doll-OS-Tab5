@@ -1,3 +1,5 @@
+#include <Arduino.h>
+
 #include "doll_gba_bridge.h"
 
 #include "esp_heap_caps.h"
@@ -23,7 +25,6 @@ uint16_t currentButtons = 0;
 uint16_t previousDebugButtons = 0;
 uint32_t transitionDebugFrames = 0;
 uint32_t transitionDebugSequence = 0;
-uint32_t transitionRestoreMode = DOLL_GBA_CPU_SAFE;
 
 uint32_t hashDebugMemory(const uint8_t* data, size_t size) {
   uint32_t hash = 2166136261U;
@@ -36,10 +37,11 @@ uint32_t hashDebugMemory(const uint8_t* data, size_t size) {
 void logTransitionStep(uint16_t buttons) {
   const uint32_t ewramHash = hashDebugMemory(ewram, GBA_EWRAM_SIZE);
   const uint32_t iwramHash = hashDebugMemory(iwram, GBA_IWRAM_SIZE);
-  ESP_LOGI("gba-step",
+  Serial.printf(
+      "[gba-step] "
       "n=%lu frame=%lu key=%03x p1=%04x pc=%08lx lr=%08lx sp=%08lx cpsr=%08lx "
       "r0=%08lx r1=%08lx r2=%08lx r3=%08lx irq=%04x/%04x/%04x "
-      "disp=%04x vc=%u mem=%08lx/%08lx jit=%08lx->%08lx:%08lx:%08lx",
+      "disp=%04x vc=%u mem=%08lx/%08lx jit=%08lx->%08lx:%08lx:%08lx\n",
       (unsigned long)transitionDebugSequence++, (unsigned long)frame_counter,
       static_cast<unsigned>(buttons), static_cast<unsigned>(read_ioreg(REG_P1)),
       (unsigned long)reg[REG_PC],
@@ -236,7 +238,6 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
   previousDebugButtons = 0;
   transitionDebugFrames = 0;
   transitionDebugSequence = 0;
-  transitionRestoreMode = DOLL_GBA_CPU_SAFE;
   return true;
 }
 
@@ -252,11 +253,10 @@ bool doll_gba_core_load(const char* rom_path) {
   previousDebugButtons = 0;
   transitionDebugFrames = 0;
   transitionDebugSequence = 0;
-  transitionRestoreMode = DOLL_GBA_CPU_SAFE;
-  // Every accelerated menu mode shares the hand-written Thumb dispatch, and all
-  // have reproduced title-state corruption. Start with the exact gpSP interpreter
-  // from frame zero so an earlier fast-path error cannot survive into the title.
-  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_SAFE);
+  // Run the JIT without the batch engine or hand-written fast interpreter. Each
+  // ROM block is checked eight times against stock gpSP before becoming trusted,
+  // isolating useful code generation from the path that corrupted the title.
+  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_JIT_ISOLATED);
   gba_rom_page_loads = gba_rom_page_prefetches = 0;
   selected_boot_mode = boot_game;
   reset_gba();
@@ -290,23 +290,19 @@ void doll_gba_core_run(uint16_t buttons, bool draw) {
   skip_next_frame = draw ? 0 : 1;
   update_input();
   if (changedButtons) {
-    ESP_LOGI("gba-input", "frame=%lu key=%03x changed=%03x p1=%04x pc=%08lx lr=%08lx sp=%08lx",
+    Serial.printf("[gba-input] frame=%lu key=%03x changed=%03x p1=%04x pc=%08lx lr=%08lx sp=%08lx\n",
         (unsigned long)frame_counter, static_cast<unsigned>(buttons),
         static_cast<unsigned>(changedButtons),
         static_cast<unsigned>(read_ioreg(REG_P1)), (unsigned long)reg[REG_PC],
         (unsigned long)reg[REG_LR], (unsigned long)reg[REG_SP]);
   }
   if (actionPressed) {
-    if (!transitionDebugFrames) {
-      transitionRestoreMode = doll_gba_core_get_cpu_mode();
-      doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_SAFE);
-    }
     transitionDebugFrames = 600;
     transitionDebugSequence = 0;
-    ESP_LOGW("gba-step",
-        "action=%03x capture armed for 600 frames in Safe mode; restore=%lu",
+    Serial.printf(
+        "[gba-step] action=%03x capture armed for 600 frames; CPU mode remains %lu\n",
         static_cast<unsigned>(actionPressed),
-        (unsigned long)transitionRestoreMode);
+        (unsigned long)doll_gba_core_get_cpu_mode());
   }
   previousDebugButtons = buttons;
   rumble_frame_reset();
@@ -316,9 +312,8 @@ void doll_gba_core_run(uint16_t buttons, bool draw) {
     if ((transitionDebugFrames % 3U) == 0U) logTransitionStep(buttons);
     --transitionDebugFrames;
     if (!transitionDebugFrames) {
-      doll_gba_core_set_cpu_mode(transitionRestoreMode);
-      ESP_LOGW("gba-step", "capture complete; restored CPU mode=%lu",
-          (unsigned long)transitionRestoreMode);
+      Serial.printf("[gba-step] capture complete; CPU mode remains %lu\n",
+          (unsigned long)doll_gba_core_get_cpu_mode());
     }
   }
 }
@@ -330,16 +325,20 @@ bool doll_gba_core_debug_capture_active(void) {
 void doll_gba_core_set_cpu_mode(uint32_t mode) {
   if (mode >= DOLL_GBA_CPU_MODE_COUNT) mode = DOLL_GBA_CPU_SAFE;
   gba_thumb_batch_enabled = mode == DOLL_GBA_CPU_BATCH || mode == DOLL_GBA_CPU_TURBO;
-  gba_thumb_jit_runtime_enabled = mode == DOLL_GBA_CPU_JIT_DEBUG || mode == DOLL_GBA_CPU_TURBO;
-  gba_thumb_jit_debug_validate = mode == DOLL_GBA_CPU_JIT_DEBUG;
-  // Safe now also drops the hand-written ARM/Thumb fast decode, so it is the
-  // stock gpSP interpreter and nothing else. Every other mode keeps it.
-  gba_interp_fast_enabled = mode != DOLL_GBA_CPU_SAFE;
+  gba_thumb_jit_runtime_enabled =
+      mode == DOLL_GBA_CPU_JIT_ISOLATED || mode == DOLL_GBA_CPU_TURBO;
+  // Isolated JIT validates each block eight times, then permits the trusted hot
+  // path. Continuous comparison is intentionally off so this build measures the
+  // acceleration we can actually ship rather than diagnostic double execution.
+  gba_thumb_jit_debug_validate = 0;
+  // Only the explicitly unsafe combined mode may enter the hand-written ARM or
+  // Thumb dispatcher. Isolated JIT always falls back to stock gpSP per opcode.
+  gba_interp_fast_enabled = mode == DOLL_GBA_CPU_TURBO;
 }  // Selects isolated accelerators, a checked JIT, or combined turbo execution.
 
 uint32_t doll_gba_core_get_cpu_mode(void) {
   if (gba_thumb_jit_runtime_enabled && gba_thumb_batch_enabled) return DOLL_GBA_CPU_TURBO;
-  if (gba_thumb_jit_runtime_enabled) return DOLL_GBA_CPU_JIT_DEBUG;
+  if (gba_thumb_jit_runtime_enabled) return DOLL_GBA_CPU_JIT_ISOLATED;
   if (gba_thumb_batch_enabled) return DOLL_GBA_CPU_BATCH;
   return DOLL_GBA_CPU_SAFE;
 }  // Reports the active accelerator combination to the diagnostic menu.

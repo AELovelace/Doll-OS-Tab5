@@ -1315,7 +1315,7 @@ static inline bool gba_p4_thumb_jit_matches(gba_p4_thumb_jit_entry_t *entry,
     return false;
 
   // Cartridge ROM is immutable after loading, and load/state transitions flush
-  // the JIT. Once the safety interpreter has validated a block twice, its PC is
+  // the JIT. Once the safety interpreter has validated a block eight times, its PC is
   // therefore a sufficient identity check and the hot path can avoid rereading
   // as many as 16 opcodes from the PSRAM-backed ROM cache on every execution.
   if(entry->validated >= GBA_P4_THUMB_JIT_TRUST_VALIDATIONS)
@@ -1995,8 +1995,9 @@ static __attribute__((noinline, cold)) bool gba_p4_thumb_jit_validate_and_commit
     // the bail stub, which parks PC on the offending instruction and reports the
     // ops retired so far. `gba_p4_thumb_jit_execute_committed` has always
     // accepted that. Treating it as a fault here disabled both accelerators on
-    // the first pointer that left WRAM -- and since JIT_DEBUG forces this path
-    // for every execution, trusted blocks never reached the tolerant one.
+    // the first pointer that left WRAM. Continuous diagnostic validation forces
+    // this path on every execution, so trusted blocks otherwise never reach the
+    // tolerant committed executor.
     if(!entry->can_bail || executed_ops >= entry->op_count)
       return gba_p4_thumb_jit_record_fail(entry, 6, 0, entry->op_count,
           executed_ops);

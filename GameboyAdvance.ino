@@ -578,7 +578,7 @@ static String gbaMenuValue(int item) {
         return String(radioGetVolume()) + "/" + String(RADIO_VOLUME_MAX);
     }
     if (item == GBA_MENU_CPU_ENGINE) {
-        return "Safe (locked)";
+        return "Isolated JIT (locked)";
     }
     return "";
 }
@@ -722,8 +722,8 @@ static bool gbaRunMenu(uint8_t& legacyButtons, uint16_t& touchButtons) {
                 break;
             }
             case GBA_MENU_CPU_ENGINE: {
-                doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_SAFE);
-                note = "accelerators quarantined: title-state corruption";
+                doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_JIT_ISOLATED);
+                note = "JIT only: batch and fast dispatcher quarantined";
                 break;
             }
             case GBA_MENU_VOLUME:
