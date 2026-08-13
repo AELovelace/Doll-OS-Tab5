@@ -258,9 +258,9 @@ bool doll_gba_core_load(const char* rom_path) {
   transitionDebugFrames = 0;
   transitionDebugSequence = 0;
   transitionCaptureConsumed = false;
-  // Test only the bounded 16-op Thumb batch loop; JIT generation and the
-  // standalone per-op fast dispatcher stay disabled for an unambiguous result.
-  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_BATCH);
+  // Experimental maximum-speed run: combine the proven batch loop, standalone
+  // fast dispatch, and the guarded JIT so their aggregate ceiling is measurable.
+  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_TURBO);
   gba_rom_page_loads = gba_rom_page_prefetches = 0;
   selected_boot_mode = boot_game;
   reset_gba();
@@ -329,22 +329,25 @@ bool doll_gba_core_debug_capture_active(void) {
 
 void doll_gba_core_set_cpu_mode(uint32_t mode) {
   if (mode >= DOLL_GBA_CPU_MODE_COUNT) mode = DOLL_GBA_CPU_SAFE;
-  gba_thumb_batch_enabled = mode == DOLL_GBA_CPU_BATCH || mode == DOLL_GBA_CPU_TURBO;
+  gba_thumb_batch_enabled = mode == DOLL_GBA_CPU_BATCH ||
+      mode == DOLL_GBA_CPU_BATCH_FAST || mode == DOLL_GBA_CPU_TURBO;
   gba_thumb_jit_runtime_enabled =
       mode == DOLL_GBA_CPU_JIT_ISOLATED || mode == DOLL_GBA_CPU_TURBO;
   // Isolated JIT validates each block eight times, then permits the trusted hot
   // path. Continuous comparison is intentionally off so this build measures the
   // acceleration we can actually ship rather than diagnostic double execution.
   gba_thumb_jit_debug_validate = 0;
-  // Fast-only reproduces the former implicit accelerator without allowing the
-  // batch loop or JIT to obscure its correctness and performance results.
+  // Batch+fast covers short end-of-timeslice runs and ARM instructions without
+  // involving generated code, while the isolation modes remain available.
   gba_interp_fast_enabled =
-      mode == DOLL_GBA_CPU_FAST_ISOLATED || mode == DOLL_GBA_CPU_TURBO;
+      mode == DOLL_GBA_CPU_FAST_ISOLATED || mode == DOLL_GBA_CPU_BATCH_FAST ||
+      mode == DOLL_GBA_CPU_TURBO;
 }  // Selects isolated accelerators, a checked JIT, or combined turbo execution.
 
 uint32_t doll_gba_core_get_cpu_mode(void) {
   if (gba_thumb_jit_runtime_enabled && gba_thumb_batch_enabled) return DOLL_GBA_CPU_TURBO;
   if (gba_thumb_jit_runtime_enabled) return DOLL_GBA_CPU_JIT_ISOLATED;
+  if (gba_thumb_batch_enabled && gba_interp_fast_enabled) return DOLL_GBA_CPU_BATCH_FAST;
   if (gba_thumb_batch_enabled) return DOLL_GBA_CPU_BATCH;
   if (gba_interp_fast_enabled) return DOLL_GBA_CPU_FAST_ISOLATED;
   return DOLL_GBA_CPU_SAFE;

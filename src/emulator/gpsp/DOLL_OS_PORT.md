@@ -42,9 +42,13 @@ Build policy:
   `Turbo`, plus a dedicated fast-dispatch isolation mode. A fast-only capture
   measured 30-37 emulated FPS despite 7-8.6 million fast-path hits and zero
   misses per report, proving that dispatcher alone did not produce full speed.
-  The current locked diagnostic default is batch only: no JIT generation and no
-  standalone per-op fast dispatch. Serial performance reports retain fast-path
-  hit/miss counts so each accelerator test remains distinguishable.
+  Batch-only passed the title transition, reached gameplay, and measured 52.9
+  emulated FPS after the expensive memory-hash capture ended. The current
+  next diagnostic mode is experimental Turbo: that proven batch loop plus
+  standalone fast dispatch and the guarded JIT, allowing the aggregate ceiling
+  to be measured. Serial performance reports retain fast-path hit/miss counts so
+  accelerator coverage stays visible, and JIT mismatches still quarantine their
+  individual generated blocks.
   Isolated JIT remains available in the core: each generated ROM block is compared
   with the stock interpreter eight times before direct trusted execution. A
   failed validation quarantines only that ROM block, leaving safe per-opcode
