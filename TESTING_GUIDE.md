@@ -210,12 +210,10 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
 6. From the Escape menu, activate `CPU engine` and confirm it remains
    `Isolated JIT (locked)` with a batch/fast-dispatch quarantine note. Do not
    enable Batch or Turbo until the title-state corruption is isolated.
-   This build also requires `GBA_P4_THUMB_JIT_STACK_WRITES=0`,
-   `GBA_P4_THUMB_JIT_WRAM_LOADS=0`, and `GBA_P4_THUMB_JIT_WRAM_STORES=0`.
-   PUSH/SP-relative stores otherwise mutate the real stack during the reference
-   validation pass, causing the generated pass to observe different memory.
-   Memory-writing blocks must fall back to stock gpSP while ROM/register
-   arithmetic blocks continue to use the JIT.
+   Stack and WRAM JIT operations are enabled only with the byte-overlay validator.
+   The reference pass must place PUSH, SP-relative, and WRAM stores in its shadow
+   transaction, then compare generated RAM with that expected result. On any
+   mismatch it restores the original bytes before stock gpSP retries the block.
 7. Confirm `[gb audio] ready, primed 1280 frames`, an `ES8388 readback ... OK`
    line, and an amp report ending in `pin driving`. During three performance
    windows, `[gba i2s]` pushed frames must keep advancing without drops and

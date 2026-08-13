@@ -43,10 +43,11 @@ Build policy:
   hand-written ARM/Thumb fast dispatch. Each generated ROM block is compared
   with the stock interpreter eight times before direct trusted execution. A
   failed validation quarantines only that ROM block, leaving safe per-opcode
-  fallback without discarding acceleration everywhere else. WRAM loads, WRAM
-  stores, PUSH, and SP-relative stores currently remain in the interpreter. A
-  validator failure at `082dfa78` proved that reference PUSH operations mutated
-  the live stack before generated execution, making validation itself unsafe.
+  fallback without discarding acceleration everywhere else. The reference model
+  now routes WRAM, PUSH, and SP-relative writes through a 1 KB byte overlay. Reads
+  observe prior shadow writes, generated execution performs the sole live write,
+  and mismatches restore original bytes before stock gpSP retries the block. This
+  corrects the live-stack mutation proven by the `082dfa78` failure.
   Batch and the broad fast dispatcher remain compiled only for later diagnostics.
 - A 128-entry JIT flight recorder captures each compiled block's start/end PC,
   SP, LR, return word, and first/last opcode signature. A model mismatch disables

@@ -1355,8 +1355,101 @@ static inline void gba_p4_thumb_jit_sim_sub_flags(u32 lhs, u32 rhs,
   flags[3] = ((lhs ^ rhs) & (lhs ^ dest)) >> 31;
 }
 
+#define GBA_P4_THUMB_JIT_TXN_BYTES 1024
+typedef struct
+{
+  u8 *address;
+  u8 original;
+  u8 value;
+} gba_p4_thumb_jit_txn_byte_t;
+
+typedef struct gba_p4_thumb_jit_txn
+{
+  gba_p4_thumb_jit_txn_byte_t bytes[GBA_P4_THUMB_JIT_TXN_BYTES];
+  u32 count;
+  const struct gba_p4_thumb_jit_txn *baseline;
+} gba_p4_thumb_jit_txn_t;
+
+static gba_p4_thumb_jit_txn_t gba_p4_thumb_jit_validation_txn;
+static gba_p4_thumb_jit_txn_t gba_p4_thumb_jit_partial_txn;
+
+static inline void gba_p4_thumb_jit_txn_reset(gba_p4_thumb_jit_txn_t *txn,
+    const gba_p4_thumb_jit_txn_t *baseline)
+{
+  txn->count = 0;
+  txn->baseline = baseline;
+} // Starts an empty byte overlay without touching live emulated RAM.
+
+static int gba_p4_thumb_jit_txn_find(const gba_p4_thumb_jit_txn_t *txn,
+    const u8 *address)
+{
+  for(u32 i = txn->count; i > 0; i--)
+  {
+    if(txn->bytes[i - 1].address == address)
+      return (int)(i - 1);
+  }
+  return -1;
+} // Finds the newest shadow value for one emulated RAM byte.
+
+static u8 gba_p4_thumb_jit_txn_read8(const gba_p4_thumb_jit_txn_t *txn,
+    u8 *address)
+{
+  int index = gba_p4_thumb_jit_txn_find(txn, address);
+  if(index >= 0)
+    return txn->bytes[index].value;
+
+  if(txn->baseline)
+  {
+    index = gba_p4_thumb_jit_txn_find(txn->baseline, address);
+    if(index >= 0)
+      return txn->baseline->bytes[index].original;
+  }
+  return *address;
+} // Reads prior shadow writes first and otherwise observes the pre-JIT byte.
+
+static bool gba_p4_thumb_jit_txn_write8(gba_p4_thumb_jit_txn_t *txn,
+    u8 *address, u8 value)
+{
+  int index = gba_p4_thumb_jit_txn_find(txn, address);
+  if(index >= 0)
+  {
+    txn->bytes[index].value = value;
+    return true;
+  }
+  if(txn->count >= GBA_P4_THUMB_JIT_TXN_BYTES)
+    return false;
+
+  u8 original = gba_p4_thumb_jit_txn_read8(txn, address);
+  gba_p4_thumb_jit_txn_byte_t *byte = &txn->bytes[txn->count++];
+  byte->address = address;
+  byte->original = original;
+  byte->value = value;
+  return true;
+} // Records one expected store and preserves the byte needed for rollback.
+
+static u32 gba_p4_thumb_jit_txn_read(const gba_p4_thumb_jit_txn_t *txn,
+    u8 *address, u32 width)
+{
+  u32 value = 0;
+  for(u32 i = 0; i < width; i++)
+    value |= (u32)gba_p4_thumb_jit_txn_read8(txn, address + i) << (i * 8);
+  return value;
+} // Reconstructs little-endian halfwords and words from the byte overlay.
+
+static bool gba_p4_thumb_jit_txn_write(gba_p4_thumb_jit_txn_t *txn,
+    u8 *address, u32 width, u32 value)
+{
+  for(u32 i = 0; i < width; i++)
+  {
+    if(!gba_p4_thumb_jit_txn_write8(txn, address + i,
+          (u8)(value >> (i * 8))))
+      return false;
+  }
+  return true;
+} // Adds a little-endian memory write to the reference transaction.
+
 static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
-    u32 *sim_flags)
+    u32 *sim_flags, gba_p4_thumb_jit_txn_t *txn)
 {
   u32 top = (opcode >> 8) & 0xFF;
   u32 dest;
@@ -1743,7 +1836,8 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
     if((address >> 24) != 0x03)
       return false;
 
-    sim_regs[rd] = readaddress32(iwram, (address & 0x7FFF) + 0x8000);
+    sim_regs[rd] = gba_p4_thumb_jit_txn_read(txn,
+        iwram + (address & 0x7FFF) + 0x8000, 4);
     sim_regs[REG_PC] += 2;
     return true;
   }
@@ -1755,7 +1849,9 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
     if((address >> 24) != 0x03)
       return false;
 
-    address32(iwram, (address & 0x7FFF) + 0x8000) = eswap32(sim_regs[rd]);
+    if(!gba_p4_thumb_jit_txn_write(txn,
+          iwram + (address & 0x7FFF) + 0x8000, 4, sim_regs[rd]))
+      return false;
     sim_regs[REG_PC] += 2;
     return true;
   }
@@ -1776,14 +1872,19 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
     {
       if(reglist & (1U << i))
       {
-        address32(iwram, ((address + offset) & 0x7FFF) + 0x8000) =
-            eswap32(sim_regs[i]);
+        if(!gba_p4_thumb_jit_txn_write(txn,
+              iwram + ((address + offset) & 0x7FFF) + 0x8000, 4, sim_regs[i]))
+          return false;
         offset += 4;
       }
     }
     if(has_lr)
-      address32(iwram, ((address + offset) & 0x7FFF) + 0x8000) =
-          eswap32(sim_regs[REG_LR]);
+    {
+      if(!gba_p4_thumb_jit_txn_write(txn,
+            iwram + ((address + offset) & 0x7FFF) + 0x8000, 4,
+            sim_regs[REG_LR]))
+        return false;
+    }
     sim_regs[REG_PC] += 2;
     return true;
   }
@@ -1800,7 +1901,8 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
     {
       if(reglist & (1U << i))
       {
-        sim_regs[i] = readaddress32(iwram, ((address + offset) & 0x7FFF) + 0x8000);
+        sim_regs[i] = gba_p4_thumb_jit_txn_read(txn,
+            iwram + ((address + offset) & 0x7FFF) + 0x8000, 4);
         offset += 4;
       }
     }
@@ -1834,20 +1936,44 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
     {
       case 0x02:
         if(top >= 0x60 && top <= 0x67)
-          address32(ewram, address & 0x3FFFF) = eswap32(sim_regs[rd]);
+        {
+          if(!gba_p4_thumb_jit_txn_write(txn, ewram + (address & 0x3FFFF),
+                4, sim_regs[rd]))
+            return false;
+        }
         else if(top >= 0x80 && top <= 0x87)
-          address16(ewram, address & 0x3FFFF) = eswap16((u16)sim_regs[rd]);
+        {
+          if(!gba_p4_thumb_jit_txn_write(txn, ewram + (address & 0x3FFFF),
+                2, sim_regs[rd]))
+            return false;
+        }
         else
-          ewram[address & 0x3FFFF] = (u8)sim_regs[rd];
+        {
+          if(!gba_p4_thumb_jit_txn_write(txn, ewram + (address & 0x3FFFF),
+                1, sim_regs[rd]))
+            return false;
+        }
         break;
 
       case 0x03:
         if(top >= 0x60 && top <= 0x67)
-          address32(iwram, (address & 0x7FFF) + 0x8000) = eswap32(sim_regs[rd]);
+        {
+          if(!gba_p4_thumb_jit_txn_write(txn,
+                iwram + (address & 0x7FFF) + 0x8000, 4, sim_regs[rd]))
+            return false;
+        }
         else if(top >= 0x80 && top <= 0x87)
-          address16(iwram, (address & 0x7FFF) + 0x8000) = eswap16((u16)sim_regs[rd]);
+        {
+          if(!gba_p4_thumb_jit_txn_write(txn,
+                iwram + (address & 0x7FFF) + 0x8000, 2, sim_regs[rd]))
+            return false;
+        }
         else
-          iwram[(address & 0x7FFF) + 0x8000] = (u8)sim_regs[rd];
+        {
+          if(!gba_p4_thumb_jit_txn_write(txn,
+                iwram + (address & 0x7FFF) + 0x8000, 1, sim_regs[rd]))
+            return false;
+        }
         break;
 
       default:
@@ -1883,20 +2009,26 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
     {
       case 0x02:
         if(top >= 0x68 && top <= 0x6F)
-          sim_regs[rd] = readaddress32(ewram, address & 0x3FFFF);
+          sim_regs[rd] = gba_p4_thumb_jit_txn_read(txn,
+              ewram + (address & 0x3FFFF), 4);
         else if(top >= 0x88 && top <= 0x8F)
-          sim_regs[rd] = readaddress16(ewram, address & 0x3FFFF);
+          sim_regs[rd] = gba_p4_thumb_jit_txn_read(txn,
+              ewram + (address & 0x3FFFF), 2);
         else
-          sim_regs[rd] = ewram[address & 0x3FFFF];
+          sim_regs[rd] = gba_p4_thumb_jit_txn_read(txn,
+              ewram + (address & 0x3FFFF), 1);
         break;
 
       case 0x03:
         if(top >= 0x68 && top <= 0x6F)
-          sim_regs[rd] = readaddress32(iwram, (address & 0x7FFF) + 0x8000);
+          sim_regs[rd] = gba_p4_thumb_jit_txn_read(txn,
+              iwram + (address & 0x7FFF) + 0x8000, 4);
         else if(top >= 0x88 && top <= 0x8F)
-          sim_regs[rd] = readaddress16(iwram, (address & 0x7FFF) + 0x8000);
+          sim_regs[rd] = gba_p4_thumb_jit_txn_read(txn,
+              iwram + (address & 0x7FFF) + 0x8000, 2);
         else
-          sim_regs[rd] = iwram[(address & 0x7FFF) + 0x8000];
+          sim_regs[rd] = gba_p4_thumb_jit_txn_read(txn,
+              iwram + (address & 0x7FFF) + 0x8000, 1);
         break;
 
       default:
@@ -1946,6 +2078,65 @@ static inline bool gba_p4_thumb_jit_record_fail(gba_p4_thumb_jit_entry_t *entry,
   return false;
 }
 
+static void gba_p4_thumb_jit_txn_rollback(
+    const gba_p4_thumb_jit_txn_t *txn)
+{
+  for(u32 i = 0; i < txn->count; i++)
+    *txn->bytes[i].address = txn->bytes[i].original;
+} // Restores pre-block bytes when generated execution fails validation.
+
+static bool gba_p4_thumb_jit_txn_matches(
+    const gba_p4_thumb_jit_txn_t *full,
+    const gba_p4_thumb_jit_txn_t *partial, u32 *fail_index,
+    u32 *expected, u32 *actual)
+{
+  for(u32 i = 0; i < full->count; i++)
+  {
+    u8 wanted = full->bytes[i].value;
+    if(partial)
+    {
+      int partial_index = gba_p4_thumb_jit_txn_find(partial,
+          full->bytes[i].address);
+      wanted = partial_index >= 0 ? partial->bytes[partial_index].value :
+          full->bytes[i].original;
+    }
+    u8 observed = *full->bytes[i].address;
+    if(observed != wanted)
+    {
+      if(fail_index) *fail_index = i;
+      if(expected) *expected = wanted;
+      if(actual) *actual = observed;
+      return false;
+    }
+  }
+
+  if(partial)
+  {
+    for(u32 i = 0; i < partial->count; i++)
+    {
+      if(gba_p4_thumb_jit_txn_find(full, partial->bytes[i].address) >= 0)
+        continue;
+      u8 observed = *partial->bytes[i].address;
+      if(observed != partial->bytes[i].value)
+      {
+        if(fail_index) *fail_index = full->count + i;
+        if(expected) *expected = partial->bytes[i].value;
+        if(actual) *actual = observed;
+        return false;
+      }
+    }
+  }
+  return true;
+} // Compares generated stores with the full or early-bail reference overlay.
+
+static bool gba_p4_thumb_jit_txn_fail(gba_p4_thumb_jit_txn_t *txn,
+    gba_p4_thumb_jit_entry_t *entry, u32 reason, u32 index,
+    u32 expected, u32 actual)
+{
+  gba_p4_thumb_jit_txn_rollback(txn);
+  return gba_p4_thumb_jit_record_fail(entry, reason, index, expected, actual);
+} // Rolls generated RAM writes back before the stock interpreter retries.
+
 static __attribute__((noinline, cold)) bool gba_p4_thumb_jit_validate_and_commit(
     gba_p4_thumb_jit_entry_t *entry,
     u32 &n_flag, u32 &z_flag, u32 &c_flag, u32 &v_flag, u32 *jit_ret)
@@ -1962,10 +2153,12 @@ static __attribute__((noinline, cold)) bool gba_p4_thumb_jit_validate_and_commit
 
   memcpy(jit_state.regs, reg, sizeof(sim_regs));
   memcpy(sim_regs, reg, sizeof(sim_regs));
+  gba_p4_thumb_jit_txn_reset(&gba_p4_thumb_jit_validation_txn, NULL);
 
   for(u32 i = 0; i < entry->op_count; i++)
   {
-    if(!gba_p4_thumb_jit_simulate_one(entry->opcodes[i], sim_regs, sim_flags))
+    if(!gba_p4_thumb_jit_simulate_one(entry->opcodes[i], sim_regs, sim_flags,
+          &gba_p4_thumb_jit_validation_txn))
       return gba_p4_thumb_jit_record_fail(entry, 1, i, 0, 0);
   }
 
@@ -1978,13 +2171,17 @@ static __attribute__((noinline, cold)) bool gba_p4_thumb_jit_validate_and_commit
 
   u32 executed = entry->fn(jit_state.regs, jit_flags.flags);
   if(jit_state.pre != 0x4A525047U)
-    return gba_p4_thumb_jit_record_fail(entry, 2, 0, 0x4A525047U, jit_state.pre);
+    return gba_p4_thumb_jit_txn_fail(&gba_p4_thumb_jit_validation_txn,
+        entry, 2, 0, 0x4A525047U, jit_state.pre);
   if(jit_state.post != 0x4A52504FU)
-    return gba_p4_thumb_jit_record_fail(entry, 3, 0, 0x4A52504FU, jit_state.post);
+    return gba_p4_thumb_jit_txn_fail(&gba_p4_thumb_jit_validation_txn,
+        entry, 3, 0, 0x4A52504FU, jit_state.post);
   if(jit_flags.pre != 0x4A495450U)
-    return gba_p4_thumb_jit_record_fail(entry, 4, 0, 0x4A495450U, jit_flags.pre);
+    return gba_p4_thumb_jit_txn_fail(&gba_p4_thumb_jit_validation_txn,
+        entry, 4, 0, 0x4A495450U, jit_flags.pre);
   if(jit_flags.post != 0x4A49544FU)
-    return gba_p4_thumb_jit_record_fail(entry, 5, 0, 0x4A49544FU, jit_flags.post);
+    return gba_p4_thumb_jit_txn_fail(&gba_p4_thumb_jit_validation_txn,
+        entry, 5, 0, 0x4A49544FU, jit_flags.post);
 
   u32 executed_ops = executed & GBA_P4_THUMB_JIT_RET_OPS_MASK;
   u32 executed_extra = (executed >> GBA_P4_THUMB_JIT_RET_EXTRA_SHIFT) &
@@ -2001,10 +2198,11 @@ static __attribute__((noinline, cold)) bool gba_p4_thumb_jit_validate_and_commit
     // this path on every execution, so trusted blocks otherwise never reach the
     // tolerant committed executor.
     if(!entry->can_bail || executed_ops >= entry->op_count)
-      return gba_p4_thumb_jit_record_fail(entry, 6, 0, entry->op_count,
-          executed_ops);
+      return gba_p4_thumb_jit_txn_fail(&gba_p4_thumb_jit_validation_txn,
+          entry, 6, 0, entry->op_count, executed_ops);
     if(executed_extra)
-      return gba_p4_thumb_jit_record_fail(entry, 7, 0, 0, executed_extra);
+      return gba_p4_thumb_jit_txn_fail(&gba_p4_thumb_jit_validation_txn,
+          entry, 7, 0, 0, executed_extra);
 
     // The reference pass above modelled the whole block, so it has run past the
     // bail point. Rebuild it over just the retired instructions so the register
@@ -2014,29 +2212,43 @@ static __attribute__((noinline, cold)) bool gba_p4_thumb_jit_validate_and_commit
     sim_flags[1] = z_flag;
     sim_flags[2] = c_flag;
     sim_flags[3] = v_flag;
+    gba_p4_thumb_jit_txn_reset(&gba_p4_thumb_jit_partial_txn,
+        &gba_p4_thumb_jit_validation_txn);
     for(u32 i = 0; i < executed_ops; i++)
     {
-      if(!gba_p4_thumb_jit_simulate_one(entry->opcodes[i], sim_regs, sim_flags))
-        return gba_p4_thumb_jit_record_fail(entry, 1, i, 0, 0);
+      if(!gba_p4_thumb_jit_simulate_one(entry->opcodes[i], sim_regs, sim_flags,
+            &gba_p4_thumb_jit_partial_txn))
+        return gba_p4_thumb_jit_txn_fail(&gba_p4_thumb_jit_validation_txn,
+            entry, 1, i, 0, 0);
     }
   }
   else if(executed_extra != entry->extra_cycles)
-    return gba_p4_thumb_jit_record_fail(entry, 7, 0, entry->extra_cycles,
-        executed_extra);
+    return gba_p4_thumb_jit_txn_fail(&gba_p4_thumb_jit_validation_txn,
+        entry, 7, 0, entry->extra_cycles, executed_extra);
 
   for(u32 i = 0; i < REG_ARCH_COUNT; i++)
   {
     if(jit_state.regs[i] != sim_regs[i])
-      return gba_p4_thumb_jit_record_fail(entry, 0x10 + i, i,
-          sim_regs[i], jit_state.regs[i]);
+      return gba_p4_thumb_jit_txn_fail(&gba_p4_thumb_jit_validation_txn,
+          entry, 0x10 + i, i, sim_regs[i], jit_state.regs[i]);
   }
 
   for(u32 i = 0; i < 4; i++)
   {
     if((jit_flags.flags[i] & 1) != (sim_flags[i] & 1))
-      return gba_p4_thumb_jit_record_fail(entry, 0x40 + i, i,
-          sim_flags[i] & 1, jit_flags.flags[i] & 1);
+      return gba_p4_thumb_jit_txn_fail(&gba_p4_thumb_jit_validation_txn,
+          entry, 0x40 + i, i, sim_flags[i] & 1, jit_flags.flags[i] & 1);
   }
+
+  u32 memory_index = 0;
+  u32 memory_expected = 0;
+  u32 memory_actual = 0;
+  const gba_p4_thumb_jit_txn_t *partial_txn =
+      executed_ops == entry->op_count ? NULL : &gba_p4_thumb_jit_partial_txn;
+  if(!gba_p4_thumb_jit_txn_matches(&gba_p4_thumb_jit_validation_txn,
+        partial_txn, &memory_index, &memory_expected, &memory_actual))
+    return gba_p4_thumb_jit_txn_fail(&gba_p4_thumb_jit_validation_txn,
+        entry, 0x50, memory_index, memory_expected, memory_actual);
 
   memcpy(reg, jit_state.regs, sizeof(sim_regs));
   n_flag = jit_flags.flags[0] & 1;
