@@ -22,6 +22,7 @@ extern timer_type timer[4];
 
 namespace {
 uint16_t currentButtons = 0;
+#if DOLL_GBA_VERBOSE_DIAGNOSTICS
 uint16_t previousDebugButtons = 0;
 uint32_t transitionDebugFrames = 0;
 uint32_t transitionDebugSequence = 0;
@@ -60,6 +61,7 @@ void logTransitionStep(uint16_t buttons) {
       (unsigned long)gba_thumb_jit_last_ret,
       (unsigned long)gba_thumb_jit_last_signature);
 }  // Captures CPU, IRQ, video, memory, and JIT state every third post-A frame.
+#endif
 
 void* allocRegion(size_t size, bool preferInternal) {
   uint32_t preferred = MALLOC_CAP_8BIT |
@@ -238,10 +240,18 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
   init_sound();
   memcpy(bios_rom, open_gba_bios_rom, GBA_BIOS_ROM_SIZE);
   currentButtons = 0;
+#if DOLL_GBA_VERBOSE_DIAGNOSTICS
   previousDebugButtons = 0;
   transitionDebugFrames = 0;
   transitionDebugSequence = 0;
   transitionCaptureConsumed = false;
+#endif
+  return true;
+}
+
+bool doll_gba_core_set_framebuffer(uint16_t* framebuffer) {
+  if (!gbsp_memory || !framebuffer) return false;
+  gba_screen_pixels = framebuffer;
   return true;
 }
 
@@ -254,10 +264,12 @@ bool doll_gba_core_load(const char* rom_path) {
   }
   gba_p4_thumb_jit_reset();
   gba_p4_thumb_jit_reset_stats();
+#if DOLL_GBA_VERBOSE_DIAGNOSTICS
   previousDebugButtons = 0;
   transitionDebugFrames = 0;
   transitionDebugSequence = 0;
   transitionCaptureConsumed = false;
+#endif
   // Experimental maximum-speed run: combine the proven batch loop, standalone
   // fast dispatch, and the guarded JIT so their aggregate ceiling is measurable.
   doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_TURBO);
@@ -288,11 +300,14 @@ void doll_gba_core_stop(void) {
 
 void doll_gba_core_run(uint16_t buttons, bool draw) {
   if (!gbsp_memory) return;
+#if DOLL_GBA_VERBOSE_DIAGNOSTICS
   const uint16_t changedButtons = buttons ^ previousDebugButtons;
   const uint16_t debugPressed = changedButtons & buttons & 0x080U;
+#endif
   currentButtons = buttons;
   skip_next_frame = draw ? 0 : 1;
   update_input();
+#if DOLL_GBA_VERBOSE_DIAGNOSTICS
   if (changedButtons) {
     printf("[gba-input] frame=%lu key=%03x changed=%03x p1=%04x pc=%08lx lr=%08lx sp=%08lx\n",
         (unsigned long)frame_counter, static_cast<unsigned>(buttons),
@@ -310,9 +325,11 @@ void doll_gba_core_run(uint16_t buttons, bool draw) {
         (unsigned long)doll_gba_core_get_cpu_mode());
   }
   previousDebugButtons = buttons;
+#endif
   rumble_frame_reset();
   clear_gamepak_stickybits();
   execute_arm(execute_cycles);
+#if DOLL_GBA_VERBOSE_DIAGNOSTICS
   if (transitionDebugFrames) {
     if ((transitionDebugFrames % 3U) == 0U) logTransitionStep(buttons);
     --transitionDebugFrames;
@@ -321,10 +338,15 @@ void doll_gba_core_run(uint16_t buttons, bool draw) {
           (unsigned long)doll_gba_core_get_cpu_mode());
     }
   }
+#endif
 }
 
 bool doll_gba_core_debug_capture_active(void) {
+#if DOLL_GBA_VERBOSE_DIAGNOSTICS
   return transitionDebugFrames != 0;
+#else
+  return false;
+#endif
 }  // Lets the frontend increase serial detail only around an A/Start transition.
 
 void doll_gba_core_set_cpu_mode(uint32_t mode) {

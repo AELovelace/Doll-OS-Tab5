@@ -34,6 +34,9 @@ extern "C" {
 #include <soc/ext_mem_defs.h>
 #endif
 #define GBA_HOT_DATA_ATTR DRAM_ATTR
+#ifndef DOLL_GBA_VERBOSE_DIAGNOSTICS
+#define DOLL_GBA_VERBOSE_DIAGNOSTICS 0
+#endif
 #ifndef GBA_DECODED_BLOCK_CACHE
 #define GBA_DECODED_BLOCK_CACHE 0
 #endif
@@ -450,6 +453,22 @@ typedef struct
   gba_p4_thumb_jit_fn fn;
 } gba_p4_thumb_jit_entry_t;
 
+// The full associative table lives in PSRAM. Keep a small direct-mapped front
+// in internal SRAM so hot ROM blocks usually need one PSRAM metadata read
+// instead of walking all four ways. Stale slots are self-invalidating because
+// the pointed-to entry's PC and function are checked before use.
+#define GBA_P4_THUMB_JIT_FRONT_ENTRIES 512
+typedef struct
+{
+  u32 pc;
+  gba_p4_thumb_jit_entry_t *entry;
+} gba_p4_thumb_jit_front_entry_t;
+
+GBA_HOT_DATA_ATTR static gba_p4_thumb_jit_front_entry_t
+    gba_p4_thumb_jit_front[GBA_P4_THUMB_JIT_FRONT_ENTRIES];
+GBA_HOT_DATA_ATTR static u32 gba_p4_thumb_jit_pending_pc;
+GBA_HOT_DATA_ATTR static gba_p4_thumb_jit_entry_t *gba_p4_thumb_jit_pending_entry;
+
 #define GBA_P4_THUMB_JIT_TRACE_COUNT 128
 typedef struct
 {
@@ -825,6 +844,9 @@ static void gba_p4_thumb_jit_flush(void)
 {
   memset(gba_p4_thumb_jit_cache, 0,
       GBA_P4_THUMB_JIT_ENTRIES * sizeof(*gba_p4_thumb_jit_cache));
+  memset(gba_p4_thumb_jit_front, 0, sizeof(gba_p4_thumb_jit_front));
+  gba_p4_thumb_jit_pending_pc = 0;
+  gba_p4_thumb_jit_pending_entry = NULL;
   memset(gba_p4_thumb_jit_replacement, 0,
       GBA_P4_THUMB_JIT_SETS * sizeof(*gba_p4_thumb_jit_replacement));
   memset(gba_p4_thumb_jit_used_words, 0, sizeof(gba_p4_thumb_jit_used_words));
@@ -897,6 +919,13 @@ extern "C" void gba_p4_thumb_jit_report_fault(u32 reason, u32 fault_pc)
   u32 available = gba_p4_thumb_jit_trace_head < GBA_P4_THUMB_JIT_TRACE_COUNT ?
       gba_p4_thumb_jit_trace_head : GBA_P4_THUMB_JIT_TRACE_COUNT;
   u32 first = gba_p4_thumb_jit_trace_head - available;
+#if !DOLL_GBA_VERBOSE_DIAGNOSTICS
+  if(available > 8)
+  {
+    first += available - 8;
+    available = 8;
+  }
+#endif
   for(u32 i = 0; i < available; i++)
   {
     const gba_p4_thumb_jit_trace_t *trace =
@@ -1005,14 +1034,42 @@ static inline u32 gba_p4_thumb_jit_hash(u32 pc)
   return set * GBA_P4_THUMB_JIT_WAYS;
 }
 
+static inline u32 gba_p4_thumb_jit_front_hash(u32 pc)
+{
+  return ((pc >> 1) ^ (pc >> 10) ^ (pc >> 19)) &
+      (GBA_P4_THUMB_JIT_FRONT_ENTRIES - 1);
+}
+
+static inline void gba_p4_thumb_jit_front_store(u32 pc,
+    gba_p4_thumb_jit_entry_t *entry)
+{
+  gba_p4_thumb_jit_front_entry_t *front =
+      &gba_p4_thumb_jit_front[gba_p4_thumb_jit_front_hash(pc)];
+  front->pc = pc;
+  front->entry = entry;
+}
+
 static inline gba_p4_thumb_jit_entry_t *gba_p4_thumb_jit_lookup(u32 pc)
 {
+  gba_p4_thumb_jit_front_entry_t *front =
+      &gba_p4_thumb_jit_front[gba_p4_thumb_jit_front_hash(pc)];
+  if(front->pc == pc && front->entry)
+  {
+    gba_p4_thumb_jit_entry_t *entry = front->entry;
+    if(entry->pc == pc && entry->fn)
+      return entry;
+    front->entry = NULL;
+  }
+
   u32 base = gba_p4_thumb_jit_hash(pc);
   for(u32 way = 0; way < GBA_P4_THUMB_JIT_WAYS; way++)
   {
     gba_p4_thumb_jit_entry_t *entry = &gba_p4_thumb_jit_cache[base + way];
     if(entry->pc == pc && entry->fn)
+    {
+      gba_p4_thumb_jit_front_store(pc, entry);
       return entry;
+    }
   }
   return NULL;
 } // Searches every way so unrelated hot blocks with the same set remain resident.
@@ -3047,6 +3104,16 @@ static bool gba_p4_thumb_jit_emit_wram_load_imm_op(gba_p4_rv_emit_t *emit,
        gba_p4_emit(emit, rv_srli(RV_T3, RV_T0, 24))))
     return false;
 
+  // Reserve the destination before emitting either memory arm. Allocating it
+  // inside the EWRAM arm changed the compiler's cache map even though an IWRAM
+  // execution branches around that eviction and flush. The second arm then
+  // reused the new map and could overwrite a dirty guest register (observed as
+  // an R3 validation mismatch in Pokemon Emerald).
+  int rd_slot = gba_p4_thumb_jit_cache_alloc(emit, rd, false);
+  if(rd_slot < 0)
+    return false;
+  u32 rd_rv = gba_p4_thumb_jit_cache_rv_reg((u32)rd_slot);
+
   if(align_mask)
   {
     if(!(gba_p4_emit(emit, rv_andi(RV_T5, RV_T0, align_mask)) &&
@@ -3098,7 +3165,7 @@ static bool gba_p4_thumb_jit_emit_wram_load_imm_op(gba_p4_rv_emit_t *emit,
   else if(!gba_p4_emit(emit, rv_lbu(RV_T2, RV_T0, 0)))
     return false;
 
-  if(!gba_p4_thumb_jit_store_reg(emit, rd, RV_T2))
+  if(!gba_p4_emit(emit, rv_addi(rd_rv, RV_T2, 0)))
     return false;
 
   u32 jump_end_pos;
@@ -3110,9 +3177,10 @@ static bool gba_p4_thumb_jit_emit_wram_load_imm_op(gba_p4_rv_emit_t *emit,
       RV_T4, RV_ZERO, 0x1))
     return false;
 
-  if(!(gba_p4_thumb_jit_load_reg(emit, RV_T0, rb) &&
-       gba_p4_emit(emit, rv_addi(RV_T0, RV_T0, imm)) &&
-       gba_p4_emit(emit, rv_slli(RV_T0, RV_T0, 17)) &&
+  // T0 still contains the common guest address on the IWRAM branch; the EWRAM
+  // address conversion is skipped at runtime, so reloading rb here is both
+  // redundant and another opportunity for branch-only cache mutation.
+  if(!(gba_p4_emit(emit, rv_slli(RV_T0, RV_T0, 17)) &&
        gba_p4_emit(emit, rv_srli(RV_T0, RV_T0, 17)) &&
        gba_p4_emit_li32(emit, RV_T1, (u32)(uintptr_t)(iwram + 0x8000)) &&
        gba_p4_emit(emit, rv_add(RV_T0, RV_T0, RV_T1))))
@@ -3131,9 +3199,13 @@ static bool gba_p4_thumb_jit_emit_wram_load_imm_op(gba_p4_rv_emit_t *emit,
   else if(!gba_p4_emit(emit, rv_lbu(RV_T2, RV_T0, 0)))
     return false;
 
-  return gba_p4_thumb_jit_store_reg(emit, rd, RV_T2) &&
-         gba_p4_patch_branch(emit, jump_end_pos, emit->words,
-             RV_ZERO, RV_ZERO, 0x0);
+  if(!(gba_p4_emit(emit, rv_addi(rd_rv, RV_T2, 0)) &&
+       gba_p4_patch_branch(emit, jump_end_pos, emit->words,
+           RV_ZERO, RV_ZERO, 0x0)))
+    return false;
+
+  emit->cache_dirty[rd_slot] = 1;
+  return true;
 }
 
 static bool gba_p4_thumb_jit_emit_wram_store_imm_op(gba_p4_rv_emit_t *emit,
@@ -3485,6 +3557,7 @@ static inline void gba_p4_thumb_jit_commit_entry(gba_p4_thumb_jit_entry_t *entry
   entry->code_words = reserve_words;
   memcpy(entry->opcodes, opcodes, sizeof(opcodes[0]) * op_count);
   entry->fn = (gba_p4_thumb_jit_fn)emit->exec;
+  gba_p4_thumb_jit_front_store(pc, entry);
 }
 
 static __attribute__((noinline, cold)) gba_p4_thumb_jit_entry_t *
@@ -3602,6 +3675,13 @@ gba_p4_thumb_jit_compile(u32 pc,
 static inline int gba_p4_thumb_jit_try(u8 *pc_address_block, s32 cycles_remaining,
     u32 &n_flag, u32 &z_flag, u32 &c_flag, u32 &v_flag)
 {
+  // can_start() and try() are adjacent in the interpreter loop. Consume the
+  // first lookup here rather than probing the four-way PSRAM table twice.
+  u32 pending_pc = gba_p4_thumb_jit_pending_pc;
+  gba_p4_thumb_jit_entry_t *pending_entry = gba_p4_thumb_jit_pending_entry;
+  gba_p4_thumb_jit_pending_pc = 0;
+  gba_p4_thumb_jit_pending_entry = NULL;
+
   if(cycles_remaining < 32)
     return 0;
 
@@ -3626,7 +3706,9 @@ static inline int gba_p4_thumb_jit_try(u8 *pc_address_block, s32 cycles_remainin
   if(!gba_p4_thumb_jit_init())
     return 0;
 
-  gba_p4_thumb_jit_entry_t *entry = gba_p4_thumb_jit_lookup(pc);
+  gba_p4_thumb_jit_entry_t *entry =
+      (pending_entry && pending_pc == pc) ? pending_entry :
+      gba_p4_thumb_jit_lookup(pc);
   if(!entry || !gba_p4_thumb_jit_matches(entry, pc, pc_address_block))
   {
     gba_thumb_jit_misses++;
@@ -3718,35 +3800,43 @@ static inline int gba_p4_thumb_jit_try(u8 *pc_address_block, s32 cycles_remainin
     return 0;
   }
 
-  u32 trace_index = gba_p4_thumb_jit_trace_head++ &
-      (GBA_P4_THUMB_JIT_TRACE_COUNT - 1);
-  gba_p4_thumb_jit_trace_t *trace = &gba_p4_thumb_jit_trace[trace_index];
-  trace->pc = pc;
-  trace->end_pc = pc;
-  trace->sp = reg[REG_SP];
-  trace->lr = reg[REG_LR];
-  trace->ret = 0;
-  trace->signature = entry->opcodes[0] |
-      ((u32)entry->opcodes[entry->op_count - 1] << 16);
-  gba_thumb_jit_last_pc = pc;
-  gba_thumb_jit_last_end_pc = pc;
-  gba_thumb_jit_last_ret = 0;
-  gba_thumb_jit_last_signature = trace->signature;
+  const bool trusted = !gba_thumb_jit_debug_validate &&
+      entry->validated >= GBA_P4_THUMB_JIT_TRUST_VALIDATIONS;
+  gba_p4_thumb_jit_trace_t *trace = NULL;
+  if(DOLL_GBA_VERBOSE_DIAGNOSTICS || !trusted)
+  {
+    u32 trace_index = gba_p4_thumb_jit_trace_head++ &
+        (GBA_P4_THUMB_JIT_TRACE_COUNT - 1);
+    trace = &gba_p4_thumb_jit_trace[trace_index];
+    trace->pc = pc;
+    trace->end_pc = pc;
+    trace->sp = reg[REG_SP];
+    trace->lr = reg[REG_LR];
+    trace->ret = 0;
+    trace->signature = entry->opcodes[0] |
+        ((u32)entry->opcodes[entry->op_count - 1] << 16);
+    gba_thumb_jit_last_pc = pc;
+    gba_thumb_jit_last_end_pc = pc;
+    gba_thumb_jit_last_ret = 0;
+    gba_thumb_jit_last_signature = trace->signature;
+  }
 
   u32 jit_ret = entry->op_count;
   bool ok;
-  if(!gba_thumb_jit_debug_validate &&
-     entry->validated >= GBA_P4_THUMB_JIT_TRUST_VALIDATIONS)
+  if(trusted)
     ok = gba_p4_thumb_jit_execute_committed(entry, n_flag, z_flag, c_flag, v_flag,
         &jit_ret);
   else
     ok = gba_p4_thumb_jit_validate_and_commit(entry, n_flag, z_flag, c_flag, v_flag,
         &jit_ret);
 
-  trace->end_pc = reg[REG_PC];
-  trace->ret = jit_ret;
-  gba_thumb_jit_last_end_pc = trace->end_pc;
-  gba_thumb_jit_last_ret = jit_ret;
+  if(trace)
+  {
+    trace->end_pc = reg[REG_PC];
+    trace->ret = jit_ret;
+    gba_thumb_jit_last_end_pc = trace->end_pc;
+    gba_thumb_jit_last_ret = jit_ret;
+  }
 
   u32 executed_ops = jit_ret & GBA_P4_THUMB_JIT_RET_OPS_MASK;
   u32 expected_pc = pc + executed_ops * 2;
@@ -3768,6 +3858,9 @@ static inline int gba_p4_thumb_jit_try(u8 *pc_address_block, s32 cycles_remainin
 
 static inline bool gba_p4_thumb_jit_can_start(u32 opcode, u8 *pc_address_block)
 {
+  gba_p4_thumb_jit_pending_pc = 0;
+  gba_p4_thumb_jit_pending_entry = NULL;
+
   if(!gba_thumb_jit_runtime_enabled)
     return false;
 
@@ -3800,7 +3893,11 @@ static inline bool gba_p4_thumb_jit_can_start(u32 opcode, u8 *pc_address_block)
     // candidates may enter the hotness filter so a long-running game can replace
     // stale startup code without paying a PSRAM cache lookup on every instruction.
     if(entry)
+    {
+      gba_p4_thumb_jit_pending_pc = pc;
+      gba_p4_thumb_jit_pending_entry = entry;
       return true;
+    }
     if((++gba_p4_thumb_jit_adapt_counter & GBA_P4_THUMB_JIT_ADAPT_SAMPLE_MASK) != 0)
       return false;
     gba_thumb_jit_adapt_probes++;

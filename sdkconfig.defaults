@@ -23,16 +23,16 @@ CONFIG_LOG_DEFAULT_LEVEL_ERROR=y
 CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
 CONFIG_ARDUHAL_LOG_DEFAULT_LEVEL_ERROR=y
 
-# Diagnostic build: compile the task-WDT API required by Arduino, but do not initialize
-# the watchdog or subscribe idle tasks at runtime.
+# GBA performance build: keep the task-WDT API available because Arduino links
+# against it unconditionally, but never initialize or subscribe the watchdog.
 CONFIG_ESP_TASK_WDT_EN=y
 # CONFIG_ESP_TASK_WDT_INIT is not set
 
 # gpSP's ESP32-P4 Thumb dynarec writes RISC-V code into a lazy internal-RAM
 # arena and then executes it. The default PMP split deliberately makes data
 # heap non-executable, causing every MALLOC_CAP_EXEC request to fail. Keep L2
-# unified RWX for this firmware; the JIT itself remains capped at 64 KB and is
-# not allocated until the foreground GBA command starts.
+# unified RWX for this firmware; the JIT uses up to two best-fit executable
+# banks and is not allocated until the foreground GBA command starts.
 # CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT is not set
 
 # These settings are the display-bandwidth fix used by M5Stack's UserDemo

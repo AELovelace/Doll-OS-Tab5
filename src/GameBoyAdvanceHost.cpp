@@ -7,6 +7,10 @@
 namespace {
 constexpr size_t kAudioMaxFrames = 600;
 constexpr uint32_t kSaveIntervalMs = 30000;
+constexpr uint32_t kWorkerSave = 1U << 0;
+constexpr uint32_t kWorkerPresent = 1U << 1;
+constexpr uint32_t kWorkerStop = 1U << 2;
+constexpr uint32_t kWorkerInput = 1U << 3;
 
 void* allocBuffer(size_t size, bool preferInternal) {
   uint32_t preferred = MALLOC_CAP_8BIT |
@@ -41,22 +45,32 @@ bool GameBoyAdvanceHost::allocateCoreMemory() {
   // These buffers exist only while gba owns the foreground. Keep them in
   // PSRAM so the shell/network stack retains its scarce internal heap and the
   // P4 JIT can reserve a small executable working set.
-  frame_ = static_cast<uint16_t*>(allocBuffer(DOLL_GBA_FRAME_BYTES, false));
+  frames_[0] = static_cast<uint16_t*>(allocBuffer(DOLL_GBA_FRAME_BYTES, false));
+  frames_[1] = static_cast<uint16_t*>(allocBuffer(DOLL_GBA_FRAME_BYTES, false));
   stereoScratch_ = static_cast<int16_t*>(
       allocBuffer(kAudioMaxFrames * 2 * sizeof(int16_t), false));
-  return frame_ && stereoScratch_;
-}  // Allocates the framebuffer and one native-stereo audio transfer buffer.
+  saveSnapshot_ = static_cast<uint8_t*>(allocBuffer(DOLL_GBA_SAVE_BYTES, false));
+  return frames_[0] && frames_[1] && stereoScratch_ && saveSnapshot_;
+}  // Allocates double-buffered video and one native-stereo audio transfer buffer.
 
 void GameBoyAdvanceHost::releaseCoreMemory() {
-  if (frame_) heap_caps_free(frame_);
+  if (frames_[0]) heap_caps_free(frames_[0]);
+  if (frames_[1]) heap_caps_free(frames_[1]);
   if (stereoScratch_) heap_caps_free(stereoScratch_);
-  frame_ = nullptr;
+  if (saveSnapshot_) heap_caps_free(saveSnapshot_);
+  frames_[0] = nullptr;
+  frames_[1] = nullptr;
   stereoScratch_ = nullptr;
+  saveSnapshot_ = nullptr;
 }  // Releases every foreground-only GBA host allocation.
 
 bool GameBoyAdvanceHost::begin() {
   if (ready_) return true;
-  if (!allocateCoreMemory() || !doll_gba_core_begin(frame_)) {
+  // Reserve the low-priority save task's small internal stack before gpSP asks
+  // the executable heap for a second JIT bank.
+  renderFrame_ = 0;
+  if (!allocateCoreMemory() || !startSaveTask() || !doll_gba_core_begin(frames_[0])) {
+    stopSaveTask();
     doll_gba_core_stop();
     releaseCoreMemory();
     status_ = "GBA memory allocation failed";
@@ -76,6 +90,7 @@ bool GameBoyAdvanceHost::load(const String& romPath, const String& savePath) {
   if (!begin()) return false;
   if (!doll_gba_core_load(romPath.c_str())) {
     status_ = "GBA ROM load failed";
+    stopSaveTask();
     doll_gba_core_stop();
     releaseCoreMemory();
     ready_ = false;
@@ -90,6 +105,7 @@ bool GameBoyAdvanceHost::load(const String& romPath, const String& savePath) {
       fread(saveData, 1, DOLL_GBA_SAVE_BYTES, save);
       fclose(save);
     }
+    memcpy(saveSnapshot_, saveData, DOLL_GBA_SAVE_BYTES);
   }
 
   buttons_ = 0;
@@ -100,14 +116,188 @@ bool GameBoyAdvanceHost::load(const String& romPath, const String& savePath) {
   return true;
 }
 
-bool GameBoyAdvanceHost::writeSave() {
-  void* saveData = doll_gba_core_save_data();
-  return loaded_ && saveData && !savePath_.isEmpty() &&
-      writeExactFile(savePath_.c_str(), saveData, DOLL_GBA_SAVE_BYTES);
+bool GameBoyAdvanceHost::startSaveTask() {
+  saveBusy_ = false;
+  saveFailed_ = false;
+  saveStop_ = false;
+  saveStopped_ = false;
+  presentationBusy_ = false;
+  inputBusy_ = false;
+  presentedFrames_ = 0;
+  presentationTimeUs_ = 0;
+  inputPollTimeUs_ = 0;
+  polledButtons_ = 0;
+  inputEvents_ = 0;
+  if (xTaskCreatePinnedToCore(saveTaskEntry, "gba_save", 4096, this, 1,
+                              &saveTask_, 0) == pdPASS) {
+    return true;
+  }
+  saveTask_ = nullptr;
+  saveStopped_ = true;
+  return false;
+}
+
+void GameBoyAdvanceHost::saveTaskEntry(void* argument) {
+  auto* host = static_cast<GameBoyAdvanceHost*>(argument);
+  for (;;) {
+    uint32_t notifications = 0;
+    xTaskNotifyWait(0, UINT32_MAX, &notifications, portMAX_DELAY);
+    if ((notifications & kWorkerStop) ||
+        __atomic_load_n(&host->saveStop_, __ATOMIC_ACQUIRE)) {
+      break;
+    }
+
+    // Poll first for low input latency, then present before a rare save write.
+    // Both board operations remain serialized on core 0, while core 1 consumes
+    // only atomic button/event snapshots and never waits on the touch bus.
+    if (notifications & kWorkerInput) {
+      uint16_t buttons = 0;
+      const uint32_t startedUs = micros();
+      const uint8_t events = host->inputPoller_
+          ? host->inputPoller_(buttons) : 0;
+      __atomic_add_fetch(&host->inputPollTimeUs_, micros() - startedUs,
+                         __ATOMIC_RELAXED);
+      __atomic_store_n(&host->polledButtons_, buttons, __ATOMIC_RELEASE);
+      if (events) __atomic_fetch_or(&host->inputEvents_, events, __ATOMIC_RELEASE);
+      __atomic_store_n(&host->inputBusy_, false, __ATOMIC_RELEASE);
+    }
+
+    // Present before a rare save write so display work stays predictably ahead
+    // of the next emulated frame. The frontend never queues a second frame
+    // until presentationBusy_ clears, so both PSRAM buffers have one owner.
+    if (notifications & kWorkerPresent) {
+      const uint8_t frameIndex =
+          __atomic_load_n(&host->pendingFrame_, __ATOMIC_ACQUIRE);
+      const uint32_t startedUs = micros();
+      if (host->framePresenter_) host->framePresenter_(host->frames_[frameIndex]);
+      __atomic_add_fetch(&host->presentationTimeUs_, micros() - startedUs,
+                         __ATOMIC_RELAXED);
+      __atomic_add_fetch(&host->presentedFrames_, 1U, __ATOMIC_RELEASE);
+      __atomic_store_n(&host->presentationBusy_, false, __ATOMIC_RELEASE);
+    }
+
+    if (notifications & kWorkerSave) {
+      const bool ok = writeExactFile(host->savePath_.c_str(), host->saveSnapshot_,
+                                     DOLL_GBA_SAVE_BYTES);
+      __atomic_store_n(&host->saveFailed_, !ok, __ATOMIC_RELEASE);
+      __atomic_store_n(&host->saveBusy_, false, __ATOMIC_RELEASE);
+    }
+  }
+  __atomic_store_n(&host->saveStopped_, true, __ATOMIC_RELEASE);
+  vTaskDelete(nullptr);
+}
+
+void GameBoyAdvanceHost::waitForSaveIdle() {
+  while (__atomic_load_n(&saveBusy_, __ATOMIC_ACQUIRE)) vTaskDelay(1);
+}
+
+void GameBoyAdvanceHost::queueSaveIfDirty() {
+  if (!loaded_ || !saveTask_ || !saveSnapshot_ || savePath_.isEmpty() ||
+      __atomic_load_n(&saveBusy_, __ATOMIC_ACQUIRE)) {
+    return;
+  }
+
+  const auto* saveData = static_cast<const uint8_t*>(doll_gba_core_save_data());
+  const bool retry = __atomic_load_n(&saveFailed_, __ATOMIC_ACQUIRE);
+  if (!saveData || (!retry && memcmp(saveSnapshot_, saveData, DOLL_GBA_SAVE_BYTES) == 0)) {
+    return;
+  }
+
+  memcpy(saveSnapshot_, saveData, DOLL_GBA_SAVE_BYTES);
+  __atomic_store_n(&saveFailed_, false, __ATOMIC_RELEASE);
+  __atomic_store_n(&saveBusy_, true, __ATOMIC_RELEASE);
+  xTaskNotify(saveTask_, kWorkerSave, eSetBits);
+}
+
+void GameBoyAdvanceHost::setFramePresenter(FramePresenter presenter) {
+  waitForPresentIdle();
+  framePresenter_ = presenter;
+}
+
+void GameBoyAdvanceHost::setInputPoller(InputPoller poller) {
+  waitForPresentIdle();
+  inputPoller_ = poller;
+}
+
+bool GameBoyAdvanceHost::presentationReady() const {
+  return loaded_ && saveTask_ && framePresenter_ &&
+      !__atomic_load_n(&presentationBusy_, __ATOMIC_ACQUIRE);
+}
+
+bool GameBoyAdvanceHost::queueFrameForPresent() {
+  if (!presentationReady()) return false;
+
+  const uint8_t completedFrame = renderFrame_;
+  const uint8_t nextFrame = completedFrame ^ 1U;
+  if (!doll_gba_core_set_framebuffer(frames_[nextFrame])) return false;
+  renderFrame_ = nextFrame;
+  __atomic_store_n(&pendingFrame_, completedFrame, __ATOMIC_RELAXED);
+  __atomic_store_n(&presentationBusy_, true, __ATOMIC_RELEASE);
+  xTaskNotify(saveTask_, kWorkerPresent, eSetBits);
+  return true;
+}
+
+bool GameBoyAdvanceHost::queueInputPoll() {
+  if (!loaded_ || !saveTask_ || !inputPoller_ ||
+      __atomic_load_n(&inputBusy_, __ATOMIC_ACQUIRE)) {
+    return false;
+  }
+  __atomic_store_n(&inputBusy_, true, __ATOMIC_RELEASE);
+  xTaskNotify(saveTask_, kWorkerInput, eSetBits);
+  return true;
+}
+
+uint16_t GameBoyAdvanceHost::polledButtons() const {
+  return __atomic_load_n(&polledButtons_, __ATOMIC_ACQUIRE);
+}
+
+uint8_t GameBoyAdvanceHost::takeInputEvents() {
+  return __atomic_exchange_n(&inputEvents_, 0, __ATOMIC_ACQ_REL);
+}
+
+void GameBoyAdvanceHost::waitForPresentIdle() {
+  while (__atomic_load_n(&presentationBusy_, __ATOMIC_ACQUIRE) ||
+         __atomic_load_n(&inputBusy_, __ATOMIC_ACQUIRE)) {
+    vTaskDelay(1);
+  }
+}
+
+uint32_t GameBoyAdvanceHost::presentedFrames() const {
+  return __atomic_load_n(&presentedFrames_, __ATOMIC_ACQUIRE);
+}
+
+uint32_t GameBoyAdvanceHost::presentationTimeUs() const {
+  return __atomic_load_n(&presentationTimeUs_, __ATOMIC_ACQUIRE);
+}
+
+uint32_t GameBoyAdvanceHost::inputPollTimeUs() const {
+  return __atomic_load_n(&inputPollTimeUs_, __ATOMIC_ACQUIRE);
+}
+
+bool GameBoyAdvanceHost::writeFinalSaveIfDirty() {
+  const auto* saveData = static_cast<const uint8_t*>(doll_gba_core_save_data());
+  if (!loaded_ || !saveData || !saveSnapshot_ || savePath_.isEmpty()) return true;
+  if (!__atomic_load_n(&saveFailed_, __ATOMIC_ACQUIRE) &&
+      memcmp(saveSnapshot_, saveData, DOLL_GBA_SAVE_BYTES) == 0) {
+    return true;
+  }
+  memcpy(saveSnapshot_, saveData, DOLL_GBA_SAVE_BYTES);
+  return writeExactFile(savePath_.c_str(), saveSnapshot_, DOLL_GBA_SAVE_BYTES);
+}
+
+void GameBoyAdvanceHost::stopSaveTask() {
+  if (!saveTask_) return;
+  waitForPresentIdle();
+  waitForSaveIdle();
+  (void)writeFinalSaveIfDirty();
+  __atomic_store_n(&saveStop_, true, __ATOMIC_RELEASE);
+  xTaskNotify(saveTask_, kWorkerStop, eSetBits);
+  while (!__atomic_load_n(&saveStopped_, __ATOMIC_ACQUIRE)) vTaskDelay(1);
+  saveTask_ = nullptr;
 }
 
 void GameBoyAdvanceHost::stop() {
-  if (loaded_) writeSave();
+  stopSaveTask();
   loaded_ = false;
   doll_gba_core_stop();
   releaseCoreMemory();
@@ -153,8 +343,9 @@ void GameBoyAdvanceHost::setButtons(uint16_t buttons) {
 void GameBoyAdvanceHost::tickSave() {
   if (!loaded_ || savePath_.isEmpty()) return;
   const uint32_t now = millis();
-  if (now - lastSaveMs_ >= kSaveIntervalMs) {
-    writeSave();
+  if (now - lastSaveMs_ >= kSaveIntervalMs &&
+      !__atomic_load_n(&saveBusy_, __ATOMIC_ACQUIRE)) {
+    queueSaveIfDirty();
     lastSaveMs_ = now;
   }
 }

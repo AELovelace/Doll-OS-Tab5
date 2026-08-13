@@ -60,8 +60,8 @@ static int gbaOutH = GBA_H * 3;
 static int gbaOutX = (DISPLAY_WIDTH - GBA_W * 3) / 2;
 static int gbaOutY = (DISPLAY_HEIGHT - GBA_H * 3) / 2;
 // Core frame skip and physical panel cadence are independent. Zero renders
-// every emulated frame; the DSI panel is still capped near 15 Hz. Positive
-// values skip that many emulated render passes before producing a new frame.
+// every panel-due emulated frame; the DSI worker remains capped near 15 Hz so
+// the recovered CPU budget advances the guest instead of increasing scanout.
 static int gbaFrameSkip = 0;
 static String gbaRomVfs;
 static bool gbaStandaloneMode = false;
@@ -267,8 +267,7 @@ static void gbaClearPanel() {
     }
 }  // Clears and presents without touching unallocated shell display state.
 
-static void gbaBlitFrame() {
-    const uint16_t* source = gbaHost.frame();
+static void gbaBlitFrame(const uint16_t* source) {
     if (!source) return;
 
     // Tab5's physical DSI framebuffer is 720x1280 portrait while the UI is
@@ -356,11 +355,13 @@ static uint8_t gbaPumpTouch(uint16_t& buttons) {
     static uint16_t previousTouchButtons = 0;
     static uint8_t previousPressedCount = 0;
     const uint8_t events = (menuDown && !menuWasDown) ? GB_EVT_MENU : 0;
+#if DOLL_GBA_VERBOSE_DIAGNOSTICS
     if (next != previousTouchButtons || pressedCount != previousPressedCount) {
         Serial.printf("[gba touch] raw=%u pressed=%u first=%d,%d buttons=%03x menu=%u\n",
                       count, pressedCount, firstPressedX, firstPressedY,
                       static_cast<unsigned>(next), menuDown ? 1U : 0U);
     }
+#endif
     menuWasDown = menuDown;
     previousTouchButtons = next;
     previousPressedCount = pressedCount;
@@ -821,6 +822,8 @@ void gbaServiceMainTouch() {}
 static void gbaRunBootSession() {
     const String saveVfs = gbSiblingPath(gbaRomVfs, ".sav");
     ledPulseStorageRead(true);
+    gbaHost.setFramePresenter(gbaBlitFrame);
+    gbaHost.setInputPoller(gbaPumpTouch);
 
     if (!gbaHost.load(gbaRomVfs, saveVfs)) {
         const String status = gbaHost.status();
@@ -829,6 +832,8 @@ static void gbaRunBootSession() {
         gbaAbortBootMode(status.c_str());
         return;
     }
+    Serial.printf("[gba] pipeline=emu core%ld, DSI/touch core0, double-buffered\n",
+                  static_cast<long>(xPortGetCoreID()));
     // Let the core reserve its bounded executable/hot-memory working set first.
     // Scaling now writes directly into the already-allocated DSI framebuffer,
     // so changing display modes does not consume another RAM buffer.
@@ -847,6 +852,7 @@ static void gbaRunBootSession() {
     slaveLinkSendLine("GAME 1");
     delay(20);
     gbaClearPanel();
+    gbaHost.queueInputPoll();
 
     uint8_t legacyButtons = 0;
     uint16_t touchButtons = 0;
@@ -861,10 +867,18 @@ static void gbaRunBootSession() {
     uint64_t skipCoreTimeUs = 0;
     uint64_t audioTimeUs = 0;
     uint64_t blitTimeUs = 0;
+    uint64_t keyTimeUs = 0;
+    uint64_t touchTimeUs = 0;
+    uint64_t saveTimeUs = 0;
+    uint64_t pacingTimeUs = 0;
     uint32_t perfStartedUs = micros();
     uint32_t perfFrames = 0;
     uint32_t perfDraws = 0;
     uint32_t perfSkips = 0;
+    uint32_t presentedFramesStart = gbaHost.presentedFrames();
+    uint32_t presentationTimeStart = gbaHost.presentationTimeUs();
+    uint32_t inputPollTimeStart = gbaHost.inputPollTimeUs();
+    uint32_t touchPollFrame = 0;
     doll_gba_perf_stats_t modeStart = {};
     doll_gba_core_get_perf(&modeStart);
     int skipped = GBA_MAX_FRAME_SKIP;
@@ -874,25 +888,57 @@ static void gbaRunBootSession() {
     gbaLastSkipCoreUs = 0;
     gbaLastAudioUs = 0;
     gbaLastBlitUs = 0;
+    const auto resetPerfWindow = [&]() {
+        coreTimeUs = 0;
+        drawCoreTimeUs = 0;
+        skipCoreTimeUs = 0;
+        audioTimeUs = 0;
+        blitTimeUs = 0;
+        keyTimeUs = 0;
+        touchTimeUs = 0;
+        saveTimeUs = 0;
+        pacingTimeUs = 0;
+        perfFrames = 0;
+        perfDraws = 0;
+        perfSkips = 0;
+        presentedFramesStart = gbaHost.presentedFrames();
+        presentationTimeStart = gbaHost.presentationTimeUs();
+        inputPollTimeStart = gbaHost.inputPollTimeUs();
+        perfStartedUs = micros();
+        doll_gba_core_get_perf(&modeStart);
+    };
 
     for (;;) {
+        const uint32_t keyStartedUs = micros();
         uint8_t events = gbPumpInput(legacyButtons);
-        events |= gbaPumpTouch(touchButtons);
+        keyTimeUs += static_cast<uint32_t>(micros() - keyStartedUs);
+        // Core 0 polls the 2.2 ms touch transaction every other emulated frame.
+        // Core 1 consumes the last completed snapshot without waiting; one
+        // frame of latency is preferable to stalling guest execution here.
+        events |= gbaHost.takeInputEvents();
+        touchButtons = gbaHost.polledButtons();
+        if ((touchPollFrame++ & 1U) == 0) {
+            gbaHost.queueInputPoll();
+        }
         if (events & GB_EVT_QUIT) break;
         if (events & GB_EVT_MENU) {
+            gbaHost.waitForPresentIdle();
             if (gbaRunMenu(legacyButtons, touchButtons)) break;
             gbaClearPanel();
+            gbaHost.queueInputPoll();
             nextFrame = micros() + frameUs;
             nextBlitUs = micros();
             skipped = gbaFrameSkip < 0 ? GBA_MAX_FRAME_SKIP : gbaFrameSkip;
+            resetPerfWindow();
         }
 
         const bool late = static_cast<int32_t>(micros() - nextFrame) > 0;
         const uint32_t nowUs = micros();
         const bool panelDue = static_cast<int32_t>(nowUs - nextBlitUs) >= 0;
-        const bool draw = gbaFrameSkip < 0
+        const bool wantsDraw = gbaFrameSkip < 0
             ? (panelDue && (!late || skipped >= GBA_MAX_FRAME_SKIP))
             : (panelDue && skipped >= gbaFrameSkip);
+        const bool draw = wantsDraw && gbaHost.presentationReady();
         gbaHost.setButtons(static_cast<uint16_t>(legacyButtons) | touchButtons);
         gbaHost.runFrame(draw);
         const uint32_t coreUs = gbaHost.lastCoreTimeUs();
@@ -901,24 +947,27 @@ static void gbaRunBootSession() {
         ++perfFrames;
         if (draw) {
             drawCoreTimeUs += coreUs;
-            const uint32_t blitStartedUs = micros();
-            gbaBlitFrame();
-            blitTimeUs += static_cast<uint32_t>(micros() - blitStartedUs);
-            ++framesDrawn;
-            ++perfDraws;
-            skipped = 0;
-            nextBlitUs += GBA_PANEL_INTERVAL_US;
-            if (static_cast<int32_t>(micros() - nextBlitUs) >=
-                static_cast<int32_t>(GBA_PANEL_INTERVAL_US)) {
-                nextBlitUs = micros() + GBA_PANEL_INTERVAL_US;
+            if (gbaHost.queueFrameForPresent()) {
+                ++framesDrawn;
+                ++perfDraws;
+                skipped = 0;
+                nextBlitUs += GBA_PANEL_INTERVAL_US;
+                if (static_cast<int32_t>(micros() - nextBlitUs) >=
+                    static_cast<int32_t>(GBA_PANEL_INTERVAL_US)) {
+                    nextBlitUs = micros() + GBA_PANEL_INTERVAL_US;
+                }
+            } else {
+                ++perfSkips;
+                ++skipped;
             }
         } else {
             skipCoreTimeUs += coreUs;
             ++perfSkips;
             ++skipped;
         }
+        const uint32_t saveStartedUs = micros();
         gbaHost.tickSave();
-        ledService();
+        saveTimeUs += static_cast<uint32_t>(micros() - saveStartedUs);
         ++framesRun;
 
         // Idle reports are deliberately sparse so a copied terminal buffer can
@@ -927,16 +976,21 @@ static void gbaRunBootSession() {
             ? 10U : 300U;
         if (perfFrames >= perfTargetFrames) {
             const uint32_t elapsedUs = micros() - perfStartedUs;
+            const uint32_t completedPresentations =
+                gbaHost.presentedFrames() - presentedFramesStart;
+            blitTimeUs = gbaHost.presentationTimeUs() - presentationTimeStart;
+            touchTimeUs = gbaHost.inputPollTimeUs() - inputPollTimeStart;
             const uint32_t emuFps10 = elapsedUs
                 ? static_cast<uint32_t>(static_cast<uint64_t>(perfFrames) * 10000000ULL / elapsedUs) : 0;
             const uint32_t drawFps10 = elapsedUs
-                ? static_cast<uint32_t>(static_cast<uint64_t>(perfDraws) * 10000000ULL / elapsedUs) : 0;
+                ? static_cast<uint32_t>(static_cast<uint64_t>(completedPresentations) * 10000000ULL / elapsedUs) : 0;
             gbaLastEmuFps10 = emuFps10;
             gbaLastCoreUs = static_cast<uint32_t>(coreTimeUs / perfFrames);
             gbaLastDrawCoreUs = perfDraws ? static_cast<uint32_t>(drawCoreTimeUs / perfDraws) : 0;
             gbaLastSkipCoreUs = perfSkips ? static_cast<uint32_t>(skipCoreTimeUs / perfSkips) : 0;
             gbaLastAudioUs = static_cast<uint32_t>(audioTimeUs / perfFrames);
-            gbaLastBlitUs = perfDraws ? static_cast<uint32_t>(blitTimeUs / perfDraws) : 0;
+            gbaLastBlitUs = completedPresentations
+                ? static_cast<uint32_t>(blitTimeUs / completedPresentations) : 0;
             doll_gba_perf_stats_t coreStats = {};
             doll_gba_core_get_perf(&coreStats);
             const uint32_t armUpdates = coreStats.arm_updates - modeStart.arm_updates;
@@ -947,6 +1001,13 @@ static void gbaRunBootSession() {
             const uint32_t jitAttempts = coreStats.jit_attempts - modeStart.jit_attempts;
             const uint32_t jitCompiles = coreStats.jit_compiles - modeStart.jit_compiles;
             const uint32_t jitOps = coreStats.jit_ops - modeStart.jit_ops;
+            // Blitting runs concurrently on core 0, so it is reported but must
+            // not be subtracted from the core-1 foreground accounting.
+            const uint64_t accountedTimeUs = coreTimeUs + audioTimeUs +
+                keyTimeUs + saveTimeUs + pacingTimeUs;
+            const uint64_t otherTimeUs = elapsedUs > accountedTimeUs
+                ? static_cast<uint64_t>(elapsedUs) - accountedTimeUs : 0;
+#if DOLL_GBA_VERBOSE_DIAGNOSTICS
             Serial.printf("[gba perf] mode=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus audio=%lluus blit=%lluus arm/thumb/halt=%lu/%lu/%lu pc=%08lx cpsr=%08lx jit=%lu/%luK hit/miss/try=%lu/%lu/%lu ops=%lu build=%lu full=%lu reuse=%lu wait/reject/probe=%lu/%lu/%lu break=%02lx:%lu batch=%lu/%lu fast=%lu/%lu vram=%s rom=%lu+%lu cpu=%luMHz\n",
                           gbaScale,
                           gbaFrameSkip,
@@ -958,7 +1019,7 @@ static void gbaRunBootSession() {
                            perfDraws ? drawCoreTimeUs / perfDraws : 0,
                            perfSkips ? skipCoreTimeUs / perfSkips : 0,
                            audioTimeUs / perfFrames,
-                           perfDraws ? blitTimeUs / perfDraws : 0,
+                           completedPresentations ? blitTimeUs / completedPresentations : 0,
                            static_cast<unsigned long>(armUpdates),
                            static_cast<unsigned long>(thumbUpdates),
                            static_cast<unsigned long>(haltUpdates),
@@ -1076,28 +1137,47 @@ static void gbaRunBootSession() {
                           static_cast<unsigned long>(coreStats.sound_timer_peak_a),
                           static_cast<unsigned long>(coreStats.sound_timer_nonzero_b),
                           static_cast<unsigned long>(coreStats.sound_timer_peak_b));
-            modeStart = coreStats;
-            Serial.flush();
-            coreTimeUs = 0;
-            drawCoreTimeUs = 0;
-            skipCoreTimeUs = 0;
-            audioTimeUs = 0;
-            blitTimeUs = 0;
-            perfFrames = 0;
-            perfDraws = 0;
-            perfSkips = 0;
-            perfStartedUs = micros();
+#else
+            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu batch=%lu/%lu rom=%lu+%lu cpu=%luMHz\n",
+                          gbaScale,
+                          gbaFrameSkip,
+                          static_cast<unsigned long>(emuFps10 / 10),
+                          static_cast<unsigned long>(emuFps10 % 10),
+                          static_cast<unsigned long>(drawFps10 / 10),
+                          static_cast<unsigned long>(drawFps10 % 10),
+                          coreTimeUs / perfFrames,
+                          perfDraws ? drawCoreTimeUs / perfDraws : 0,
+                          perfSkips ? skipCoreTimeUs / perfSkips : 0,
+                          audioTimeUs / perfFrames,
+                          completedPresentations ? blitTimeUs / completedPresentations : 0,
+                          keyTimeUs / perfFrames,
+                          saveTimeUs / perfFrames,
+                          pacingTimeUs / perfFrames,
+                          otherTimeUs / perfFrames,
+                          touchTimeUs / perfFrames,
+                          static_cast<unsigned long>(coreStats.cpu_mode),
+                          static_cast<unsigned long>(coreStats.jit_used_bytes / 1024),
+                          static_cast<unsigned long>(coreStats.jit_bytes / 1024),
+                          static_cast<unsigned long>(jitHits),
+                          static_cast<unsigned long>(jitMisses),
+                          static_cast<unsigned long>(jitOps),
+                          static_cast<unsigned long>(coreStats.thumb_batch_ops - modeStart.thumb_batch_ops),
+                          static_cast<unsigned long>(coreStats.thumb_batch_runs - modeStart.thumb_batch_runs),
+                          static_cast<unsigned long>(coreStats.rom_page_loads),
+                          static_cast<unsigned long>(coreStats.rom_page_prefetches),
+                          static_cast<unsigned long>(getCpuFrequencyMhz()));
+#endif
+            resetPerfWindow();
         }
 
         nextFrame += frameUs;
         const int32_t remaining = static_cast<int32_t>(nextFrame - micros());
         if (remaining > 1000) {
+            const uint32_t pacingStartedUs = micros();
             delay(remaining / 1000);
-        } else {
-            if (remaining < -static_cast<int32_t>(GBA_MAX_FRAME_SKIP * frameUs)) {
-                nextFrame = micros() + frameUs;
-            }
-            vTaskDelay(1);
+            pacingTimeUs += static_cast<uint32_t>(micros() - pacingStartedUs);
+        } else if (remaining < -static_cast<int32_t>(GBA_MAX_FRAME_SKIP * frameUs)) {
+            nextFrame = micros() + frameUs;
         }
     }
 

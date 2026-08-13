@@ -153,11 +153,21 @@ def patch_esp32_audio_i2s() -> None:
 
 
 def verify_tab5_sdkconfig(source, target, env) -> None:
-    """Rejects display, watchdog, memory-placement, or GBA-JIT regressions."""
+    """Rejects silicon, clock, display, watchdog, memory, or GBA-JIT regressions."""
     del source, target  # SCons supplies these action arguments, but this check only needs the environment.
+    board_cpu = str(env.BoardConfig().get("build.f_cpu", "")).rstrip("Ll")
+    if board_cpu != "360000000":
+        raise RuntimeError(
+            f"Tab5 system clock regression: build.f_cpu={board_cpu!r}, expected 360000000"
+        )
+
     config_path = Path(env.subst("$BUILD_DIR")) / "config" / "sdkconfig.h"
     config = config_path.read_text(encoding="utf-8")
     required = (
+        # The physical Tab5 reports P4 revision v1.3. Keep the SDK on its v1.x
+        # clock/divider path; revision v3.x is a different 400 MHz silicon line.
+        "#define CONFIG_ESP32P4_REV_MIN_FULL 1",
+        "#define CONFIG_ESP32P4_REV_MAX_FULL 199",
         "#define CONFIG_COMPILER_OPTIMIZATION_PERF 1",
         "#define CONFIG_SPIRAM_SPEED_200M 1",
         "#define CONFIG_SPIRAM_XIP_FROM_PSRAM 1",
@@ -166,6 +176,7 @@ def verify_tab5_sdkconfig(source, target, env) -> None:
         #needs at runtime. The 128-byte line is what keeps scanout refills wide.
         "#define CONFIG_CACHE_L2_CACHE_128KB 1",
         "#define CONFIG_CACHE_L2_CACHE_LINE_128B 1",
+        # Arduino links these symbols even with runtime initialization disabled.
         "#define CONFIG_ESP_TASK_WDT_EN 1",
     )
     missing = [setting for setting in required if setting not in config]
@@ -187,7 +198,7 @@ def verify_tab5_sdkconfig(source, target, env) -> None:
     if enabled:
         raise RuntimeError(f"Unsafe Tab5 runtime configuration in {config_path}: {enabled}")
 
-    print("[pio] Verified display bandwidth, GBA executable heap, internal WiFi/Hosted memory, and inactive task watchdog")
+    print("[pio] Verified ESP32-P4 v1.x / 360 MHz CPU, display bandwidth, GBA executable heap, internal WiFi/Hosted memory, and inactive task watchdog")
 
 
 configure_windows_archiver_response_file()

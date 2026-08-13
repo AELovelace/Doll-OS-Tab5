@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifndef DOLL_GBA_VERBOSE_DIAGNOSTICS
+#define DOLL_GBA_VERBOSE_DIAGNOSTICS 0
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -112,6 +116,7 @@ typedef struct {
 } doll_gba_perf_stats_t;
 
 bool doll_gba_core_begin(uint16_t* framebuffer);
+bool doll_gba_core_set_framebuffer(uint16_t* framebuffer);
 bool doll_gba_core_load(const char* rom_path);
 void doll_gba_core_stop(void);
 void doll_gba_core_run(uint16_t buttons, bool draw);
