@@ -1,4 +1,4 @@
-#include <Arduino.h>
+#include <stdio.h>
 
 #include "doll_gba_bridge.h"
 
@@ -37,7 +37,7 @@ uint32_t hashDebugMemory(const uint8_t* data, size_t size) {
 void logTransitionStep(uint16_t buttons) {
   const uint32_t ewramHash = hashDebugMemory(ewram, GBA_EWRAM_SIZE);
   const uint32_t iwramHash = hashDebugMemory(iwram, GBA_IWRAM_SIZE);
-  Serial.printf(
+  printf(
       "[gba-step] "
       "n=%lu frame=%lu key=%03x p1=%04x pc=%08lx lr=%08lx sp=%08lx cpsr=%08lx "
       "r0=%08lx r1=%08lx r2=%08lx r3=%08lx irq=%04x/%04x/%04x "
@@ -290,7 +290,7 @@ void doll_gba_core_run(uint16_t buttons, bool draw) {
   skip_next_frame = draw ? 0 : 1;
   update_input();
   if (changedButtons) {
-    Serial.printf("[gba-input] frame=%lu key=%03x changed=%03x p1=%04x pc=%08lx lr=%08lx sp=%08lx\n",
+    printf("[gba-input] frame=%lu key=%03x changed=%03x p1=%04x pc=%08lx lr=%08lx sp=%08lx\n",
         (unsigned long)frame_counter, static_cast<unsigned>(buttons),
         static_cast<unsigned>(changedButtons),
         static_cast<unsigned>(read_ioreg(REG_P1)), (unsigned long)reg[REG_PC],
@@ -299,7 +299,7 @@ void doll_gba_core_run(uint16_t buttons, bool draw) {
   if (actionPressed) {
     transitionDebugFrames = 600;
     transitionDebugSequence = 0;
-    Serial.printf(
+    printf(
         "[gba-step] action=%03x capture armed for 600 frames; CPU mode remains %lu\n",
         static_cast<unsigned>(actionPressed),
         (unsigned long)doll_gba_core_get_cpu_mode());
@@ -312,7 +312,7 @@ void doll_gba_core_run(uint16_t buttons, bool draw) {
     if ((transitionDebugFrames % 3U) == 0U) logTransitionStep(buttons);
     --transitionDebugFrames;
     if (!transitionDebugFrames) {
-      Serial.printf("[gba-step] capture complete; CPU mode remains %lu\n",
+      printf("[gba-step] capture complete; CPU mode remains %lu\n",
           (unsigned long)doll_gba_core_get_cpu_mode());
     }
   }
