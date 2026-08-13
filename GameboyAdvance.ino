@@ -579,7 +579,8 @@ static String gbaMenuValue(int item) {
         return String(radioGetVolume()) + "/" + String(RADIO_VOLUME_MAX);
     }
     if (item == GBA_MENU_CPU_ENGINE) {
-        return "Turbo: all enhancements";
+        return doll_gba_core_get_cpu_mode() == DOLL_GBA_CPU_JIT_ISOLATED
+            ? "JIT only" : "Batch + fast";
     }
     return "";
 }
@@ -723,8 +724,13 @@ static bool gbaRunMenu(uint8_t& legacyButtons, uint16_t& touchButtons) {
                 break;
             }
             case GBA_MENU_CPU_ENGINE: {
-                doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_TURBO);
-                note = "experimental JIT + batch + fast dispatch";
+                const bool useJit =
+                    doll_gba_core_get_cpu_mode() != DOLL_GBA_CPU_JIT_ISOLATED;
+                doll_gba_core_set_cpu_mode(useJit ? DOLL_GBA_CPU_JIT_ISOLATED
+                                                   : DOLL_GBA_CPU_BATCH_FAST);
+                note = useJit
+                    ? "A/B: isolated JIT; batch + fast disabled"
+                    : "A/B: batch + fast dispatch; JIT disabled";
                 break;
             }
             case GBA_MENU_VOLUME:
@@ -1138,7 +1144,20 @@ static void gbaRunBootSession() {
                           static_cast<unsigned long>(coreStats.sound_timer_nonzero_b),
                           static_cast<unsigned long>(coreStats.sound_timer_peak_b));
 #else
-            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu batch=%lu/%lu rom=%lu+%lu cpu=%luMHz\n",
+            const uint64_t updateCycles = coreStats.host_update_cycles -
+                modeStart.host_update_cycles;
+            const uint64_t videoCycles = coreStats.host_video_cycles -
+                modeStart.host_video_cycles;
+            const uint64_t soundCycles = coreStats.host_sound_cycles -
+                modeStart.host_sound_cycles;
+            const uint64_t cyclesPerUs = getCpuFrequencyMhz();
+            const uint64_t updateUs = cyclesPerUs ? updateCycles / cyclesPerUs : 0;
+            const uint64_t videoUs = cyclesPerUs ? videoCycles / cyclesPerUs : 0;
+            const uint64_t soundUs = cyclesPerUs ? soundCycles / cyclesPerUs : 0;
+            const uint64_t avgUpdateUs = perfFrames ? updateUs / perfFrames : 0;
+            const uint64_t avgCpuUs = perfFrames && coreTimeUs > updateUs
+                ? (coreTimeUs - updateUs) / perfFrames : 0;
+            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/update/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu batch=%lu/%lu rom=%lu+%lu cpu=%luMHz\n",
                           gbaScale,
                           gbaFrameSkip,
                           static_cast<unsigned long>(emuFps10 / 10),
@@ -1148,6 +1167,10 @@ static void gbaRunBootSession() {
                           coreTimeUs / perfFrames,
                           perfDraws ? drawCoreTimeUs / perfDraws : 0,
                           perfSkips ? skipCoreTimeUs / perfSkips : 0,
+                          avgCpuUs,
+                          avgUpdateUs,
+                          perfFrames ? videoUs / perfFrames : 0,
+                          perfFrames ? soundUs / perfFrames : 0,
                           audioTimeUs / perfFrames,
                           completedPresentations ? blitTimeUs / completedPresentations : 0,
                           keyTimeUs / perfFrames,

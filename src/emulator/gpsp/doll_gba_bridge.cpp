@@ -270,9 +270,10 @@ bool doll_gba_core_load(const char* rom_path) {
   transitionDebugSequence = 0;
   transitionCaptureConsumed = false;
 #endif
-  // Experimental maximum-speed run: combine the proven batch loop, standalone
-  // fast dispatch, and the guarded JIT so their aggregate ceiling is measurable.
-  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_TURBO);
+  // The short ROM JIT blocks do not amortize their lookup/call overhead on P4.
+  // Start on the fully inline batch path; the in-game CPU menu can toggle to
+  // isolated JIT live for an identical-scene A/B comparison.
+  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_BATCH_FAST);
   gba_rom_page_loads = gba_rom_page_prefetches = 0;
   selected_boot_mode = boot_game;
   reset_gba();
@@ -364,6 +365,11 @@ void doll_gba_core_set_cpu_mode(uint32_t mode) {
   gba_interp_fast_enabled =
       mode == DOLL_GBA_CPU_FAST_ISOLATED || mode == DOLL_GBA_CPU_BATCH_FAST ||
       mode == DOLL_GBA_CPU_TURBO;
+  printf("[gba cpu] requested=%lu active=%lu jit=%lu batch=%lu fast=%lu\n",
+      (unsigned long)mode, (unsigned long)doll_gba_core_get_cpu_mode(),
+      (unsigned long)gba_thumb_jit_runtime_enabled,
+      (unsigned long)gba_thumb_batch_enabled,
+      (unsigned long)gba_interp_fast_enabled);
 }  // Selects isolated accelerators, a checked JIT, or combined turbo execution.
 
 uint32_t doll_gba_core_get_cpu_mode(void) {
@@ -511,5 +517,8 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
   stats->guest_reset_prev_pc = gba_guest_reset_prev_pc;
   stats->guest_reset_lr = gba_guest_reset_lr;
   stats->guest_reset_sp = gba_guest_reset_sp;
+  stats->host_update_cycles = gba_host_update_cycles;
+  stats->host_video_cycles = gba_host_video_cycles;
+  stats->host_sound_cycles = gba_host_sound_cycles;
 }
 }  // extern "C"

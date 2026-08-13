@@ -71,6 +71,9 @@ extern u32 gbc_update_count;
 extern u32 frame_counter;
 extern u32 cpu_ticks;
 extern u32 execute_cycles;
+extern u64 gba_host_update_cycles;
+extern u64 gba_host_video_cycles;
+extern u64 gba_host_sound_cycles;
 extern u32 skip_next_frame;
 
 extern u32 flush_ram_count;

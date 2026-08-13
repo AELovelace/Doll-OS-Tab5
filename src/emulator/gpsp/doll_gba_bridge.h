@@ -113,6 +113,9 @@ typedef struct {
   uint32_t guest_reset_prev_pc;
   uint32_t guest_reset_lr;
   uint32_t guest_reset_sp;
+  uint64_t host_update_cycles;
+  uint64_t host_video_cycles;
+  uint64_t host_sound_cycles;
 } doll_gba_perf_stats_t;
 
 bool doll_gba_core_begin(uint16_t* framebuffer);

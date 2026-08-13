@@ -19,6 +19,9 @@
 
 #include "common.h"
 #include <ctype.h>
+#ifdef RETRO_GO
+#include <esp_cpu.h>
+#endif
 
 timer_type timer[4];
 
@@ -26,6 +29,19 @@ u32 frame_counter = 0;
 u32 cpu_ticks = 0;
 u32 execute_cycles = 0;
 s32 video_count = 0;
+
+// Cumulative host-cycle accounting separates CPU dispatch from gpSP's event,
+// renderer, and mixer work without putting microsecond timer calls in the hot
+// loop. Unsigned subtraction remains valid across the 32-bit cycle wrap.
+u64 gba_host_update_cycles = 0;
+u64 gba_host_video_cycles = 0;
+u64 gba_host_sound_cycles = 0;
+
+#ifdef RETRO_GO
+#define GBA_HOST_CYCLE_COUNT() esp_cpu_get_cycle_count()
+#else
+#define GBA_HOST_CYCLE_COUNT() 0U
+#endif
 
 u32 last_frame = 0;
 u32 flush_ram_count = 0;
@@ -119,6 +135,7 @@ void init_main(void)
 
 u32 function_cc update_gba(int remaining_cycles)
 {
+  const u32 host_update_started = GBA_HOST_CYCLE_COUNT();
   u32 changed_pc = 0;
   u32 frame_complete = 0;
   irq_type irq_raised = IRQ_NONE;
@@ -168,7 +185,10 @@ u32 function_cc update_gba(int remaining_cycles)
           if(reg[OAM_UPDATED])
             oam_update_count++;
 
+          const u32 host_video_started = GBA_HOST_CYCLE_COUNT();
           update_scanline();
+          gba_host_video_cycles +=
+              (u32)(GBA_HOST_CYCLE_COUNT() - host_video_started);
 
           // Trigger the HBlank DMAs if enabled
           for (i = 0; i < 4; i++)
@@ -230,7 +250,10 @@ u32 function_cc update_gba(int remaining_cycles)
           flush_ram_count = 0;
 
           // Force audio generation. Need to flush samples for this frame.
+          const u32 host_sound_started = GBA_HOST_CYCLE_COUNT();
           render_gbc_sound();
+          gba_host_sound_cycles +=
+              (u32)(GBA_HOST_CYCLE_COUNT() - host_sound_started);
 
           // We completed a frame, tell the dynarec to exit to the main thread
           frame_complete = 0x80000000;
@@ -296,6 +319,8 @@ u32 function_cc update_gba(int remaining_cycles)
   dma_cycles = MIN(64, dma_cycles);
   dma_cycles = MIN(execute_cycles, dma_cycles);
 
+  gba_host_update_cycles +=
+      (u32)(GBA_HOST_CYCLE_COUNT() - host_update_started);
   return (execute_cycles - dma_cycles) | changed_pc | frame_complete;
 }
 
