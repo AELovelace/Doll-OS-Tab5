@@ -871,7 +871,10 @@ void drawDisplayStatusBar() {
         : gbMainTouchLauncherLeft() - DISPLAY_PADDING;
     frameSprite.drawString(statusText, statusRight, 4);
 
-    if (!dappCanvasActive) gbDrawMainTouchLauncher();
+    if (!dappCanvasActive) {
+        gbDrawMainTouchLauncher();
+        gbaDrawMainTouchLauncher();
+    }
 
     frameSprite.drawFastHLine(0, DISPLAY_STATUS_BAR_HEIGHT - 1, DISPLAY_WIDTH, TFT_PINK);
     frameSprite.setTextDatum(TL_DATUM);

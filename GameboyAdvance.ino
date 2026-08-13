@@ -764,6 +764,57 @@ static void gbaPrintUsage() {
     outLine("  Quit: Ctrl+T, or choose Quit ROM from the menu.", C_WHITE);
 }
 
+#if defined(DOLL_BOARD_TAB5)
+// Rightmost of the two status-bar launchers; the GB one (Gameboy.ino) sits to
+// its left. Same 32-pixel band and same y range, so neither steals terminal
+// space nor collides with the ROM picker's MENU control at y=30.
+static constexpr int GBA_LAUNCH_W = 64;
+static constexpr int GBA_LAUNCH_H = 25;
+static constexpr int GBA_LAUNCH_Y = 3;
+static constexpr int GBA_LAUNCH_X = DISPLAY_WIDTH - 72;
+
+void gbaDrawMainTouchLauncher() {
+    frameSprite.fillRoundRect(GBA_LAUNCH_X, GBA_LAUNCH_Y,
+                              GBA_LAUNCH_W, GBA_LAUNCH_H, 7, 0x2104);
+    frameSprite.drawRoundRect(GBA_LAUNCH_X, GBA_LAUNCH_Y,
+                              GBA_LAUNCH_W, GBA_LAUNCH_H, 7, TFT_MAGENTA);
+    frameSprite.setTextDatum(MC_DATUM);
+    frameSprite.setTextColor(TFT_WHITE);
+    frameSprite.drawString("GBA", GBA_LAUNCH_X + GBA_LAUNCH_W / 2,
+                          GBA_LAUNCH_Y + GBA_LAUNCH_H / 2);
+    frameSprite.setTextDatum(TL_DATUM);
+}
+
+void gbaServiceMainTouch() {
+    static bool launcherWasDown = false;
+    M5.update();
+
+    bool launcherDown = false;
+    if (!dappCanvasActive) {
+        const uint8_t count = M5.Touch.getCount();
+        for (uint8_t i = 0; i < count; i++) {
+            const auto& touch = M5.Touch.getDetail(i);
+            if (!touch.isPressed()) continue;
+            if (touch.x >= GBA_LAUNCH_X && touch.x < GBA_LAUNCH_X + GBA_LAUNCH_W &&
+                touch.y >= GBA_LAUNCH_Y && touch.y < GBA_LAUNCH_Y + GBA_LAUNCH_H) {
+                launcherDown = true;
+                break;
+            }
+        }
+    }
+
+    const bool launch = launcherDown && !launcherWasDown;
+    launcherWasDown = launcherDown;
+    if (launch) {
+        String command = "gba";
+        commandProcessor(command);  // same history, picker, and cleanup path as typed `gba`
+    }
+}
+#else
+void gbaDrawMainTouchLauncher() {}
+void gbaServiceMainTouch() {}
+#endif
+
 static void gbaRunBootSession() {
     const String saveVfs = gbSiblingPath(gbaRomVfs, ".sav");
     ledPulseStorageRead(true);
@@ -935,6 +986,47 @@ static void gbaRunBootSession() {
                           static_cast<unsigned long>(coreStats.jit_last_end_pc),
                           static_cast<unsigned long>(coreStats.jit_last_ret),
                           static_cast<unsigned long>(coreStats.jit_last_signature));
+            // A guest restart that never issues SWI SoftReset leaves reset=0, so
+            // these name the BIOS path it took instead and the branch that got
+            // it there. biosinit rising without vector rising means the reboot
+            // came through the BIOS init loop rather than a null-pointer branch.
+            Serial.printf("[gba reset] biosinit=%lu vector=%lu entry=%lu from=%08lx lr=%08lx sp=%08lx\n",
+                          static_cast<unsigned long>(coreStats.bios_init_loops),
+                          static_cast<unsigned long>(coreStats.guest_reset_trips),
+                          static_cast<unsigned long>(coreStats.guest_entry_trips),
+                          static_cast<unsigned long>(coreStats.guest_reset_prev_pc),
+                          static_cast<unsigned long>(coreStats.guest_reset_lr),
+                          static_cast<unsigned long>(coreStats.guest_reset_sp));
+            // on=SOUNDCNT_X master enable. avail/max are samples sitting in the
+            // core's ring; req/ret are what the host asked for versus got. Zero
+            // avail means the emulated sound engine is not filling the ring at
+            // all, which is a different bug from ret lagging req downstream.
+            // The sink side. pushed climbing while the speaker stays silent puts
+            // the fault at the codec/amp rather than anywhere in software; pushed
+            // flat means onSamples is bailing before i2s_channel_write.
+            uint32_t aoPushed = 0, aoDropped = 0, aoUnderruns = 0;
+            AudioOut::stats(aoPushed, aoDropped, aoUnderruns);
+            Serial.printf("[gba i2s] ready=%d pushed=%lu dropped=%lu underruns=%lu vol=%d\n",
+                          AudioOut::available() ? 1 : 0,
+                          static_cast<unsigned long>(aoPushed),
+                          static_cast<unsigned long>(aoDropped),
+                          static_cast<unsigned long>(aoUnderruns),
+                          radioGetVolume());
+            // nz/peak say whether the ring holds real audio or just silence:
+            // healthy req/ret with nz=0 means the mixer never wrote anything,
+            // which points at DirectSound FIFO rather than the submit path.
+            Serial.printf("[gba audio] nz=%lu peak=%lu under=%lu\n",
+                          static_cast<unsigned long>(coreStats.sound_nonzero_samples),
+                          static_cast<unsigned long>(coreStats.sound_peak_sample),
+                          static_cast<unsigned long>(coreStats.sound_underrun_samples));
+            Serial.printf("[gba audio] on=%lu calls=%lu req=%lu ret=%lu avail=%lu max=%lu drops=%lu\n",
+                          static_cast<unsigned long>(coreStats.sound_on),
+                          static_cast<unsigned long>(coreStats.sound_read_calls),
+                          static_cast<unsigned long>(coreStats.sound_samples_requested),
+                          static_cast<unsigned long>(coreStats.sound_samples_returned),
+                          static_cast<unsigned long>(coreStats.sound_last_available),
+                          static_cast<unsigned long>(coreStats.sound_max_available),
+                          static_cast<unsigned long>(coreStats.sound_drop_events));
             modeStart = coreStats;
             Serial.flush();
             coreTimeUs = 0;

@@ -106,6 +106,10 @@ u32 gba_thumb_jit_top_break_count = 0;
 u32 gba_thumb_batch_runs = 0;
 u32 gba_thumb_batch_ops = 0;
 u32 gba_thumb_batch_enabled = 0;
+// The hand-written ARM and Thumb fast paths ran unconditionally, so "Safe" was
+// never the stock interpreter. Clearing this drops both back to gpSP's own
+// decode, which is what the mode is supposed to mean when a game misbehaves.
+u32 gba_interp_fast_enabled = 1;
 u32 gba_thumb_jit_runtime_enabled = 0;
 u32 gba_thumb_jit_debug_validate = 0;
 u32 gba_thumb_jit_guard_trips = 0;
@@ -154,6 +158,15 @@ u32 gba_swi_hle_rl_count = 0;
 u32 gba_swi_hle_diff_count = 0;
 u32 gba_bios_init_loop_hle_count = 0;
 u32 gba_bios_reset_path_hle_count = 0;
+// A guest that restarts without issuing SWI SoftReset got to the BIOS reset
+// vector by branching to a null or corrupt address. These record the first such
+// entry so the offending call site can be read straight off the serial log.
+u32 gba_guest_reset_trips = 0;
+u32 gba_guest_entry_trips = 0;
+u32 gba_guest_reset_prev_pc = 0;
+u32 gba_guest_reset_lr = 0;
+u32 gba_guest_reset_sp = 0;
+u32 gba_guest_reset_cpsr = 0;
 
 #if GBA_THUMB_PROFILE
 static inline void gba_arm_profile_exact_opcode(u32 pc, u32 opcode)
@@ -1952,14 +1965,43 @@ static __attribute__((noinline, cold)) bool gba_p4_thumb_jit_validate_and_commit
     return gba_p4_thumb_jit_record_fail(entry, 4, 0, 0x4A495450U, jit_flags.pre);
   if(jit_flags.post != 0x4A49544FU)
     return gba_p4_thumb_jit_record_fail(entry, 5, 0, 0x4A49544FU, jit_flags.post);
-  if((executed & GBA_P4_THUMB_JIT_RET_OPS_MASK) != entry->op_count)
-    return gba_p4_thumb_jit_record_fail(entry, 6, 0, entry->op_count,
-        executed & GBA_P4_THUMB_JIT_RET_OPS_MASK);
-  if(((executed >> GBA_P4_THUMB_JIT_RET_EXTRA_SHIFT) &
-        GBA_P4_THUMB_JIT_RET_EXTRA_MASK) != entry->extra_cycles)
+
+  u32 executed_ops = executed & GBA_P4_THUMB_JIT_RET_OPS_MASK;
+  u32 executed_extra = (executed >> GBA_P4_THUMB_JIT_RET_EXTRA_SHIFT) &
+      GBA_P4_THUMB_JIT_RET_EXTRA_MASK;
+
+  if(executed_ops != entry->op_count)
+  {
+    // Returning early is the emitter's designed escape, not a model mismatch: a
+    // WRAM access whose address turns out to sit outside EWRAM/IWRAM branches to
+    // the bail stub, which parks PC on the offending instruction and reports the
+    // ops retired so far. `gba_p4_thumb_jit_execute_committed` has always
+    // accepted that. Treating it as a fault here disabled both accelerators on
+    // the first pointer that left WRAM -- and since JIT_DEBUG forces this path
+    // for every execution, trusted blocks never reached the tolerant one.
+    if(!entry->can_bail || executed_ops >= entry->op_count)
+      return gba_p4_thumb_jit_record_fail(entry, 6, 0, entry->op_count,
+          executed_ops);
+    if(executed_extra)
+      return gba_p4_thumb_jit_record_fail(entry, 7, 0, 0, executed_extra);
+
+    // The reference pass above modelled the whole block, so it has run past the
+    // bail point. Rebuild it over just the retired instructions so the register
+    // and flag comparison below comes from a matching amount of work.
+    memcpy(sim_regs, reg, sizeof(sim_regs));
+    sim_flags[0] = n_flag;
+    sim_flags[1] = z_flag;
+    sim_flags[2] = c_flag;
+    sim_flags[3] = v_flag;
+    for(u32 i = 0; i < executed_ops; i++)
+    {
+      if(!gba_p4_thumb_jit_simulate_one(entry->opcodes[i], sim_regs, sim_flags))
+        return gba_p4_thumb_jit_record_fail(entry, 1, i, 0, 0);
+    }
+  }
+  else if(executed_extra != entry->extra_cycles)
     return gba_p4_thumb_jit_record_fail(entry, 7, 0, entry->extra_cycles,
-        (executed >> GBA_P4_THUMB_JIT_RET_EXTRA_SHIFT) &
-        GBA_P4_THUMB_JIT_RET_EXTRA_MASK);
+        executed_extra);
 
   for(u32 i = 0; i < REG_ARCH_COUNT; i++)
   {
@@ -5239,8 +5281,10 @@ static inline void gba_hle_cpuset(cpu_alert_type &cpu_alert, bool fast)
   bool word = fast || ((mode & (1u << 26)) != 0);
   u32 count = mode & 0x001FFFFF;
 
-  if(fast)
-    count <<= 3; // CpuFastSet count is in 32-byte blocks.
+  // CpuFastSet's r2 bits 0-20 are a word count that callers are required to keep
+  // a multiple of eight -- the eight-word block is the BIOS's internal unrolling,
+  // not the unit of the field. Scaling by eight here overran every destination by
+  // 8x and quietly shredded whatever followed it in memory.
 
   if(word)
   {
@@ -5364,7 +5408,14 @@ static inline void gba_hle_lz77_uncomp(cpu_alert_type &cpu_alert, bool vram_dest
 
           while(length-- > 0 && len > 0)
           {
-            write_value |= ((u32)gba_hle_read8_fast(window++)) << byte_shift;
+            // VRAM only takes 16-bit writes, so one output byte can still be
+            // sitting in `write_value` rather than in memory. A match reaching
+            // back that far would otherwise read stale memory through `dst`.
+            u8 match = (window >= dst) ?
+                (u8)(write_value >> ((window - dst) * 8)) :
+                gba_hle_read8_fast(window);
+            window++;
+            write_value |= ((u32)match) << byte_shift;
             byte_shift += 8;
             byte_count++;
 
@@ -8238,6 +8289,11 @@ void execute_arm(u32 cycles)
   cpu_alert_type cpu_alert;
   u32 arm_fast_attempted;
 
+  // Hoisted out of the decode loops: the engine mode only changes between
+  // frames, but as a global the compiler had to reload it after every call that
+  // could write memory -- once per interpreted instruction on the hot path.
+  const u32 interp_fast = gba_interp_fast_enabled;
+
   gba_execute_calls++;
   gba_execute_last_cycles = cycles;
   gba_execute_last_pc = reg[REG_PC];
@@ -8286,6 +8342,48 @@ arm_loop:
        if (reg[REG_PC] == cheat_master_hook)
           process_cheats();
 
+       // Reaching the BIOS reset vector restarts the game. A legitimate restart
+       // arrives through SWI SoftReset, and legitimate BIOS entries land on the
+       // SWI (0x08) or IRQ (0x18) vectors, so anything down here came from a
+       // branch to a null or corrupt target. The vector is ARM code, so a BX or
+       // POP {pc} to zero lands in this loop; capture the caller once. LR is the
+       // primary clue when the derail came from a BL through a bad pointer.
+       if(reg[REG_PC] < 0x08)
+       {
+          gba_guest_reset_trips++;
+          if(gba_guest_reset_trips == 1)
+          {
+             gba_guest_reset_prev_pc = gba_execute_last_pc;
+             gba_guest_reset_lr = reg[REG_LR];
+             gba_guest_reset_sp = reg[REG_SP];
+             gba_guest_reset_cpsr = reg[REG_CPSR];
+             ESP_LOGE("gba-reset",
+                 "guest hit BIOS reset vector pc=%08lx lr=%08lx sp=%08lx cpsr=%08lx lastpc=%08lx",
+                 (unsigned long)reg[REG_PC], (unsigned long)reg[REG_LR],
+                 (unsigned long)reg[REG_SP], (unsigned long)reg[REG_CPSR],
+                 (unsigned long)gba_execute_last_pc);
+          }
+       }
+
+       // A guest can also restart by branching straight at the ROM header rather
+       // than through the BIOS. Booting legitimately uses the first entry, so
+       // report from the second onwards.
+       if(reg[REG_PC] == 0x08000000)
+       {
+          gba_guest_entry_trips++;
+          if(gba_guest_entry_trips == 2)
+          {
+             gba_guest_reset_prev_pc = gba_execute_last_pc;
+             gba_guest_reset_lr = reg[REG_LR];
+             gba_guest_reset_sp = reg[REG_SP];
+             gba_guest_reset_cpsr = reg[REG_CPSR];
+             ESP_LOGE("gba-reset",
+                 "guest re-entered ROM header lr=%08lx sp=%08lx cpsr=%08lx lastpc=%08lx",
+                 (unsigned long)reg[REG_LR], (unsigned long)reg[REG_SP],
+                 (unsigned long)reg[REG_CPSR], (unsigned long)gba_execute_last_pc);
+          }
+       }
+
        if((reg[REG_PC] >= 0x0000186C) && (reg[REG_PC] <= 0x00001874) &&
           (reg[3] == 0x04000000) && ((s32)reg[1] < 0) &&
           (reg[1] >= 0xFFFFFE00))
@@ -8328,7 +8426,7 @@ arm_loop:
        condition = opcode >> 28;
        arm_fast_attempted = 0;
 
-       if(opcode == 0xCAFFFFF0) /* BGT pc - 56 */
+       if(interp_fast && opcode == 0xCAFFFFF0) /* BGT pc - 56 */
        {
           if(z_flag | (n_flag != v_flag))
           {
@@ -8342,7 +8440,8 @@ arm_loop:
           goto skip_instruction;
        }
 
-       if(condition == 0xE && gba_arm_hot_fast_can_start(opcode))
+       if(interp_fast && condition == 0xE &&
+          gba_arm_hot_fast_can_start(opcode))
        {
           arm_fast_attempted = 1;
           if(gba_arm_execute_hot_fast(opcode, n_flag, z_flag, c_flag, v_flag,
@@ -10048,7 +10147,7 @@ thumb_loop:
        interp_trace_instruction(reg[REG_PC], 0);
        #endif
 
-       if(!fast_dispatch_already_missed)
+       if(interp_fast && !fast_dispatch_already_missed)
        {
           int fast_result = gba_thumb_execute_fast_dispatch(opcode, n_flag, z_flag,
              c_flag, v_flag, cpu_alert, cycles_remaining);

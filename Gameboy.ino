@@ -84,10 +84,12 @@ static const char* kGbRomDir = "/sd/gb";
 // Compact shell launcher. It lives entirely in the 32-pixel status bar, so it
 // never steals terminal space. Its y range deliberately ends before the ROM
 // picker's top-right MENU control begins at y=30.
-static constexpr int GB_LAUNCH_X = DISPLAY_WIDTH - 72;
-static constexpr int GB_LAUNCH_Y = 3;
+// The GBA launcher (GameboyAdvance.ino) takes the rightmost slot, so this one
+// sits one button-plus-gap to its left. Keep the two in step if either moves.
 static constexpr int GB_LAUNCH_W = 64;
 static constexpr int GB_LAUNCH_H = 25;
+static constexpr int GB_LAUNCH_Y = 3;
+static constexpr int GB_LAUNCH_X = DISPLAY_WIDTH - 72 - GB_LAUNCH_W - 4;
 
 int gbMainTouchLauncherLeft() {
     return GB_LAUNCH_X;

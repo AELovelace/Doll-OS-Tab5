@@ -94,6 +94,7 @@ extern u32 gba_thumb_jit_top_break_count;
 extern u32 gba_thumb_batch_runs;
 extern u32 gba_thumb_batch_ops;
 extern u32 gba_thumb_batch_enabled;
+extern u32 gba_interp_fast_enabled;
 extern u32 gba_thumb_jit_runtime_enabled;
 extern u32 gba_thumb_jit_debug_validate;
 extern u32 gba_thumb_jit_guard_trips;
@@ -110,6 +111,12 @@ extern u32 gba_execute_thumb_updates;
 extern u32 gba_execute_halt_updates;
 extern u32 gba_execute_last_pc;
 extern u32 gba_execute_last_cpsr;
+extern u32 gba_bios_init_loop_hle_count;
+extern u32 gba_guest_reset_trips;
+extern u32 gba_guest_entry_trips;
+extern u32 gba_guest_reset_prev_pc;
+extern u32 gba_guest_reset_lr;
+extern u32 gba_guest_reset_sp;
 void set_fastforward_override(bool) {}
 // Doll-OS does not expose gpSP's libretro RFU transport yet. Serial mode is
 // disabled at load time; these no-op callbacks satisfy the dormant RFU path.
@@ -193,7 +200,7 @@ bool doll_gba_core_load(const char* rom_path) {
   }
   gba_p4_thumb_jit_reset();
   gba_p4_thumb_jit_reset_stats();
-  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_JIT_DEBUG);
+  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_BATCH);
   gba_rom_page_loads = gba_rom_page_prefetches = 0;
   selected_boot_mode = boot_game;
   reset_gba();
@@ -234,6 +241,9 @@ void doll_gba_core_set_cpu_mode(uint32_t mode) {
   gba_thumb_batch_enabled = mode == DOLL_GBA_CPU_BATCH || mode == DOLL_GBA_CPU_TURBO;
   gba_thumb_jit_runtime_enabled = mode == DOLL_GBA_CPU_JIT_DEBUG || mode == DOLL_GBA_CPU_TURBO;
   gba_thumb_jit_debug_validate = mode == DOLL_GBA_CPU_JIT_DEBUG;
+  // Safe now also drops the hand-written ARM/Thumb fast decode, so it is the
+  // stock gpSP interpreter and nothing else. Every other mode keeps it.
+  gba_interp_fast_enabled = mode != DOLL_GBA_CPU_SAFE;
 }  // Selects isolated accelerators, a checked JIT, or combined turbo execution.
 
 uint32_t doll_gba_core_get_cpu_mode(void) {
@@ -302,5 +312,21 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
   stats->halt_updates = gba_execute_halt_updates;
   stats->last_pc = gba_execute_last_pc;
   stats->last_cpsr = gba_execute_last_cpsr;
+  stats->bios_init_loops = gba_bios_init_loop_hle_count;
+  stats->guest_reset_trips = gba_guest_reset_trips;
+  stats->guest_entry_trips = gba_guest_entry_trips;
+  stats->sound_on = sound_on;
+  stats->sound_read_calls = sound_read_calls;
+  stats->sound_samples_requested = sound_samples_requested;
+  stats->sound_samples_returned = sound_samples_returned;
+  stats->sound_last_available = sound_last_samples_available;
+  stats->sound_max_available = sound_max_samples_available;
+  stats->sound_drop_events = sound_drop_events;
+  stats->sound_nonzero_samples = sound_nonzero_samples;
+  stats->sound_peak_sample = sound_peak_sample;
+  stats->sound_underrun_samples = sound_underrun_samples;
+  stats->guest_reset_prev_pc = gba_guest_reset_prev_pc;
+  stats->guest_reset_lr = gba_guest_reset_lr;
+  stats->guest_reset_sp = gba_guest_reset_sp;
 }
 }  // extern "C"

@@ -353,6 +353,9 @@ void drawDisplayFrame();
 int gbMainTouchLauncherLeft();
 void gbDrawMainTouchLauncher();
 void gbServiceMainTouch();
+void gbaDrawMainTouchLauncher();
+void gbaServiceMainTouch();
+void audioCodecForceReinit();
 int readBatteryPercent();
 int wifiIsConnected();
 

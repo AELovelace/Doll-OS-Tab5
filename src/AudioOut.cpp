@@ -10,6 +10,7 @@
 // dragging in duplicate definitions.
 bool audioCodecEnsure(uint16_t mclkMultiple);
 void audioCodecSetOutputEnabled(bool enabled);
+void audioCodecForceReinit();
 int radioGetVolume();
 
 namespace {
@@ -48,7 +49,13 @@ uint32_t underrunCount = 0;
 }  // namespace
 
 bool AudioOut::begin() {
-  if (ready) return true;
+  if (ready) {
+    // A teardown that set discard but never reached end() leaves it latched,
+    // and this early return used to skip the reset below -- so the channel
+    // stayed open and every sample was silently dropped.
+    discard = false;
+    return true;
+  }
 
   Serial.printf("[gb audio] begin rate=%lu mclk=%lu volume=%d\n",
                 static_cast<unsigned long>(kSampleRate),
@@ -107,6 +114,9 @@ bool AudioOut::begin() {
     return false;
   }
   enabled = true;
+  // Clocks are live now, so reprogram the codec from scratch rather than trust
+  // a latch set before whatever left the board silent.
+  audioCodecForceReinit();
   if (!audioCodecEnsure(128)) {
     Serial.println("[gb audio] ES8388 setup failed");
     end();

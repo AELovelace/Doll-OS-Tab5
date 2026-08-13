@@ -176,6 +176,7 @@ void loop() {
     readTelnetClient();
     readKeyboardSerial();   //official Tab5 Keyboard events normalized into terminal bytes
     gbServiceMainTouch();   //status-bar GB launcher; opens the same picker as the `gb` command
+    gbaServiceMainTouch();  //status-bar GBA launcher, to its right; same deal for `gba`
     ftpService();           //drives the FTP server one non-blocking step when active (FtpServer.ino)
     radioService();         //prints whatever the radio task/callbacks stashed (Radio.ino)
     maintainInternetConnection();

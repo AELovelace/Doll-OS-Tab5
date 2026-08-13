@@ -175,10 +175,29 @@ static bool audioCodecSetAmp(bool enabled) {
         Serial.println("[audio] I2C bus busy, speaker amp left unchanged");
         return false;
     }
-    bool ok = enabled
+    // Driving the output byte alone is not enough to make a pin drive. The
+    // PI4IO5V6408 gates every output behind two more registers: 0x03 selects
+    // input vs output and 0x07 forces high-impedance. Anything that reset the
+    // expander -- it is independently powered and survives esp_restart, same as
+    // the panel -- leaves the amp pin floating, and writing 0x05 then looks like
+    // it worked while nothing reaches the speaker. Assert all three on enable.
+    bool ok = true;
+    if (enabled) {
+        ok = M5.In_I2C.bitOn(TAB5_PI4IO1_ADDRESS, 0x03, 0b00000010, AUDIO_I2C_SPEED) && ok;
+        ok = M5.In_I2C.bitOff(TAB5_PI4IO1_ADDRESS, 0x07, 0b00000010, AUDIO_I2C_SPEED) && ok;
+    }
+    ok = (enabled
         ? M5.In_I2C.bitOn(TAB5_PI4IO1_ADDRESS, 0x05, 0b00000010, AUDIO_I2C_SPEED)
-        : M5.In_I2C.bitOff(TAB5_PI4IO1_ADDRESS, 0x05, 0b00000010, AUDIO_I2C_SPEED);
+        : M5.In_I2C.bitOff(TAB5_PI4IO1_ADDRESS, 0x05, 0b00000010, AUDIO_I2C_SPEED)) && ok;
+
+    const uint8_t dir = M5.In_I2C.readRegister8(TAB5_PI4IO1_ADDRESS, 0x03, AUDIO_I2C_SPEED);
+    const uint8_t out = M5.In_I2C.readRegister8(TAB5_PI4IO1_ADDRESS, 0x05, AUDIO_I2C_SPEED);
+    const uint8_t hiz = M5.In_I2C.readRegister8(TAB5_PI4IO1_ADDRESS, 0x07, AUDIO_I2C_SPEED);
     boardI2cUnlock();
+
+    Serial.printf("[audio] amp %s dir=0x%02X out=0x%02X hiz=0x%02X -> pin %s\n",
+                  enabled ? "on" : "off", dir, out, hiz,
+                  ((dir & 0x02) && (out & 0x02) && !(hiz & 0x02)) ? "driving" : "NOT driving");
     if (!ok) {
         Serial.println("[audio] Tab5 speaker amplifier control failed");
     }
@@ -194,9 +213,20 @@ void audioCodecSetOutputEnabled(bool enabled) {
 //board-native 128x MCLK, keeping the high-frequency clock out of the speaker's analog
 //noise floor. Caller already has MCLK running because the ES8388 operates as an I2S
 //slave. Not static: AudioOut.cpp reuses it.
+// File scope so audioCodecForceReinit() can clear them. The ES8388 is on the
+// shared internal bus and is not reset by an esp_restart, so a latch that only
+// ever programs it once cannot recover a codec that lost its configuration.
+static bool audioCodecRegsReady = false;
+static uint16_t audioCodecConfiguredMclk = 0;
+
+void audioCodecForceReinit() {
+    audioCodecRegsReady = false;
+    audioCodecConfiguredMclk = 0;
+}  // Next audioCodecEnsure() rewrites every register, soft reset included.
+
 bool audioCodecEnsure(uint16_t mclkMultiple) {
-    static bool codecRegsReady = false;
-    static uint16_t configuredMclkMultiple = 0;
+    bool& codecRegsReady = audioCodecRegsReady;
+    uint16_t& configuredMclkMultiple = audioCodecConfiguredMclk;
     static constexpr AudioCodecRegister initRegisters[] = {
         {0, 0x80}, {0, 0x00}, {0, 0x00}, {0, 0x0E},
         {1, 0x00}, {2, 0x0A}, {3, 0xFF}, {4, 0x3C},

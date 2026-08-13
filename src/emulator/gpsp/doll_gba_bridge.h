@@ -60,6 +60,22 @@ typedef struct {
   uint32_t halt_updates;
   uint32_t last_pc;
   uint32_t last_cpsr;
+  uint32_t bios_init_loops;
+  uint32_t guest_reset_trips;
+  uint32_t guest_entry_trips;
+  uint32_t sound_on;
+  uint32_t sound_read_calls;
+  uint32_t sound_samples_requested;
+  uint32_t sound_samples_returned;
+  uint32_t sound_last_available;
+  uint32_t sound_max_available;
+  uint32_t sound_drop_events;
+  uint32_t sound_nonzero_samples;
+  uint32_t sound_peak_sample;
+  uint32_t sound_underrun_samples;
+  uint32_t guest_reset_prev_pc;
+  uint32_t guest_reset_lr;
+  uint32_t guest_reset_sp;
 } doll_gba_perf_stats_t;
 
 bool doll_gba_core_begin(uint16_t* framebuffer);
