@@ -41,11 +41,13 @@ Build policy:
 - The in-game CPU engine selector separates `Safe`, `Batch`, `JIT trace`, and
   `Turbo`. `JIT trace` enables the JIT without batching and continuously compares
   every generated result with the C safety model, even after a block has warmed.
-  `Turbo` is the default and combines batching with trusted validated blocks.
+  `JIT trace` is temporarily the default diagnostic mode and continuously checks
+  generated blocks across the failing title-to-game transition. `Turbo` remains
+  selectable and combines batching with trusted validated blocks.
   JIT WRAM loads remain enabled, while WRAM stores stay in the interpreter until
   validation has a memory rollback buffer; otherwise a rejected test block can
   mutate live game state before its generated result is accepted.
-- A 16-entry JIT flight recorder captures each compiled block's start/end PC,
+- A 128-entry JIT flight recorder captures each compiled block's start/end PC,
   SP, LR, return word, and first/last opcode signature. A model mismatch disables
   JIT and falls back to Batch; SoftReset or a bad fetch disables both accelerators.
   Every fault emits `[gba-jit] guard` plus ordered `[gba-jit] trace` lines to serial.

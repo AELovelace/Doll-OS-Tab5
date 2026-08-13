@@ -78,6 +78,10 @@ typedef struct {
   uint32_t sound_cnt_x;
   uint32_t sound_gbc_active;
   uint32_t sound_direct_status;
+  uint32_t sound_gbc_volume;
+  uint32_t sound_direct_fifo;
+  uint32_t sound_timer_state;
+  uint32_t sound_dma_state;
   uint32_t sound_fifo_empty_reads;
   uint32_t sound_fifo_short_reads;
   uint32_t guest_reset_prev_pc;

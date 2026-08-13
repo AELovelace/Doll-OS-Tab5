@@ -10,8 +10,52 @@ extern "C" {
 
 #include "open_gba_bios.h"
 
+extern "C" {
+extern u32 gba_thumb_jit_last_pc;
+extern u32 gba_thumb_jit_last_end_pc;
+extern u32 gba_thumb_jit_last_ret;
+extern u32 gba_thumb_jit_last_signature;
+extern timer_type timer[4];
+}
+
 namespace {
 uint16_t currentButtons = 0;
+uint16_t previousDebugButtons = 0;
+uint32_t transitionDebugFrames = 0;
+uint32_t transitionDebugSequence = 0;
+
+uint32_t hashDebugMemory(const uint8_t* data, size_t size) {
+  uint32_t hash = 2166136261U;
+  for (size_t offset = 0; offset < size; ++offset) {
+    hash = (hash ^ data[offset]) * 16777619U;
+  }
+  return hash;
+}  // Fingerprints all working RAM so a game-state rewind is visible in serial.
+
+void logTransitionStep(uint16_t buttons) {
+  const uint32_t ewramHash = hashDebugMemory(ewram, GBA_EWRAM_SIZE);
+  const uint32_t iwramHash = hashDebugMemory(iwram, GBA_IWRAM_SIZE);
+  ESP_LOGI("gba-step",
+      "n=%lu frame=%lu key=%03x p1=%04x pc=%08lx lr=%08lx sp=%08lx cpsr=%08lx "
+      "r0=%08lx r1=%08lx r2=%08lx r3=%08lx irq=%04x/%04x/%04x "
+      "disp=%04x vc=%u mem=%08lx/%08lx jit=%08lx->%08lx:%08lx:%08lx",
+      (unsigned long)transitionDebugSequence++, (unsigned long)frame_counter,
+      static_cast<unsigned>(buttons), static_cast<unsigned>(read_ioreg(REG_P1)),
+      (unsigned long)reg[REG_PC],
+      (unsigned long)reg[REG_LR], (unsigned long)reg[REG_SP],
+      (unsigned long)reg[REG_CPSR], (unsigned long)reg[0],
+      (unsigned long)reg[1], (unsigned long)reg[2], (unsigned long)reg[3],
+      static_cast<unsigned>(read_ioreg(REG_IE)),
+      static_cast<unsigned>(read_ioreg(REG_IF)),
+      static_cast<unsigned>(read_ioreg(REG_IME)),
+      static_cast<unsigned>(read_ioreg(REG_DISPCNT)),
+      static_cast<unsigned>(read_ioreg(REG_VCOUNT)),
+      (unsigned long)ewramHash, (unsigned long)iwramHash,
+      (unsigned long)gba_thumb_jit_last_pc,
+      (unsigned long)gba_thumb_jit_last_end_pc,
+      (unsigned long)gba_thumb_jit_last_ret,
+      (unsigned long)gba_thumb_jit_last_signature);
+}  // Captures CPU, IRQ, video, memory, and JIT state every third post-A frame.
 
 void* allocRegion(size_t size, bool preferInternal) {
   uint32_t preferred = MALLOC_CAP_8BIT |
@@ -188,6 +232,9 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
   init_sound();
   memcpy(bios_rom, open_gba_bios_rom, GBA_BIOS_ROM_SIZE);
   currentButtons = 0;
+  previousDebugButtons = 0;
+  transitionDebugFrames = 0;
+  transitionDebugSequence = 0;
   return true;
 }
 
@@ -200,10 +247,13 @@ bool doll_gba_core_load(const char* rom_path) {
   }
   gba_p4_thumb_jit_reset();
   gba_p4_thumb_jit_reset_stats();
-  // The transition-corruption bugs were in BIOS CpuFastSet/LZ77 HLE rather than
-  // the validated JIT. Start with both proven accelerators so gameplay retains
-  // the measured near-2x uplift; Safe and Batch remain available in the menu.
-  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_TURBO);
+  previousDebugButtons = 0;
+  transitionDebugFrames = 0;
+  transitionDebugSequence = 0;
+  // This diagnostic build continuously validates every generated block. It is
+  // intentionally slower than Turbo so the title-to-game divergence cannot hide
+  // inside a previously trusted block; the menu still exposes every CPU mode.
+  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_JIT_DEBUG);
   gba_rom_page_loads = gba_rom_page_prefetches = 0;
   selected_boot_mode = boot_game;
   reset_gba();
@@ -231,12 +281,31 @@ void doll_gba_core_stop(void) {
 
 void doll_gba_core_run(uint16_t buttons, bool draw) {
   if (!gbsp_memory) return;
+  const uint16_t changedButtons = buttons ^ previousDebugButtons;
+  const bool aPressed = (changedButtons & 0x010U) && (buttons & 0x010U);
   currentButtons = buttons;
   skip_next_frame = draw ? 0 : 1;
   update_input();
+  if (changedButtons) {
+    ESP_LOGI("gba-input", "frame=%lu key=%03x changed=%03x p1=%04x pc=%08lx lr=%08lx sp=%08lx",
+        (unsigned long)frame_counter, static_cast<unsigned>(buttons),
+        static_cast<unsigned>(changedButtons),
+        static_cast<unsigned>(read_ioreg(REG_P1)), (unsigned long)reg[REG_PC],
+        (unsigned long)reg[REG_LR], (unsigned long)reg[REG_SP]);
+  }
+  if (aPressed) {
+    transitionDebugFrames = 600;
+    transitionDebugSequence = 0;
+    ESP_LOGW("gba-step", "A capture armed for 600 frames with continuous JIT validation");
+  }
+  previousDebugButtons = buttons;
   rumble_frame_reset();
   clear_gamepak_stickybits();
   execute_arm(execute_cycles);
+  if (transitionDebugFrames) {
+    if ((transitionDebugFrames % 3U) == 0U) logTransitionStep(buttons);
+    --transitionDebugFrames;
+  }
 }
 
 void doll_gba_core_set_cpu_mode(uint32_t mode) {
@@ -337,6 +406,20 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
       (gbc_sound_channel[3].active_flag ? 8U : 0U);
   stats->sound_direct_status = (direct_sound_channel[0].status & 3U) |
       ((direct_sound_channel[1].status & 3U) << 2U);
+  stats->sound_gbc_volume = (gbc_sound_master_volume_right & 7U) |
+      ((gbc_sound_master_volume_left & 7U) << 4U) |
+      ((gbc_sound_master_volume & 3U) << 8U);
+  stats->sound_direct_fifo =
+      ((direct_sound_channel[0].fifo_top - direct_sound_channel[0].fifo_base) & 31U) |
+      (((direct_sound_channel[1].fifo_top - direct_sound_channel[1].fifo_base) & 31U) << 8U);
+  stats->sound_timer_state = (timer[0].status & 3U) |
+      ((timer[0].direct_sound_channels & 3U) << 4U) |
+      ((timer[1].status & 3U) << 8U) |
+      ((timer[1].direct_sound_channels & 3U) << 12U);
+  stats->sound_dma_state = (dma[1].start_type & 7U) |
+      ((dma[1].direct_sound_channel & 3U) << 4U) |
+      ((dma[2].start_type & 7U) << 8U) |
+      ((dma[2].direct_sound_channel & 3U) << 12U);
   stats->sound_fifo_empty_reads = sound_fifo_empty_reads;
   stats->sound_fifo_short_reads = sound_fifo_short_reads;
   stats->guest_reset_prev_pc = gba_guest_reset_prev_pc;

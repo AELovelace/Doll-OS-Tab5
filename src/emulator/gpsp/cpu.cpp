@@ -446,7 +446,7 @@ typedef struct
   gba_p4_thumb_jit_fn fn;
 } gba_p4_thumb_jit_entry_t;
 
-#define GBA_P4_THUMB_JIT_TRACE_COUNT 16
+#define GBA_P4_THUMB_JIT_TRACE_COUNT 128
 typedef struct
 {
   u32 pc;

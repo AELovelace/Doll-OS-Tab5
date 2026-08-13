@@ -918,7 +918,7 @@ static void gbaRunBootSession() {
         ledService();
         ++framesRun;
 
-        if (perfFrames >= 120) {
+        if (perfFrames >= 30) {
             const uint32_t elapsedUs = micros() - perfStartedUs;
             const uint32_t emuFps10 = elapsedUs
                 ? static_cast<uint32_t>(static_cast<uint64_t>(perfFrames) * 10000000ULL / elapsedUs) : 0;
@@ -1029,12 +1029,17 @@ static void gbaRunBootSession() {
                           static_cast<unsigned long>(coreStats.sound_drop_events));
             // Register and channel state separates a muted GBA mixer from an
             // enabled DirectSound channel whose DMA FIFO is starving.
-            Serial.printf("[gba mixer] cnt=%04lx/%04lx/%04lx gbc=%lx ds=%lx fifo=%lu/%lu\n",
+            Serial.printf("[gba mixer] cnt=%04lx/%04lx/%04lx gbc=%lx ds=%lx vol=%03lx depth=%02lx/%02lx timer=%04lx dma=%04lx fifo=%lu/%lu\n",
                           static_cast<unsigned long>(coreStats.sound_cnt_l),
                           static_cast<unsigned long>(coreStats.sound_cnt_h),
                           static_cast<unsigned long>(coreStats.sound_cnt_x),
                           static_cast<unsigned long>(coreStats.sound_gbc_active),
                           static_cast<unsigned long>(coreStats.sound_direct_status),
+                          static_cast<unsigned long>(coreStats.sound_gbc_volume),
+                          static_cast<unsigned long>(coreStats.sound_direct_fifo & 0xFFU),
+                          static_cast<unsigned long>((coreStats.sound_direct_fifo >> 8U) & 0xFFU),
+                          static_cast<unsigned long>(coreStats.sound_timer_state),
+                          static_cast<unsigned long>(coreStats.sound_dma_state),
                           static_cast<unsigned long>(coreStats.sound_fifo_empty_reads),
                           static_cast<unsigned long>(coreStats.sound_fifo_short_reads));
             modeStart = coreStats;
