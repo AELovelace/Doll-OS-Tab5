@@ -71,8 +71,8 @@ Runtime lifecycle:
   crashing ROM or peripheral failure from creating a reboot loop.
 - Quit flushes the battery save, shuts down gpSP/audio, clears the ticket, and
   restarts into Doll-OS. GBA ROM launches are intentionally SD-only in this mode.
-- Touch contact changes print raw coordinates and their mapped button mask. An A
-  or Start edge arms a 600-frame transition trace without changing CPU engine,
+- Touch contact changes print raw coordinates and their mapped button mask. The
+  first A or Start edge arms one 600-frame trace without changing CPU engine,
   so the input-dependent path is tested under the selected accelerator. Idle performance logs use a
   300-frame window; capture windows use ten frames so terminal copies retain the
   useful transition instead of filling with repeated intro telemetry.

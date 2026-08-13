@@ -196,9 +196,10 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    branch may invoke SoftReset, replay the intro, freeze, or corrupt the save.
    A touchscreen edge must first produce `[gba touch]` with `buttons=010`, then
    `[gba-input]`, and finally `[gba-step] action=010`. A contact with `pressed=1`
-   and `buttons=000` missed the hitbox. A or Start arms a 600-frame capture but
-   must leave CPU mode at 2 throughout, so the exact title transition exercises
-   the isolated JIT rather than silently dropping into Safe.
+   and `buttons=000` missed the hitbox. The first A or Start edge arms one
+   600-frame capture but must leave CPU mode at 2 throughout; later dialogue
+   presses do not extend or re-arm it. This exercises the exact title transition
+   under isolated JIT and then returns to representative performance logging.
    If it does, preserve the first `[gba-jit] guard` line and all following
    `[gba-jit] trace` lines before relaunching. Reason `53575253` is SoftReset,
    `42414441` is a bad ARM fetch, `42414454` is a bad Thumb fetch, and a

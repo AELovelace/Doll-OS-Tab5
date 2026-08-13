@@ -25,6 +25,7 @@ uint16_t currentButtons = 0;
 uint16_t previousDebugButtons = 0;
 uint32_t transitionDebugFrames = 0;
 uint32_t transitionDebugSequence = 0;
+bool transitionCaptureConsumed = false;
 
 uint32_t hashDebugMemory(const uint8_t* data, size_t size) {
   uint32_t hash = 2166136261U;
@@ -238,6 +239,7 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
   previousDebugButtons = 0;
   transitionDebugFrames = 0;
   transitionDebugSequence = 0;
+  transitionCaptureConsumed = false;
   return true;
 }
 
@@ -253,6 +255,7 @@ bool doll_gba_core_load(const char* rom_path) {
   previousDebugButtons = 0;
   transitionDebugFrames = 0;
   transitionDebugSequence = 0;
+  transitionCaptureConsumed = false;
   // Run the JIT without the batch engine or hand-written fast interpreter. Each
   // ROM block is checked eight times against stock gpSP before becoming trusted,
   // isolating useful code generation from the path that corrupted the title.
@@ -296,7 +299,8 @@ void doll_gba_core_run(uint16_t buttons, bool draw) {
         static_cast<unsigned>(read_ioreg(REG_P1)), (unsigned long)reg[REG_PC],
         (unsigned long)reg[REG_LR], (unsigned long)reg[REG_SP]);
   }
-  if (actionPressed) {
+  if (actionPressed && !transitionCaptureConsumed) {
+    transitionCaptureConsumed = true;
     transitionDebugFrames = 600;
     transitionDebugSequence = 0;
     printf(
