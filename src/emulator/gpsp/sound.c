@@ -62,6 +62,10 @@ static s16 sound_buffer[BUFFER_SIZE];
 #endif
 u32 sound_buffer_base;
 u32 sound_timer_calls[2];
+u32 sound_fifo_queue_words[2];
+u32 sound_fifo_queue_nonzero_bytes[2];
+u32 sound_timer_nonzero_samples[2];
+u32 sound_timer_peak_samples[2];
 u32 sound_read_calls;
 u32 sound_samples_requested;
 u32 sound_samples_returned;
@@ -101,6 +105,13 @@ void sound_timer_queue32(u32 channel, u32 value)
 {
   direct_sound_struct *ds = &direct_sound_channel[channel];
 
+  sound_fifo_queue_words[channel]++;
+  for(u32 shift = 0; shift < 32; shift += 8)
+  {
+    if(((value >> shift) & 0xFF) != 0)
+      sound_fifo_queue_nonzero_bytes[channel]++;
+  }
+
   ds->fifo[ds->fifo_top++] = value & 0xFF;
   ds->fifo_top &= 31;
 
@@ -132,6 +143,13 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
   s16 current_sample, next_sample;
 
   current_sample = ((s8)ds->fifo[ds->fifo_base]) * 16;
+  if(current_sample != 0)
+  {
+    u32 magnitude = current_sample < 0 ? (u32)(-current_sample) : (u32)current_sample;
+    sound_timer_nonzero_samples[channel]++;
+    if(magnitude > sound_timer_peak_samples[channel])
+      sound_timer_peak_samples[channel] = magnitude;
+  }
   ds->fifo_base = (ds->fifo_base + 1) % 32;
   next_sample = ((s8)ds->fifo[ds->fifo_base]) * 16;
 
@@ -632,6 +650,10 @@ void reset_sound(void)
   sound_on = 0;
   sound_buffer_base = 0;
   sound_timer_calls[0] = sound_timer_calls[1] = 0;
+  sound_fifo_queue_words[0] = sound_fifo_queue_words[1] = 0;
+  sound_fifo_queue_nonzero_bytes[0] = sound_fifo_queue_nonzero_bytes[1] = 0;
+  sound_timer_nonzero_samples[0] = sound_timer_nonzero_samples[1] = 0;
+  sound_timer_peak_samples[0] = sound_timer_peak_samples[1] = 0;
   sound_read_calls = 0;
   sound_samples_requested = 0;
   sound_samples_returned = 0;

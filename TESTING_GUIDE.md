@@ -174,12 +174,15 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    must likewise show `V:L2`; a PSRAM marker fails the hot-memory placement test.
    Record the JIT capacity selected after those allocations—192, 160, 128, 96,
    or a smaller safe fallback—alongside every benchmark result.
-3. Confirm the CPU engine initially reads `Turbo` and `[gba jitdbg]` reports
-   engine 3. Every new block is validated before trust, and a mismatch must
+3. Confirm the CPU engine initially reads `Safe (locked)` and `[gba jitdbg]`
+   reports engine 0. All accelerated modes currently share a fast Thumb path that
+   reproduces title-state corruption, so the in-game selector must refuse to
+   enable them. In a dedicated diagnostic build, every new JIT block is validated
+   before trust, and a mismatch must
    quarantine only that block while engine 3 continues. Run a
    Thumb-heavy game for at least five minutes, then open the Escape menu twice
    and confirm emulated FPS, core time, and JIT hit/miss counts continue moving.
-   In each 120-frame report, `jit=used/capacity`, `ops`, `build`, `full`, `reuse`,
+   In each idle 300-frame report, `jit=used/capacity`, `ops`, `build`, `full`, `reuse`,
    and `wait/reject/probe` must remain internally consistent; gameplay must not
    freeze when `full` changes to one or adaptive `reuse` begins advancing. The
    paired `[gba jitdbg]` line must retain engine 3 with zero resets and bad PCs.
@@ -191,23 +194,27 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
 5. At the Pokémon title screen, wait at least ten seconds before pressing A,
    then enter and leave the in-game Start menu repeatedly. No input-dependent
    branch may invoke SoftReset, replay the intro, freeze, or corrupt the save.
+   A touchscreen edge must first produce `[gba touch]` with `buttons=010`, then
+   `[gba-input]`, and finally `[gba-step] action=010`. A contact with `pressed=1`
+   and `buttons=000` missed the hitbox. A or Start temporarily selects the stock
+   Safe interpreter for the 600-frame capture and restores the prior engine at
+   completion, isolating the transition without slowing the entire intro.
    If it does, preserve the first `[gba-jit] guard` line and all following
    `[gba-jit] trace` lines before relaunching. Reason `53575253` is SoftReset,
    `42414441` is a bad ARM fetch, `42414454` is a bad Thumb fetch, and a
    `4A0000xx` reason is a generated-state or straight-line-PC mismatch.
-   A `4A0000xx` mismatch must fall back to engine 1 (Batch), continue advancing,
-   and leave the title/game state intact. SoftReset and bad-fetch guards may fall
+   A `4A0000xx` mismatch must reject only that generated block, continue with
+   engine 3, and leave the title/game state intact. SoftReset and bad-fetch guards may fall
    back to engine 0 because they indicate a wider CPU-state failure.
-6. From the Escape menu, test `Safe`, `Batch`, and `Turbo` separately over the
-   same title-to-game transition. Safe isolates the exact interpreter, Batch
-   isolates the batching loop, and Turbo combines batching with trusted JIT.
-   Record the engine number from `[gba jitdbg]` with each result.
+6. From the Escape menu, activate `CPU engine` and confirm it remains
+   `Safe (locked)` with an accelerator-quarantine note. Test Batch and JIT only
+   in purpose-built diagnostic firmware until their shared fast path is fixed.
 7. Confirm `[gb audio] ready, primed 1280 frames`, an `ES8388 readback ... OK`
    line, and an amp report ending in `pin driving`. During three performance
    windows, `[gba i2s]` pushed frames must keep advancing without drops and
    `[gba audio]` must report nonzero samples. If it stays zero, preserve the paired
-   `[gba mixer]` line so SOUNDCNT, active channels, and FIFO starvation can be
-   distinguished. Listen for continuous, correctly pitched sound through
+   `[gba mixer]` and `[gba mixflow]` lines so SOUNDCNT, cumulative nonzero FIFO
+   writes, and timer consumption can be distinguished. Listen for continuous, correctly pitched sound through
    drawn-frame bursts and after opening/resuming the menu.
 8. Choose Quit ROM. Confirm the battery save is written, the device reboots once,
    and the ordinary Doll-OS shell returns with display history, WiFi, and telnet

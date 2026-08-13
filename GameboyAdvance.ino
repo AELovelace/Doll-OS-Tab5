@@ -312,6 +312,9 @@ static uint8_t gbaPumpTouch(uint16_t& buttons) {
     M5.update();
     uint16_t next = 0;
     bool menuDown = false;
+    uint8_t pressedCount = 0;
+    int firstPressedX = -1;
+    int firstPressedY = -1;
 
     const uint8_t count = M5.Touch.getCount();
     for (uint8_t i = 0; i < count; ++i) {
@@ -319,6 +322,11 @@ static uint8_t gbaPumpTouch(uint16_t& buttons) {
         if (!touch.isPressed()) continue;
         const int x = touch.x;
         const int y = touch.y;
+        if (!pressedCount) {
+            firstPressedX = x;
+            firstPressedY = y;
+        }
+        ++pressedCount;
 
         if (x >= 18 && x < 142 && y >= 38 && y < 102) {
             next |= GameBoyAdvanceHost::kL;
@@ -345,11 +353,20 @@ static uint8_t gbaPumpTouch(uint16_t& buttons) {
     }
 
     static bool menuWasDown = false;
+    static uint16_t previousTouchButtons = 0;
+    static uint8_t previousPressedCount = 0;
     const uint8_t events = (menuDown && !menuWasDown) ? GB_EVT_MENU : 0;
+    if (next != previousTouchButtons || pressedCount != previousPressedCount) {
+        Serial.printf("[gba touch] raw=%u pressed=%u first=%d,%d buttons=%03x menu=%u\n",
+                      count, pressedCount, firstPressedX, firstPressedY,
+                      static_cast<unsigned>(next), menuDown ? 1U : 0U);
+    }
     menuWasDown = menuDown;
+    previousTouchButtons = next;
+    previousPressedCount = pressedCount;
     buttons = next;
     return events;
-}
+}  // Maps contacts and reports edges even when a contact misses every hitbox.
 
 static bool gbaIsRomPath(String path) {
     path.toLowerCase();
@@ -561,11 +578,7 @@ static String gbaMenuValue(int item) {
         return String(radioGetVolume()) + "/" + String(RADIO_VOLUME_MAX);
     }
     if (item == GBA_MENU_CPU_ENGINE) {
-        const uint32_t mode = doll_gba_core_get_cpu_mode();
-        if (mode == DOLL_GBA_CPU_BATCH) return "Batch";
-        if (mode == DOLL_GBA_CPU_JIT_DEBUG) return "JIT trace";
-        if (mode == DOLL_GBA_CPU_TURBO) return "Turbo";
-        return "Safe";
+        return "Safe (locked)";
     }
     return "";
 }
@@ -709,18 +722,8 @@ static bool gbaRunMenu(uint8_t& legacyButtons, uint16_t& touchButtons) {
                 break;
             }
             case GBA_MENU_CPU_ENGINE: {
-                uint32_t mode = doll_gba_core_get_cpu_mode();
-                if (left) mode = mode == DOLL_GBA_CPU_SAFE
-                    ? DOLL_GBA_CPU_TURBO : mode - 1;
-                else mode = (mode + 1) % DOLL_GBA_CPU_MODE_COUNT;
-                doll_gba_core_set_cpu_mode(mode);
-                note = mode == DOLL_GBA_CPU_SAFE
-                    ? "exact single-step interpreter"
-                    : (mode == DOLL_GBA_CPU_BATCH
-                        ? "batched interpreter; JIT disabled"
-                        : (mode == DOLL_GBA_CPU_JIT_DEBUG
-                            ? "JIT only; every compiled block is checked"
-                            : "batched interpreter plus trusted JIT"));
+                doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_SAFE);
+                note = "accelerators quarantined: title-state corruption";
                 break;
             }
             case GBA_MENU_VOLUME:
@@ -918,7 +921,11 @@ static void gbaRunBootSession() {
         ledService();
         ++framesRun;
 
-        if (perfFrames >= 30) {
+        // Idle reports are deliberately sparse so a copied terminal buffer can
+        // reach the title screen. A/Start capture raises them to six per second.
+        const uint32_t perfTargetFrames = doll_gba_core_debug_capture_active()
+            ? 10U : 300U;
+        if (perfFrames >= perfTargetFrames) {
             const uint32_t elapsedUs = micros() - perfStartedUs;
             const uint32_t emuFps10 = elapsedUs
                 ? static_cast<uint32_t>(static_cast<uint64_t>(perfFrames) * 10000000ULL / elapsedUs) : 0;
@@ -1055,6 +1062,18 @@ static void gbaRunBootSession() {
                           static_cast<unsigned long>(coreStats.sound_fifo_peak_a),
                           static_cast<unsigned long>(coreStats.sound_fifo_nonzero_b),
                           static_cast<unsigned long>(coreStats.sound_fifo_peak_b));
+            // Cumulative flow counters cannot alias to one recurring ring phase:
+            // `queued` proves DMA supplied bytes, while `played` proves timer
+            // consumption encountered actual PCM rather than zero-filled data.
+            Serial.printf("[gba mixflow] queued=%lu:%lu/%lu:%lu played=%lu:%lu/%lu:%lu\n",
+                          static_cast<unsigned long>(coreStats.sound_fifo_words_a),
+                          static_cast<unsigned long>(coreStats.sound_fifo_nonzero_bytes_a),
+                          static_cast<unsigned long>(coreStats.sound_fifo_words_b),
+                          static_cast<unsigned long>(coreStats.sound_fifo_nonzero_bytes_b),
+                          static_cast<unsigned long>(coreStats.sound_timer_nonzero_a),
+                          static_cast<unsigned long>(coreStats.sound_timer_peak_a),
+                          static_cast<unsigned long>(coreStats.sound_timer_nonzero_b),
+                          static_cast<unsigned long>(coreStats.sound_timer_peak_b));
             modeStart = coreStats;
             Serial.flush();
             coreTimeUs = 0;

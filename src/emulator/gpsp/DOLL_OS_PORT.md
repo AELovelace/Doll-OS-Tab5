@@ -41,13 +41,16 @@ Build policy:
 - The in-game CPU engine selector separates `Safe`, `Batch`, `JIT trace`, and
   `Turbo`. `JIT trace` enables the JIT without batching and continuously compares
   every generated result with the C safety model, even after a block has warmed.
-  `Turbo` is again the default and combines batching with trusted validated
-  blocks. `JIT trace` continuously checks every execution when deeper diagnosis
+  `Safe` is temporarily the default and the runtime selector is locked because
+  every accelerated mode shares the hand-written Thumb dispatch implicated in
+  title-state corruption. Batch/JIT remain compiled for dedicated diagnostics,
+  but cannot be enabled accidentally during a playable session. `JIT trace`
+  continuously checks every execution when deeper diagnosis
   is needed. A failed validation quarantines only that ROM block, allowing safe
   interpreter fallback there without discarding acceleration everywhere else.
-  JIT WRAM loads remain enabled, while WRAM stores stay in the interpreter until
-  validation has a memory rollback buffer; otherwise a rejected test block can
-  mutate live game state before its generated result is accepted.
+  WRAM loads and stores stay in the interpreter while the title-transition
+  investigation is active. This keeps generated validation side-effect free and
+  removes mutable RAM reads as a source of trusted-block divergence.
 - A 128-entry JIT flight recorder captures each compiled block's start/end PC,
   SP, LR, return word, and first/last opcode signature. A model mismatch disables
   JIT for that block and falls back locally; SoftReset or a bad fetch disables
@@ -72,6 +75,14 @@ Runtime lifecycle:
   crashing ROM or peripheral failure from creating a reboot loop.
 - Quit flushes the battery save, shuts down gpSP/audio, clears the ticket, and
   restarts into Doll-OS. GBA ROM launches are intentionally SD-only in this mode.
+- Touch contact changes print raw coordinates and their mapped button mask. An A
+  or Start edge arms a 600-frame transition trace in the stock Safe interpreter,
+  after which the previous CPU engine is restored. Idle performance logs use a
+  300-frame window; capture windows use ten frames so terminal copies retain the
+  useful transition instead of filling with repeated intro telemetry.
+- Direct Sound diagnostics include cumulative nonzero FIFO bytes and nonzero
+  timer-consumed samples. These counters avoid the recurring-buffer-phase alias
+  that made instantaneous FIFO snapshots appear permanently empty.
 - Before either reboot, Doll-OS sleeps the ST7123, disables its backlight, and
   holds PI4IO1 LCD/touch reset low. The expander and panel remain powered while
   the P4 resets, so this fence prevents an abrupt DSI stop from latching the

@@ -23,6 +23,7 @@ uint16_t currentButtons = 0;
 uint16_t previousDebugButtons = 0;
 uint32_t transitionDebugFrames = 0;
 uint32_t transitionDebugSequence = 0;
+uint32_t transitionRestoreMode = DOLL_GBA_CPU_SAFE;
 
 uint32_t hashDebugMemory(const uint8_t* data, size_t size) {
   uint32_t hash = 2166136261U;
@@ -235,6 +236,7 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
   previousDebugButtons = 0;
   transitionDebugFrames = 0;
   transitionDebugSequence = 0;
+  transitionRestoreMode = DOLL_GBA_CPU_SAFE;
   return true;
 }
 
@@ -250,10 +252,11 @@ bool doll_gba_core_load(const char* rom_path) {
   previousDebugButtons = 0;
   transitionDebugFrames = 0;
   transitionDebugSequence = 0;
-  // Turbo validates every new block before trust and now quarantines only a bad
-  // block. Start accelerated while retaining the A-triggered transition capture;
-  // JIT trace remains in the menu for continuous validation when needed.
-  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_TURBO);
+  transitionRestoreMode = DOLL_GBA_CPU_SAFE;
+  // Every accelerated menu mode shares the hand-written Thumb dispatch, and all
+  // have reproduced title-state corruption. Start with the exact gpSP interpreter
+  // from frame zero so an earlier fast-path error cannot survive into the title.
+  doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_SAFE);
   gba_rom_page_loads = gba_rom_page_prefetches = 0;
   selected_boot_mode = boot_game;
   reset_gba();
@@ -282,7 +285,7 @@ void doll_gba_core_stop(void) {
 void doll_gba_core_run(uint16_t buttons, bool draw) {
   if (!gbsp_memory) return;
   const uint16_t changedButtons = buttons ^ previousDebugButtons;
-  const bool aPressed = (changedButtons & 0x010U) && (buttons & 0x010U);
+  const uint16_t actionPressed = changedButtons & buttons & 0x090U;
   currentButtons = buttons;
   skip_next_frame = draw ? 0 : 1;
   update_input();
@@ -293,10 +296,17 @@ void doll_gba_core_run(uint16_t buttons, bool draw) {
         static_cast<unsigned>(read_ioreg(REG_P1)), (unsigned long)reg[REG_PC],
         (unsigned long)reg[REG_LR], (unsigned long)reg[REG_SP]);
   }
-  if (aPressed) {
+  if (actionPressed) {
+    if (!transitionDebugFrames) {
+      transitionRestoreMode = doll_gba_core_get_cpu_mode();
+      doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_SAFE);
+    }
     transitionDebugFrames = 600;
     transitionDebugSequence = 0;
-    ESP_LOGW("gba-step", "A capture armed for 600 frames with continuous JIT validation");
+    ESP_LOGW("gba-step",
+        "action=%03x capture armed for 600 frames in Safe mode; restore=%lu",
+        static_cast<unsigned>(actionPressed),
+        (unsigned long)transitionRestoreMode);
   }
   previousDebugButtons = buttons;
   rumble_frame_reset();
@@ -305,8 +315,17 @@ void doll_gba_core_run(uint16_t buttons, bool draw) {
   if (transitionDebugFrames) {
     if ((transitionDebugFrames % 3U) == 0U) logTransitionStep(buttons);
     --transitionDebugFrames;
+    if (!transitionDebugFrames) {
+      doll_gba_core_set_cpu_mode(transitionRestoreMode);
+      ESP_LOGW("gba-step", "capture complete; restored CPU mode=%lu",
+          (unsigned long)transitionRestoreMode);
+    }
   }
 }
+
+bool doll_gba_core_debug_capture_active(void) {
+  return transitionDebugFrames != 0;
+}  // Lets the frontend increase serial detail only around an A/Start transition.
 
 void doll_gba_core_set_cpu_mode(uint32_t mode) {
   if (mode >= DOLL_GBA_CPU_MODE_COUNT) mode = DOLL_GBA_CPU_SAFE;
@@ -446,6 +465,14 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
       if (magnitude > peak) peak = magnitude;
     }
   }
+  stats->sound_fifo_words_a = sound_fifo_queue_words[0];
+  stats->sound_fifo_words_b = sound_fifo_queue_words[1];
+  stats->sound_fifo_nonzero_bytes_a = sound_fifo_queue_nonzero_bytes[0];
+  stats->sound_fifo_nonzero_bytes_b = sound_fifo_queue_nonzero_bytes[1];
+  stats->sound_timer_nonzero_a = sound_timer_nonzero_samples[0];
+  stats->sound_timer_nonzero_b = sound_timer_nonzero_samples[1];
+  stats->sound_timer_peak_a = sound_timer_peak_samples[0];
+  stats->sound_timer_peak_b = sound_timer_peak_samples[1];
   stats->sound_fifo_empty_reads = sound_fifo_empty_reads;
   stats->sound_fifo_short_reads = sound_fifo_short_reads;
   stats->guest_reset_prev_pc = gba_guest_reset_prev_pc;
