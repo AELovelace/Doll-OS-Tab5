@@ -1,6 +1,8 @@
 #include "doll_gba_bridge.h"
 
 #include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_memory_utils.h"
 
 extern "C" {
 #include "common.h"
@@ -47,6 +49,10 @@ void releaseCoreMemory() {
   if (gbsp_memory->p_ewram) heap_caps_free(gbsp_memory->p_ewram);
   if (gbsp_memory->p_bios_rom) heap_caps_free(gbsp_memory->p_bios_rom);
   if (gbsp_memory->p_gamepak_backup) heap_caps_free(gbsp_memory->p_gamepak_backup);
+  if (gbsp_memory->p_palette_ram) heap_caps_free(gbsp_memory->p_palette_ram);
+  if (gbsp_memory->p_oam_ram) heap_caps_free(gbsp_memory->p_oam_ram);
+  if (gbsp_memory->p_palette_ram_converted) heap_caps_free(gbsp_memory->p_palette_ram_converted);
+  if (gbsp_memory->p_io_registers) heap_caps_free(gbsp_memory->p_io_registers);
   heap_caps_free(gbsp_memory);
   gbsp_memory = nullptr;
 }
@@ -66,12 +72,21 @@ void execute_arm(u32 cycles);
 void gba_p4_thumb_jit_preinit(void);
 void gba_p4_thumb_jit_reset(void);
 void gba_p4_thumb_jit_shutdown(void);
+bool gba_video_scratch_init(void);
+void gba_video_scratch_term(void);
 extern u32 gba_thumb_jit_bytes;
 extern u32 gba_thumb_jit_hits;
 extern u32 gba_thumb_jit_misses;
 extern u32 gba_thumb_jit_compiles;
+extern u32 gba_thumb_jit_attempts;
+extern u32 gba_thumb_jit_disabled;
 extern u32 gba_rom_page_loads;
 extern u32 gba_rom_page_prefetches;
+extern u32 gba_execute_arm_updates;
+extern u32 gba_execute_thumb_updates;
+extern u32 gba_execute_halt_updates;
+extern u32 gba_execute_last_pc;
+extern u32 gba_execute_last_cpsr;
 void set_fastforward_override(bool) {}
 // Doll-OS does not expose gpSP's libretro RFU transport yet. Serial mode is
 // disabled at load time; these no-op callbacks satisfy the dormant RFU path.
@@ -84,24 +99,55 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
       heap_caps_calloc(1, sizeof(*gbsp_memory), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   if (!gbsp_memory) return false;
 
-  // Reserve the bounded executable arena before ordinary core buffers consume
-  // the P4's shared L2 SRAM. Large data buffers can safely fall back to PSRAM;
-  // generated code cannot.
-  gba_p4_thumb_jit_preinit();
-
-  gbsp_memory->p_iwram = static_cast<u8*>(allocRegion(GBA_IWRAM_SIZE, true));
-  gbsp_memory->p_memory_map_read = static_cast<u8**>(allocRegion(GBA_MEMORY_MAP_READ_SIZE, true));
-  gbsp_memory->p_vram = static_cast<u8*>(allocRegion(GBA_VRAM_SIZE, true));
-  gbsp_memory->p_ewram = static_cast<u8*>(allocRegion(GBA_EWRAM_SIZE, false));
-  gbsp_memory->p_bios_rom = static_cast<u8*>(allocRegion(GBA_BIOS_ROM_SIZE, true));
-  gbsp_memory->p_gamepak_backup = static_cast<u8*>(allocRegion(GBA_GAMEPAK_BACKUP_SIZE, false));
-  if (!gbsp_memory->p_iwram || !gbsp_memory->p_memory_map_read ||
-      !gbsp_memory->p_vram || !gbsp_memory->p_ewram ||
-      !gbsp_memory->p_bios_rom || !gbsp_memory->p_gamepak_backup) {
-    gba_p4_thumb_jit_shutdown();
+  // None of gpSP's large scratch tables belong to the OS boot footprint.
+  // Materialize them in PSRAM only when the foreground GBA app starts.
+  if (!gba_memory_scratch_init() || !gba_sound_scratch_init() ||
+      !gba_video_scratch_init()) {
+    gba_video_scratch_term();
+    gba_sound_scratch_term();
+    gba_memory_scratch_term();
     releaseCoreMemory();
     return false;
   }
+
+  // Keep the CPU's working RAM and small register tables in L2. Emerald spends
+  // nearly all of its active updates in Thumb mode, so reserve one bounded JIT
+  // bank before the much larger VRAM allocation gets a chance to consume the
+  // remaining executable-capable memory. All of this remains lazy: none of it
+  // affects the OS heap until the foreground GBA command starts.
+  gbsp_memory->p_iwram = static_cast<u8*>(allocRegion(GBA_IWRAM_SIZE, true));
+  gbsp_memory->p_palette_ram = static_cast<u16*>(allocRegion(512 * sizeof(u16), true));
+  gbsp_memory->p_oam_ram = static_cast<u16*>(allocRegion(512 * sizeof(u16), true));
+  gbsp_memory->p_palette_ram_converted = static_cast<u16*>(allocRegion(512 * sizeof(u16), true));
+  gbsp_memory->p_io_registers = static_cast<u16*>(allocRegion(512 * sizeof(u16), true));
+
+  gba_p4_thumb_jit_preinit();
+  gbsp_memory->p_vram = static_cast<u8*>(allocRegion(GBA_VRAM_SIZE, true));
+
+  // The page map changes only on 32 KB boundaries; the large EWRAM and ROM
+  // backing stores are the right residents for PSRAM.
+  gbsp_memory->p_memory_map_read = static_cast<u8**>(allocRegion(GBA_MEMORY_MAP_READ_SIZE, false));
+  gbsp_memory->p_ewram = static_cast<u8*>(allocRegion(GBA_EWRAM_SIZE, false));
+  gbsp_memory->p_bios_rom = static_cast<u8*>(allocRegion(GBA_BIOS_ROM_SIZE, false));
+  gbsp_memory->p_gamepak_backup = static_cast<u8*>(allocRegion(GBA_GAMEPAK_BACKUP_SIZE, false));
+  if (!gbsp_memory->p_iwram || !gbsp_memory->p_memory_map_read ||
+      !gbsp_memory->p_vram || !gbsp_memory->p_ewram ||
+      !gbsp_memory->p_bios_rom || !gbsp_memory->p_gamepak_backup ||
+      !gbsp_memory->p_palette_ram || !gbsp_memory->p_oam_ram ||
+      !gbsp_memory->p_palette_ram_converted || !gbsp_memory->p_io_registers) {
+    gba_p4_thumb_jit_shutdown();
+    gba_video_scratch_term();
+    gba_sound_scratch_term();
+    gba_memory_scratch_term();
+    releaseCoreMemory();
+    return false;
+  }
+
+  ESP_LOGI("gba", "memory IWRAM=%s VRAM=%s IO=%s JIT=%luK",
+           esp_ptr_internal(gbsp_memory->p_iwram) ? "L2" : "PSRAM",
+           esp_ptr_internal(gbsp_memory->p_vram) ? "L2" : "PSRAM",
+           esp_ptr_internal(gbsp_memory->p_io_registers) ? "L2" : "PSRAM",
+           static_cast<unsigned long>(gba_thumb_jit_bytes / 1024));
 
   gba_screen_pixels = framebuffer;
   libretro_supports_bitmasks = true;
@@ -132,10 +178,16 @@ bool doll_gba_core_load(const char* rom_path) {
 void doll_gba_core_stop(void) {
   if (!gbsp_memory) {
     gba_p4_thumb_jit_shutdown();
+    gba_video_scratch_term();
+    gba_sound_scratch_term();
+    gba_memory_scratch_term();
     return;
   }
   currentButtons = 0;
   memory_term();
+  gba_video_scratch_term();
+  gba_sound_scratch_term();
+  gba_memory_scratch_term();
   releaseCoreMemory();
   gba_p4_thumb_jit_shutdown();
   gba_screen_pixels = nullptr;
@@ -180,7 +232,14 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
   stats->jit_hits = gba_thumb_jit_hits;
   stats->jit_misses = gba_thumb_jit_misses;
   stats->jit_compiles = gba_thumb_jit_compiles;
+  stats->jit_attempts = gba_thumb_jit_attempts;
+  stats->jit_disabled = gba_thumb_jit_disabled;
   stats->rom_page_loads = gba_rom_page_loads;
   stats->rom_page_prefetches = gba_rom_page_prefetches;
+  stats->arm_updates = gba_execute_arm_updates;
+  stats->thumb_updates = gba_execute_thumb_updates;
+  stats->halt_updates = gba_execute_halt_updates;
+  stats->last_pc = gba_execute_last_pc;
+  stats->last_cpsr = gba_execute_last_cpsr;
 }
 }  // extern "C"

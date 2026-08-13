@@ -22,8 +22,15 @@ typedef struct {
   uint32_t jit_hits;
   uint32_t jit_misses;
   uint32_t jit_compiles;
+  uint32_t jit_attempts;
+  uint32_t jit_disabled;
   uint32_t rom_page_loads;
   uint32_t rom_page_prefetches;
+  uint32_t arm_updates;
+  uint32_t thumb_updates;
+  uint32_t halt_updates;
+  uint32_t last_pc;
+  uint32_t last_cpsr;
 } doll_gba_perf_stats_t;
 
 bool doll_gba_core_begin(uint16_t* framebuffer);

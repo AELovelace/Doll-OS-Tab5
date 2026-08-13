@@ -252,6 +252,10 @@ void init_memory(void);
 void init_gamepak_buffer(void);
 bool gamepak_must_swap(void);
 void memory_term(void);
+#ifdef RETRO_GO
+bool gba_memory_scratch_init(void);
+void gba_memory_scratch_term(void);
+#endif
 u8 *load_gamepak_page(u32 physical_index);
 
 extern u32 oam_update;
@@ -346,6 +350,10 @@ typedef struct
   u8 *p_iwram;
   u8 **p_memory_map_read;
   u8 *p_gamepak_backup;
+  u16 *p_palette_ram;
+  u16 *p_oam_ram;
+  u16 *p_palette_ram_converted;
+  u16 *p_io_registers;
 } gbsp_memory_t;
 
 extern gbsp_memory_t *gbsp_memory;
@@ -355,6 +363,10 @@ extern gbsp_memory_t *gbsp_memory;
 #define iwram gbsp_memory->p_iwram
 #define memory_map_read gbsp_memory->p_memory_map_read
 #define gamepak_backup gbsp_memory->p_gamepak_backup
+#define palette_ram gbsp_memory->p_palette_ram
+#define oam_ram gbsp_memory->p_oam_ram
+#define palette_ram_converted gbsp_memory->p_palette_ram_converted
+#define io_registers gbsp_memory->p_io_registers
 #endif
 
 #endif

@@ -68,7 +68,10 @@ bool GameBoyAdvanceHost::begin() {
   }
   ready_ = true;
   status_ = "GBA core ready";
-  Serial.println("[gba] P4 gpSP core ready, 8 MB ROM cache, interpreter mode");
+  doll_gba_perf_stats_t perf = {};
+  doll_gba_core_get_perf(&perf);
+  Serial.printf("[gba] P4 gpSP core ready, 8 MB ROM cache, Thumb JIT=%luK\n",
+                static_cast<unsigned long>(perf.jit_bytes / 1024));
   return true;
 }
 
@@ -113,6 +116,8 @@ void GameBoyAdvanceHost::stop() {
   doll_gba_core_stop();
   releaseCoreMemory();
   ready_ = false;
+  lastCoreTimeUs_ = 0;
+  lastAudioTimeUs_ = 0;
   savePath_ = "";
   status_ = "GBA ROM closed";
 }
@@ -139,8 +144,12 @@ void GameBoyAdvanceHost::submitAudio() {
 
 void GameBoyAdvanceHost::runFrame(bool draw) {
   if (!loaded_) return;
+  const uint32_t coreStartedUs = micros();
   doll_gba_core_run(buttons_, draw);
+  lastCoreTimeUs_ = micros() - coreStartedUs;
+  const uint32_t audioStartedUs = micros();
   submitAudio();
+  lastAudioTimeUs_ = micros() - audioStartedUs;
 }
 
 void GameBoyAdvanceHost::setButtons(uint16_t buttons) {

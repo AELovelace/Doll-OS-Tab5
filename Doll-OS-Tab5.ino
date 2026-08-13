@@ -148,6 +148,7 @@ void setup() {
                                                  //prompt the telnet side gets from printPrompt()
     printPrompt();
     drawDisplayFrame();
+    recordHeapCheckpoint("setup ready");
 }
 
 void loop() {

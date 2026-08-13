@@ -34,6 +34,8 @@ class GameBoyAdvanceHost {
   bool loaded() const { return loaded_; }
   const uint16_t* frame() const { return frame_; }
   const String& status() const { return status_; }
+  uint32_t lastCoreTimeUs() const { return lastCoreTimeUs_; }
+  uint32_t lastAudioTimeUs() const { return lastAudioTimeUs_; }
 
  private:
   bool allocateCoreMemory();
@@ -49,6 +51,8 @@ class GameBoyAdvanceHost {
   uint16_t buttons_ = 0;
   uint64_t audioRemainder_ = 0;
   uint32_t lastSaveMs_ = 0;
+  uint32_t lastCoreTimeUs_ = 0;
+  uint32_t lastAudioTimeUs_ = 0;
   bool ready_ = false;
   bool loaded_ = false;
 };

@@ -21,7 +21,7 @@
 extern "C" {
   #include "common.h"
 #ifdef RETRO_GO
-  #include "esp_attr.h"
+  #include "rg_system.h"
 #endif
 }
 
@@ -961,12 +961,39 @@ static const u8 obj_dim_table[3][4][2] = {
 };
 
 #ifdef RETRO_GO
-static EXT_RAM_BSS_ATTR u8 obj_priority_list[5][160][128];
+typedef struct {
+  u8 priority_list[5][160][128];
+  u8 priority_count[5][160];
+  u8 alpha_count[160];
+} gba_video_scratch_t;
+
+static gba_video_scratch_t *gba_video_scratch;
+#define obj_priority_list  (gba_video_scratch->priority_list)
+#define obj_priority_count (gba_video_scratch->priority_count)
+#define obj_alpha_count    (gba_video_scratch->alpha_count)
+
+extern "C" bool gba_video_scratch_init(void)
+{
+  if(gba_video_scratch)
+    return true;
+  gba_video_scratch = (gba_video_scratch_t *)rg_alloc(
+      sizeof(*gba_video_scratch), MEM_SLOW | MEM_8BIT | MEM_NOPANIC);
+  if(gba_video_scratch)
+    memset(gba_video_scratch, 0, sizeof(*gba_video_scratch));
+  return gba_video_scratch != NULL;
+}
+
+extern "C" void gba_video_scratch_term(void)
+{
+  if(gba_video_scratch)
+    heap_caps_free(gba_video_scratch);
+  gba_video_scratch = NULL;
+}
 #else
 static u8 obj_priority_list[5][160][128];
-#endif
 static u8 obj_priority_count[5][160];
 static u8 obj_alpha_count[160];
+#endif
 
 typedef struct {
   s32 obj_x, obj_y;

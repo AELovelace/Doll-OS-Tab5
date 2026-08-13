@@ -96,8 +96,8 @@ u32 gba_thumb_jit_fail_actual = 0;
 u32 gba_thumb_jit_fail_reason = 0;
 u32 gba_thumb_jit_arena_full = 0;
 #if GBA_P4_THUMB_DYNAREC
-u32 gba_thumb_jit_break_histogram[256] = {0};
-u32 gba_thumb_jit_fail_histogram[256] = {0};
+static u32 *gba_thumb_jit_break_histogram = NULL;
+static u32 *gba_thumb_jit_fail_histogram = NULL;
 #endif
 #if GBA_THUMB_PROFILE
 u32 gba_thumb_fallback_histogram[256] = {0};
@@ -346,13 +346,15 @@ static inline void gba_block_cache_touch_thumb(u32 pc, u8 *pc_address_block)
 #ifndef GBA_P4_THUMB_JIT_ENTRIES
 #define GBA_P4_THUMB_JIT_ENTRIES     2048
 #endif
+#ifndef GBA_P4_THUMB_JIT_MAX_OPS
 #define GBA_P4_THUMB_JIT_MAX_OPS     8
+#endif
 #define GBA_P4_THUMB_JIT_MIN_OPS     3
 #ifndef GBA_P4_THUMB_JIT_ARENA_BYTES
-#define GBA_P4_THUMB_JIT_ARENA_BYTES (96 * 1024)
+#define GBA_P4_THUMB_JIT_ARENA_BYTES (64 * 1024)
 #endif
 #ifndef GBA_P4_THUMB_JIT_BANKS
-#define GBA_P4_THUMB_JIT_BANKS       8
+#define GBA_P4_THUMB_JIT_BANKS       1
 #endif
 #ifndef GBA_P4_THUMB_JIT_REJECTS
 #define GBA_P4_THUMB_JIT_REJECTS     1024
@@ -364,15 +366,22 @@ static inline void gba_block_cache_touch_thumb(u32 pc, u8 *pc_address_block)
 #define GBA_P4_THUMB_JIT_HIREG_ALU   1
 #define GBA_P4_THUMB_JIT_HIREG_MOV   1
 #define GBA_P4_THUMB_JIT_STACK_READS 1
+#define GBA_P4_THUMB_JIT_STACK_WRITES 1
+#ifndef GBA_P4_THUMB_JIT_WRAM_LOADS
 #define GBA_P4_THUMB_JIT_WRAM_LOADS  0
+#endif
+#ifndef GBA_P4_THUMB_JIT_WRAM_STORES
 #define GBA_P4_THUMB_JIT_WRAM_STORES 0
+#endif
 #define GBA_P4_THUMB_JIT_TRUST_VALIDATIONS 2
 #define GBA_P4_THUMB_JIT_RECYCLE_ARENA 0
 #define GBA_P4_THUMB_JIT_REUSE_EXHAUSTED 1
 #ifndef GBA_P4_THUMB_JIT_HOT_ENTRIES
 #define GBA_P4_THUMB_JIT_HOT_ENTRIES 2048
 #endif
+#ifndef GBA_P4_THUMB_JIT_HOT_THRESHOLD
 #define GBA_P4_THUMB_JIT_HOT_THRESHOLD 32
+#endif
 #define GBA_P4_THUMB_JIT_STALE_RECYCLE 0
 #define GBA_P4_THUMB_JIT_STALE_MISS_THRESHOLD 1200000
 #define GBA_P4_THUMB_JIT_STALE_HIT_LIMIT 64
@@ -627,9 +636,16 @@ static bool gba_p4_thumb_jit_init(void)
   gba_p4_thumb_jit_hot_count = (u8 *)heap_caps_calloc(
       GBA_P4_THUMB_JIT_HOT_ENTRIES, sizeof(*gba_p4_thumb_jit_hot_count),
       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  gba_thumb_jit_break_histogram = (u32 *)heap_caps_calloc(
+      256, sizeof(*gba_thumb_jit_break_histogram),
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  gba_thumb_jit_fail_histogram = (u32 *)heap_caps_calloc(
+      256, sizeof(*gba_thumb_jit_fail_histogram),
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if(!(gba_p4_thumb_jit_cache && gba_p4_thumb_jit_reject_pc &&
        gba_p4_thumb_jit_reject_sig && gba_p4_thumb_jit_reject_break &&
-       gba_p4_thumb_jit_hot_pc && gba_p4_thumb_jit_hot_count))
+       gba_p4_thumb_jit_hot_pc && gba_p4_thumb_jit_hot_count &&
+       gba_thumb_jit_break_histogram && gba_thumb_jit_fail_histogram))
   {
     if(gba_p4_thumb_jit_cache) heap_caps_free(gba_p4_thumb_jit_cache);
     if(gba_p4_thumb_jit_reject_pc) heap_caps_free(gba_p4_thumb_jit_reject_pc);
@@ -637,12 +653,16 @@ static bool gba_p4_thumb_jit_init(void)
     if(gba_p4_thumb_jit_reject_break) heap_caps_free(gba_p4_thumb_jit_reject_break);
     if(gba_p4_thumb_jit_hot_pc) heap_caps_free(gba_p4_thumb_jit_hot_pc);
     if(gba_p4_thumb_jit_hot_count) heap_caps_free(gba_p4_thumb_jit_hot_count);
+    if(gba_thumb_jit_break_histogram) heap_caps_free(gba_thumb_jit_break_histogram);
+    if(gba_thumb_jit_fail_histogram) heap_caps_free(gba_thumb_jit_fail_histogram);
     gba_p4_thumb_jit_cache = NULL;
     gba_p4_thumb_jit_reject_pc = NULL;
     gba_p4_thumb_jit_reject_sig = NULL;
     gba_p4_thumb_jit_reject_break = NULL;
     gba_p4_thumb_jit_hot_pc = NULL;
     gba_p4_thumb_jit_hot_count = NULL;
+    gba_thumb_jit_break_histogram = NULL;
+    gba_thumb_jit_fail_histogram = NULL;
     gba_p4_thumb_jit_disabled = true;
     gba_thumb_jit_disabled++;
     return false;
@@ -688,12 +708,16 @@ static bool gba_p4_thumb_jit_init(void)
     heap_caps_free(gba_p4_thumb_jit_reject_break);
     heap_caps_free(gba_p4_thumb_jit_hot_pc);
     heap_caps_free(gba_p4_thumb_jit_hot_count);
+    heap_caps_free(gba_thumb_jit_break_histogram);
+    heap_caps_free(gba_thumb_jit_fail_histogram);
     gba_p4_thumb_jit_cache = NULL;
     gba_p4_thumb_jit_reject_pc = NULL;
     gba_p4_thumb_jit_reject_sig = NULL;
     gba_p4_thumb_jit_reject_break = NULL;
     gba_p4_thumb_jit_hot_pc = NULL;
     gba_p4_thumb_jit_hot_count = NULL;
+    gba_thumb_jit_break_histogram = NULL;
+    gba_thumb_jit_fail_histogram = NULL;
     gba_p4_thumb_jit_disabled = true;
     gba_thumb_jit_disabled++;
     return false;
@@ -756,12 +780,16 @@ extern "C" void gba_p4_thumb_jit_shutdown(void)
   if(gba_p4_thumb_jit_reject_break) heap_caps_free(gba_p4_thumb_jit_reject_break);
   if(gba_p4_thumb_jit_hot_pc) heap_caps_free(gba_p4_thumb_jit_hot_pc);
   if(gba_p4_thumb_jit_hot_count) heap_caps_free(gba_p4_thumb_jit_hot_count);
+  if(gba_thumb_jit_break_histogram) heap_caps_free(gba_thumb_jit_break_histogram);
+  if(gba_thumb_jit_fail_histogram) heap_caps_free(gba_thumb_jit_fail_histogram);
   gba_p4_thumb_jit_cache = NULL;
   gba_p4_thumb_jit_reject_pc = NULL;
   gba_p4_thumb_jit_reject_sig = NULL;
   gba_p4_thumb_jit_reject_break = NULL;
   gba_p4_thumb_jit_hot_pc = NULL;
   gba_p4_thumb_jit_hot_count = NULL;
+  gba_thumb_jit_break_histogram = NULL;
+  gba_thumb_jit_fail_histogram = NULL;
   gba_p4_thumb_jit_bank_count = 0;
   gba_p4_thumb_jit_bank_index = 0;
   gba_p4_thumb_jit_ready = false;
@@ -984,6 +1012,12 @@ static inline bool gba_p4_thumb_jit_supported_opcode(u32 opcode)
 
   if(GBA_P4_THUMB_JIT_STACK_READS && top >= 0x98 && top <= 0x9F)
     return true;
+
+  if(GBA_P4_THUMB_JIT_STACK_WRITES && top >= 0x90 && top <= 0x97)
+    return true;
+
+  if(GBA_P4_THUMB_JIT_STACK_WRITES && (top == 0xB4 || top == 0xB5))
+    return (opcode & 0xFF) != 0 || top == 0xB5;
 
   if(GBA_P4_THUMB_JIT_STACK_READS && top == 0xBC)
     return (opcode & 0xFF) != 0;
@@ -1491,6 +1525,46 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
       return false;
 
     sim_regs[rd] = readaddress32(iwram, (address & 0x7FFF) + 0x8000);
+    sim_regs[REG_PC] += 2;
+    return true;
+  }
+
+  if(GBA_P4_THUMB_JIT_STACK_WRITES && top >= 0x90 && top <= 0x97)
+  {
+    u32 rd = top & 0x07;
+    u32 address = (sim_regs[REG_SP] + ((opcode & 0xFF) * 4)) & ~3U;
+    if((address >> 24) != 0x03)
+      return false;
+
+    address32(iwram, (address & 0x7FFF) + 0x8000) = eswap32(sim_regs[rd]);
+    sim_regs[REG_PC] += 2;
+    return true;
+  }
+
+  if(GBA_P4_THUMB_JIT_STACK_WRITES && (top == 0xB4 || top == 0xB5))
+  {
+    u32 reglist = opcode & 0xFF;
+    u32 has_lr = top == 0xB5;
+    u32 numops = bit_count[reglist] + has_lr;
+    u32 address = (sim_regs[REG_SP] - numops * 4) & ~3U;
+    if(!numops || (address >> 24) != 0x03 ||
+       ((address & 0x7FFF) + numops * 4) > 0x8000)
+      return false;
+
+    sim_regs[REG_SP] = address;
+    u32 offset = 0;
+    for(u32 i = 0; i < 8; i++)
+    {
+      if(reglist & (1U << i))
+      {
+        address32(iwram, ((address + offset) & 0x7FFF) + 0x8000) =
+            eswap32(sim_regs[i]);
+        offset += 4;
+      }
+    }
+    if(has_lr)
+      address32(iwram, ((address + offset) & 0x7FFF) + 0x8000) =
+          eswap32(sim_regs[REG_LR]);
     sim_regs[REG_PC] += 2;
     return true;
   }
@@ -2360,6 +2434,52 @@ static bool gba_p4_thumb_jit_emit_iwram_addr(gba_p4_rv_emit_t *emit,
          gba_p4_emit(emit, rv_add(gba_addr_reg, gba_addr_reg, RV_T1));
 }
 
+static bool gba_p4_thumb_jit_emit_sp_str_op(gba_p4_rv_emit_t *emit, u32 opcode)
+{
+  u32 rd = (opcode >> 8) & 0x07;
+  u32 imm = (opcode & 0xFF) * 4;
+
+  return gba_p4_thumb_jit_load_reg(emit, RV_T0, REG_SP) &&
+         gba_p4_emit(emit, rv_addi(RV_T0, RV_T0, imm)) &&
+         gba_p4_emit(emit, rv_andi(RV_T0, RV_T0, -4)) &&
+         gba_p4_thumb_jit_emit_iwram_addr(emit, RV_T0) &&
+         gba_p4_thumb_jit_load_reg(emit, RV_T2, rd) &&
+         gba_p4_emit(emit, rv_sw(RV_T2, RV_T0, 0));
+}
+
+static bool gba_p4_thumb_jit_emit_push_op(gba_p4_rv_emit_t *emit, u32 opcode)
+{
+  u32 reglist = opcode & 0xFF;
+  u32 has_lr = ((opcode >> 8) & 0xFF) == 0xB5;
+  u32 numops = bit_count[reglist] + has_lr;
+  if(!numops)
+    return false;
+
+  if(!(gba_p4_thumb_jit_load_reg(emit, RV_T0, REG_SP) &&
+       gba_p4_emit(emit, rv_addi(RV_T0, RV_T0, -(s32)(numops * 4))) &&
+       gba_p4_emit(emit, rv_andi(RV_T0, RV_T0, -4)) &&
+       gba_p4_emit(emit, rv_addi(RV_T3, RV_T0, 0)) &&
+       gba_p4_thumb_jit_store_reg(emit, REG_SP, RV_T3) &&
+       gba_p4_thumb_jit_emit_iwram_addr(emit, RV_T0)))
+    return false;
+
+  u32 offset = 0;
+  for(u32 i = 0; i < 8; i++)
+  {
+    if(reglist & (1U << i))
+    {
+      if(!(gba_p4_thumb_jit_load_reg(emit, RV_T2, i) &&
+           gba_p4_emit(emit, rv_sw(RV_T2, RV_T0, offset))))
+        return false;
+      offset += 4;
+    }
+  }
+
+  return !has_lr ||
+      (gba_p4_thumb_jit_load_reg(emit, RV_T2, REG_LR) &&
+       gba_p4_emit(emit, rv_sw(RV_T2, RV_T0, offset)));
+}
+
 static bool gba_p4_thumb_jit_emit_sp_ldr_op(gba_p4_rv_emit_t *emit, u32 opcode)
 {
   u32 rd = ((opcode >> 8) & 0x07);
@@ -2811,6 +2931,12 @@ static bool gba_p4_thumb_jit_emit_op(gba_p4_rv_emit_t *emit, u32 opcode,
 
   if(GBA_P4_THUMB_JIT_STACK_READS && top >= 0x98 && top <= 0x9F)
     return gba_p4_thumb_jit_emit_sp_ldr_op(emit, opcode);
+
+  if(GBA_P4_THUMB_JIT_STACK_WRITES && top >= 0x90 && top <= 0x97)
+    return gba_p4_thumb_jit_emit_sp_str_op(emit, opcode);
+
+  if(GBA_P4_THUMB_JIT_STACK_WRITES && (top == 0xB4 || top == 0xB5))
+    return gba_p4_thumb_jit_emit_push_op(emit, opcode);
 
   if(GBA_P4_THUMB_JIT_STACK_READS && top == 0xBC)
     return gba_p4_thumb_jit_emit_pop_op(emit, opcode);
@@ -5467,15 +5593,15 @@ static inline void gba_hle_register_ram_reset(u32 flags)
 
   if(flags & 0x04)
   {
-    memset(palette_ram, 0, sizeof(palette_ram));
-    memset(palette_ram_converted, 0, sizeof(palette_ram_converted));
+    memset(palette_ram, 0, 512 * sizeof(*palette_ram));
+    memset(palette_ram_converted, 0, 512 * sizeof(*palette_ram_converted));
   }
 
   if(flags & 0x08)
     memset(vram, 0, GBA_VRAM_SIZE);
 
   if(flags & 0x10)
-    memset(oam_ram, 0, sizeof(oam_ram));
+    memset(oam_ram, 0, 512 * sizeof(*oam_ram));
 
   if(flags & 0x80)
   {
@@ -7825,16 +7951,16 @@ u32 reg[64];
 u32 spsr[6];
 u32 reg_mode[7][7];
 
+#ifndef RETRO_GO
 u16 oam_ram[512];
 u16 palette_ram[512];
 u16 palette_ram_converted[512];
-#ifndef RETRO_GO
 u8 ewram[1024 * 256 * 2];
 u8 iwram[1024 * 32 * 2];
 u8 vram[1024 * 96];
 u8 *memory_map_read[8 * 1024];
-#endif
 u16 io_registers[512];
+#endif
 #endif
 
 void execute_arm(u32 cycles)

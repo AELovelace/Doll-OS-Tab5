@@ -20,7 +20,7 @@
 
 #include "common.h"
 #ifdef RETRO_GO
-#include "esp_attr.h"
+#include "rg_system.h"
 #endif
 
 direct_sound_struct direct_sound_channel[2];
@@ -29,7 +29,37 @@ gbc_sound_struct gbc_sound_channel[4];
 const u32 sound_frequency = GBA_SOUND_FREQUENCY;
 
 u32 sound_on;
+#ifdef RETRO_GO
+typedef struct
+{
+  s16 sound_buffer[BUFFER_SIZE];
+  u32 noise_table15[1024];
+} gba_sound_scratch_t;
+
+static gba_sound_scratch_t *gba_sound_scratch;
+#define sound_buffer (gba_sound_scratch->sound_buffer)
+#define noise_table15 (gba_sound_scratch->noise_table15)
+
+bool gba_sound_scratch_init(void)
+{
+  if(gba_sound_scratch)
+    return true;
+  gba_sound_scratch = (gba_sound_scratch_t *)rg_alloc(
+      sizeof(*gba_sound_scratch), MEM_SLOW | MEM_8BIT | MEM_NOPANIC);
+  if(gba_sound_scratch)
+    memset(gba_sound_scratch, 0, sizeof(*gba_sound_scratch));
+  return gba_sound_scratch != NULL;
+}
+
+void gba_sound_scratch_term(void)
+{
+  if(gba_sound_scratch)
+    heap_caps_free(gba_sound_scratch);
+  gba_sound_scratch = NULL;
+}
+#else
 static s16 sound_buffer[BUFFER_SIZE];
+#endif
 static u32 sound_buffer_base;
 u32 sound_read_calls;
 u32 sound_samples_requested;
@@ -219,9 +249,7 @@ const s8 square_pattern_duty[4][8] =
 
 s8 wave_samples[64];
 
-#ifdef RETRO_GO
-EXT_RAM_BSS_ATTR u32 noise_table15[1024];
-#else
+#ifndef RETRO_GO
 u32 noise_table15[1024];
 #endif
 u32 noise_table7[4];

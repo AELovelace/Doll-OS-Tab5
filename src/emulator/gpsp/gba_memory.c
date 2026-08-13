@@ -364,11 +364,36 @@ u32 gamepak_size;           /* Size of the ROM in bytes */
 // We allocate in 1MB chunks.
 const unsigned gamepak_buffer_blocksize = 1024*1024;
 
-// LRU queue with the loaded blocks and what they map to
-struct {
+// LRU queue with the loaded blocks and what they map to. Doll-OS keeps this
+// bookkeeping in PSRAM only while the GBA foreground app is active.
+typedef struct {
   u16 next_lru;             /* Index in the struct to the next LRU entry */
   s16 phy_rom;              /* ROM page number (-1 means not mapped) */
-} gamepak_blk_queue[1024];
+} gamepak_blk_entry_t;
+
+#ifdef RETRO_GO
+static gamepak_blk_entry_t *gamepak_blk_queue;
+
+bool gba_memory_scratch_init(void)
+{
+  if(gamepak_blk_queue)
+    return true;
+  gamepak_blk_queue = (gamepak_blk_entry_t *)rg_alloc(
+      1024 * sizeof(*gamepak_blk_queue), MEM_SLOW | MEM_8BIT | MEM_NOPANIC);
+  if(gamepak_blk_queue)
+    memset(gamepak_blk_queue, 0, 1024 * sizeof(*gamepak_blk_queue));
+  return gamepak_blk_queue != NULL;
+}
+
+void gba_memory_scratch_term(void)
+{
+  if(gamepak_blk_queue)
+    heap_caps_free(gamepak_blk_queue);
+  gamepak_blk_queue = NULL;
+}
+#else
+static gamepak_blk_entry_t gamepak_blk_queue[1024];
+#endif
 
 u16 gamepak_lru_head;
 u16 gamepak_lru_tail;
@@ -2399,9 +2424,9 @@ void init_memory(void)
   map_null(read, 0x7000000, 0x8000000);
   map_null(read, 0xE000000, 0x10000000);
 
-  memset(io_registers, 0, sizeof(io_registers));
-  memset(oam_ram, 0, sizeof(oam_ram));
-  memset(palette_ram, 0, sizeof(palette_ram));
+  memset(io_registers, 0, 512 * sizeof(*io_registers));
+  memset(oam_ram, 0, 512 * sizeof(*oam_ram));
+  memset(palette_ram, 0, 512 * sizeof(*palette_ram));
   memset(iwram, 0, GBA_IWRAM_SIZE);
   memset(ewram, 0, GBA_EWRAM_SIZE);
   memset(vram, 0, GBA_VRAM_SIZE);
@@ -2514,9 +2539,9 @@ bool memory_read_savestate(const u8 *src)
     bson_read_bytes(memdoc, "iwram", &iwram[0x8000], 0x8000) &&
     bson_read_bytes(memdoc, "ewram", ewram, 0x40000) &&
     bson_read_bytes(memdoc, "vram", vram, GBA_VRAM_SIZE) &&
-    bson_read_bytes(memdoc, "oamram", oam_ram, sizeof(oam_ram)) &&
-    bson_read_bytes(memdoc, "palram", palette_ram, sizeof(palette_ram)) &&
-    bson_read_bytes(memdoc, "ioregs", io_registers, sizeof(io_registers)) &&
+    bson_read_bytes(memdoc, "oamram", oam_ram, 512 * sizeof(*oam_ram)) &&
+    bson_read_bytes(memdoc, "palram", palette_ram, 512 * sizeof(*palette_ram)) &&
+    bson_read_bytes(memdoc, "ioregs", io_registers, 512 * sizeof(*io_registers)) &&
     bson_read_int32(memdoc, "dma-bus", &dma_bus_val) &&
 
     bson_read_int32(bakdoc, "backup-type", &backup_type) &&
@@ -2576,9 +2601,9 @@ unsigned memory_write_savestate(u8 *dst)
   bson_write_bytes(dst, "iwram", &iwram[0x8000], 0x8000);
   bson_write_bytes(dst, "ewram", ewram, 0x40000);
   bson_write_bytes(dst, "vram", vram, GBA_VRAM_SIZE);
-  bson_write_bytes(dst, "oamram", oam_ram, sizeof(oam_ram));
-  bson_write_bytes(dst, "palram", palette_ram, sizeof(palette_ram));
-  bson_write_bytes(dst, "ioregs", io_registers, sizeof(io_registers));
+  bson_write_bytes(dst, "oamram", oam_ram, 512 * sizeof(*oam_ram));
+  bson_write_bytes(dst, "palram", palette_ram, 512 * sizeof(*palette_ram));
+  bson_write_bytes(dst, "ioregs", io_registers, 512 * sizeof(*io_registers));
   bson_write_int32(dst, "dma-bus", dma_bus_val);
   bson_finish_document(dst, wbptr);
 

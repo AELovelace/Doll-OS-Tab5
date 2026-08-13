@@ -153,7 +153,7 @@ def patch_esp32_audio_i2s() -> None:
 
 
 def verify_tab5_sdkconfig(source, target, env) -> None:
-    """Rejects display regressions or automatic task-WDT initialization."""
+    """Rejects display, watchdog, memory-placement, or GBA-JIT regressions."""
     del source, target  # SCons supplies these action arguments, but this check only needs the environment.
     config_path = Path(env.subst("$BUILD_DIR")) / "config" / "sdkconfig.h"
     config = config_path.read_text(encoding="utf-8")
@@ -179,12 +179,15 @@ def verify_tab5_sdkconfig(source, target, env) -> None:
         "#define CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP 1",
         "#define CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM 1",
         "#define CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM 1",
+        #P4's PMP IRAM/DRAM split removes MALLOC_CAP_EXEC from all L2 heap.
+        #gpSP needs a small writable/executable arena for its Thumb dynarec.
+        "#define CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT 1",
     )
     enabled = [setting for setting in forbidden if setting in config]
     if enabled:
-        raise RuntimeError(f"Task watchdog unexpectedly initialized in {config_path}: {enabled}")
+        raise RuntimeError(f"Unsafe Tab5 runtime configuration in {config_path}: {enabled}")
 
-    print("[pio] Verified display bandwidth, internal WiFi/Hosted memory, and inactive task watchdog")
+    print("[pio] Verified display bandwidth, GBA executable heap, internal WiFi/Hosted memory, and inactive task watchdog")
 
 
 configure_windows_archiver_response_file()

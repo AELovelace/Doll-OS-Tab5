@@ -128,6 +128,10 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel);
 void sound_reset_fifo(u32 channel);
 void render_gbc_sound();
 void init_sound();
+#ifdef RETRO_GO
+bool gba_sound_scratch_init(void);
+void gba_sound_scratch_term(void);
+#endif
 
 bool sound_check_savestate(const u8 *src);
 unsigned sound_write_savestate(u8 *dst);

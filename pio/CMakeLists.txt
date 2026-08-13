@@ -38,8 +38,8 @@ idf_component_register(
 )
 
 # gpSP's P4 port uses dynamic core memory (RETRO_GO) but Doll-OS supplies the
-# board frontend. The P4 Thumb JIT is bounded to one 48 KB executable bank and
-# smaller metadata tables so it coexists with DSI, Hosted WiFi, and USB HID.
+# board frontend. The P4 Thumb JIT is lazy and bounded to one 96 KB executable
+# bank; its lookup metadata and the cold GBA maps live in PSRAM.
 set(GPSP_SOURCES
     "${DOLL_OS_ROOT}/src/GameBoyAdvanceHost.cpp"
     "${DOLL_OS_ROOT}/src/emulator/gpsp/cheats.c"
@@ -58,6 +58,6 @@ set(GPSP_SOURCES
     "${DOLL_OS_ROOT}/src/emulator/gpsp/video.cpp"
 )
 set_source_files_properties(${GPSP_SOURCES} PROPERTIES
-    COMPILE_DEFINITIONS "RETRO_GO=1;ROM_BUFFER_SIZE=8;GBA_SOUND_FREQUENCY=32768;OVERCLOCK_60FPS=1;GBA_SWI_HLE=2;GBA_P4_THUMB_DYNAREC=1;GBA_P4_THUMB_JIT_ENTRIES=1024;GBA_P4_THUMB_JIT_BANKS=1;GBA_P4_THUMB_JIT_REJECTS=512;GBA_P4_THUMB_JIT_HOT_ENTRIES=1024;GBA_P4_THUMB_JIT_ARENA_BYTES=49152;GBA_XTENSA_DYNAREC=0"
+    COMPILE_DEFINITIONS "RETRO_GO=1;ROM_BUFFER_SIZE=8;GBA_SOUND_FREQUENCY=32768;OVERCLOCK_60FPS=1;GBA_SWI_HLE=2;GBA_P4_THUMB_DYNAREC=1;GBA_P4_THUMB_JIT_ENTRIES=2048;GBA_P4_THUMB_JIT_BANKS=1;GBA_P4_THUMB_JIT_REJECTS=1024;GBA_P4_THUMB_JIT_HOT_ENTRIES=2048;GBA_P4_THUMB_JIT_HOT_THRESHOLD=8;GBA_P4_THUMB_JIT_MAX_OPS=16;GBA_P4_THUMB_JIT_WRAM_LOADS=1;GBA_P4_THUMB_JIT_WRAM_STORES=1;GBA_P4_THUMB_JIT_ARENA_BYTES=98304;GBA_XTENSA_DYNAREC=0"
     COMPILE_OPTIONS "-O3;-fomit-frame-pointer;-ffast-math"
 )

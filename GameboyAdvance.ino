@@ -11,51 +11,46 @@
 
 #include "esp_heap_caps.h"
 #include "esp_memory_utils.h"
+#include "esp32-hal-cpu.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <lgfx/v1/platforms/esp32p4/Panel_DSI.hpp>
 #include <new>
 
 static GameBoyAdvanceHost gbaHost;
 static constexpr int GBA_W = GameBoyAdvanceHost::kWidth;
 static constexpr int GBA_H = GameBoyAdvanceHost::kHeight;
-static constexpr int GBA_STAGE_ROWS = 24;
 static constexpr int GBA_MAX_FRAME_SKIP = 5;
+static constexpr uint32_t GBA_PANEL_INTERVAL_US = 66000;
 static constexpr int GBA_ROM_MENU_MAX = 128;
 static const char* GBA_ROM_DIR = "/sd/gba";
 
-static uint16_t* gbaStage = nullptr;
 static int gbaScale = 3;
 static int gbaOutW = GBA_W * 3;
 static int gbaOutH = GBA_H * 3;
 static int gbaOutX = (DISPLAY_WIDTH - GBA_W * 3) / 2;
 static int gbaOutY = (DISPLAY_HEIGHT - GBA_H * 3) / 2;
+// Core frame skip and physical panel cadence are independent. Zero renders
+// every emulated frame; the DSI panel is still capped near 15 Hz. Positive
+// values skip that many emulated render passes before producing a new frame.
+static int gbaFrameSkip = 0;
 static String gbaRomVfs;
+static uint32_t gbaLastEmuFps10 = 0;
+static uint32_t gbaLastCoreUs = 0;
+static uint32_t gbaLastDrawCoreUs = 0;
+static uint32_t gbaLastSkipCoreUs = 0;
+static uint32_t gbaLastAudioUs = 0;
+static uint32_t gbaLastBlitUs = 0;
 
-static void gbaFreeDisplay() {
-    if (gbaStage) {
-        heap_caps_free(gbaStage);
-        gbaStage = nullptr;
-    }
-}
+static void gbaFreeDisplay() {}
 
 static bool gbaSetupDisplay() {
     gbaOutW = GBA_W * gbaScale;
     gbaOutH = GBA_H * gbaScale;
     gbaOutX = (DISPLAY_WIDTH - gbaOutW) / 2;
     gbaOutY = (DISPLAY_HEIGHT - gbaOutH) / 2;
-    if (gbaScale == 1) return true;
-
-    const size_t bytes = static_cast<size_t>(gbaOutW) * GBA_STAGE_ROWS * sizeof(uint16_t);
-    gbaStage = static_cast<uint16_t*>(
-        heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    if (!gbaStage) {
-        gbaStage = static_cast<uint16_t*>(
-            heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    }
-    Serial.printf("[gba] display=%dx stage=%u bytes (%s)\n", gbaScale,
-                  static_cast<unsigned>(bytes),
-                  gbaStage && esp_ptr_external_ram(gbaStage) ? "PSRAM" : "internal");
-    return gbaStage != nullptr;
+    Serial.printf("[gba] display=%dx direct DSI framebuffer\n", gbaScale);
+    return true;
 }
 
 static void gbaSetDisplayScale(int scale) {
@@ -71,10 +66,28 @@ static void gbaSetDisplayScale(int scale) {
 
 static void gbaDrawTouchControls() {
     const uint16_t fill = 0x2104;
-    frameSprite.fillRoundRect(8, 285, 144, 230, 20, fill);
-    frameSprite.drawRoundRect(8, 285, 144, 230, 20, TFT_CYAN);
-    frameSprite.drawLine(80, 310, 80, 490, TFT_WHITE);
-    frameSprite.drawLine(25, 400, 135, 400, TFT_WHITE);
+    const int dpadX = 110;
+    const int dpadY = 400;
+    const int arm = 75;
+    const int thick = 70;
+    frameSprite.fillRoundRect(dpadX - thick / 2,
+                              dpadY - arm - thick / 2,
+                              thick, arm + thick / 2, 10, fill);
+    frameSprite.fillRoundRect(dpadX - thick / 2,
+                              dpadY,
+                              thick, arm + thick / 2, 10, fill);
+    frameSprite.fillRoundRect(dpadX - arm - thick / 2,
+                              dpadY - thick / 2,
+                              arm + thick / 2, thick, 10, fill);
+    frameSprite.fillRoundRect(dpadX,
+                              dpadY - thick / 2,
+                              arm + thick / 2, thick, 10, fill);
+    frameSprite.drawRoundRect(dpadX - thick / 2,
+                              dpadY - arm - thick / 2,
+                              thick, arm * 2 + thick, 10, TFT_CYAN);
+    frameSprite.drawRoundRect(dpadX - arm - thick / 2,
+                              dpadY - thick / 2,
+                              arm * 2 + thick, thick, 10, TFT_CYAN);
 
     frameSprite.fillCircle(1200, 350, 62, fill);
     frameSprite.drawCircle(1200, 350, 62, TFT_PINK);
@@ -95,7 +108,6 @@ static void gbaDrawTouchControls() {
 
     frameSprite.setTextDatum(MC_DATUM);
     frameSprite.setTextColor(TFT_WHITE);
-    frameSprite.drawString("D-PAD", 80, 400);
     frameSprite.drawString("A", 1200, 350);
     frameSprite.drawString("B", 1200, 505);
     frameSprite.drawString("L", 80, 70);
@@ -117,46 +129,40 @@ static void gbaBlitFrame() {
     const uint16_t* source = gbaHost.frame();
     if (!source) return;
 
-    const bool oldFrameSwap = frameSprite.getSwapBytes();
-    const bool oldPanelSwap = tft.getSwapBytes();
-    frameSprite.setSwapBytes(true);
-    tft.setSwapBytes(true);
+    // Tab5's physical DSI framebuffer is 720x1280 portrait while the UI is
+    // rotation 3 (1280x720). A normal pushImage therefore takes M5GFX's
+    // per-pixel rotation path. At 3x that measured 63 ms, and the old path also
+    // copied every game frame through frameSprite. Write the already-rotated
+    // game rectangle directly into the panel framebuffer instead: logical
+    // (x,y) maps to physical (y, 1279-x). display() then performs the required
+    // cache writeback for just this rectangle.
+    auto* panel = static_cast<lgfx::Panel_DSI*>(tft.getPanel());
+    uint16_t* panelFrame = panel
+        ? static_cast<uint16_t*>(panel->config_detail().buffer) : nullptr;
+    if (!panelFrame) return;
 
-    if (gbaScale == 1) {
-        frameSprite.pushImage(gbaOutX, gbaOutY, GBA_W, GBA_H,
-                              const_cast<uint16_t*>(source));
-        tft.pushImage(gbaOutX, gbaOutY, GBA_W, GBA_H,
-                      const_cast<uint16_t*>(source));
-    } else if (gbaStage) {
-        const int sourceRowsPerStage = GBA_STAGE_ROWS / gbaScale;
-        for (int sourceY = 0; sourceY < GBA_H; sourceY += sourceRowsPerStage) {
-            const int sourceRows = min(sourceRowsPerStage, GBA_H - sourceY);
-            const int outputRows = sourceRows * gbaScale;
-            for (int localY = 0; localY < sourceRows; ++localY) {
-                const uint16_t* sourceRow = source +
-                    static_cast<size_t>(sourceY + localY) * GBA_W;
+    constexpr int panelStride = DISPLAY_HEIGHT;  // physical width: 720 pixels
+    for (int sourceX = 0; sourceX < GBA_W; ++sourceX) {
+        uint16_t* outputRows[3] = {};
+        for (int duplicateX = 0; duplicateX < gbaScale; ++duplicateX) {
+            const int logicalX = gbaOutX + sourceX * gbaScale + duplicateX;
+            const int physicalY = DISPLAY_WIDTH - 1 - logicalX;
+            outputRows[duplicateX] = panelFrame +
+                static_cast<size_t>(physicalY) * panelStride + gbaOutY;
+        }
+        for (int sourceY = 0; sourceY < GBA_H; ++sourceY) {
+            const uint16_t color =
+                source[static_cast<size_t>(sourceY) * GBA_W + sourceX];
+            const int outputY = sourceY * gbaScale;
+            for (int duplicateX = 0; duplicateX < gbaScale; ++duplicateX) {
+                uint16_t* output = outputRows[duplicateX] + outputY;
                 for (int duplicateY = 0; duplicateY < gbaScale; ++duplicateY) {
-                    uint16_t* output = gbaStage +
-                        static_cast<size_t>(localY * gbaScale + duplicateY) * gbaOutW;
-                    for (int x = 0; x < GBA_W; ++x) {
-                        const uint16_t color = sourceRow[x];
-                        const int outputX = x * gbaScale;
-                        for (int duplicateX = 0; duplicateX < gbaScale; ++duplicateX) {
-                            output[outputX + duplicateX] = color;
-                        }
-                    }
+                    output[duplicateY] = color;
                 }
             }
-            const int outputY = sourceY * gbaScale;
-            frameSprite.pushImage(gbaOutX, gbaOutY + outputY,
-                                  gbaOutW, outputRows, gbaStage);
-            tft.pushImage(gbaOutX, gbaOutY + outputY,
-                          gbaOutW, outputRows, gbaStage);
         }
     }
-
-    frameSprite.setSwapBytes(oldFrameSwap);
-    tft.setSwapBytes(oldPanelSwap);
+    tft.display(gbaOutX, gbaOutY, gbaOutW, gbaOutH);
     displayInvalidateShadow();
 }
 
@@ -176,13 +182,13 @@ static uint8_t gbaPumpTouch(uint16_t& buttons) {
             next |= GameBoyAdvanceHost::kL;
         } else if (x >= 1138 && x < 1262 && y >= 38 && y < 102) {
             next |= GameBoyAdvanceHost::kR;
-        } else if (x < 170 && y >= 260 && y < 540) {
-            const int dx = x - 80;
+        } else if (x < 230 && y >= 280 && y < 520) {
+            const int dx = x - 110;
             const int dy = y - 400;
-            if (dx < -25) next |= GameBoyAdvanceHost::kLeft;
-            if (dx > 25) next |= GameBoyAdvanceHost::kRight;
-            if (dy < -35) next |= GameBoyAdvanceHost::kUp;
-            if (dy > 35) next |= GameBoyAdvanceHost::kDown;
+            if (dx < -30) next |= GameBoyAdvanceHost::kLeft;
+            if (dx > 30) next |= GameBoyAdvanceHost::kRight;
+            if (dy < -30) next |= GameBoyAdvanceHost::kUp;
+            if (dy > 30) next |= GameBoyAdvanceHost::kDown;
         } else if (x >= 1120 && y >= 275 && y < 430) {
             next |= GameBoyAdvanceHost::kA;
         } else if (x >= 1120 && y >= 430 && y < 590) {
@@ -388,6 +394,7 @@ static bool gbaPickRom(String& romLogical) {
 
 enum GbaMenuItem : uint8_t {
     GBA_MENU_DISPLAY,
+    GBA_MENU_FRAME_SKIP,
     GBA_MENU_VOLUME,
     GBA_MENU_SAVE_STATE,
     GBA_MENU_LOAD_STATE,
@@ -402,6 +409,11 @@ static String gbaStatePath() {
 
 static String gbaMenuValue(int item) {
     if (item == GBA_MENU_DISPLAY) return String(gbaScale) + "x";
+    if (item == GBA_MENU_FRAME_SKIP) {
+        if (gbaFrameSkip < 0) return "Auto";
+        return String(gbaFrameSkip) + " (render 1/" +
+               String(gbaFrameSkip + 1) + ")";
+    }
     if (item == GBA_MENU_VOLUME) {
         return String(radioGetVolume()) + "/" + String(RADIO_VOLUME_MAX);
     }
@@ -410,12 +422,12 @@ static String gbaMenuValue(int item) {
 
 static void gbaDrawMenu(int selected, const String& note) {
     const int rowH = 22;
-    const int width = 280;
+    const int width = 460;
     const int left = (DISPLAY_WIDTH - width) / 2;
-    const int top = (DISPLAY_HEIGHT - (GBA_MENU_COUNT * rowH + 72)) / 2;
+    const int boxH = GBA_MENU_COUNT * rowH + 106;
+    const int top = (DISPLAY_HEIGHT - boxH) / 2;
     frameSprite.fillSprite(TFT_BLACK);
-    frameSprite.drawRect(left - 10, top - 10, width + 20,
-                         GBA_MENU_COUNT * rowH + 72, TFT_PINK);
+    frameSprite.drawRect(left - 10, top - 10, width + 20, boxH, TFT_PINK);
     frameSprite.setTextDatum(TL_DATUM);
     frameSprite.setTextColor(TFT_PINK, TFT_BLACK);
     frameSprite.drawString("GAME BOY ADVANCE", left, top);
@@ -428,6 +440,7 @@ static void gbaDrawMenu(int selected, const String& note) {
         const char* label = "";
         switch (item) {
             case GBA_MENU_DISPLAY: label = "Display"; break;
+            case GBA_MENU_FRAME_SKIP: label = "Frame skip"; break;
             case GBA_MENU_VOLUME: label = "Volume"; break;
             case GBA_MENU_SAVE_STATE: label = "Save state"; break;
             case GBA_MENU_LOAD_STATE: label = "Load state"; break;
@@ -444,12 +457,25 @@ static void gbaDrawMenu(int selected, const String& note) {
         }
     }
     const int footY = top + 30 + GBA_MENU_COUNT * rowH;
+    doll_gba_perf_stats_t perf = {};
+    doll_gba_core_get_perf(&perf);
+    frameSprite.setTextColor(TFT_CYAN, TFT_BLACK);
+    frameSprite.drawString(
+        "Perf " + String(gbaLastEmuFps10 / 10) + "." + String(gbaLastEmuFps10 % 10) +
+        " fps  core " + String(gbaLastCoreUs / 1000) + "ms  draw/skip " +
+        String(gbaLastDrawCoreUs / 1000) + "/" + String(gbaLastSkipCoreUs / 1000) + "ms",
+        left, footY);
+    frameSprite.drawString(
+        "Audio " + String(gbaLastAudioUs / 1000) + "ms  blit " +
+        String(gbaLastBlitUs / 1000) + "ms  JIT " + String(perf.jit_bytes / 1024) +
+        "K " + String(perf.jit_hits) + "/" + String(perf.jit_misses),
+        left, footY + 16);
     if (note.length()) {
         frameSprite.setTextColor(TFT_GREENYELLOW, TFT_BLACK);
-        frameSprite.drawString(note, left, footY);
+        frameSprite.drawString(note, left, footY + 32);
     }
     frameSprite.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    frameSprite.drawString("D-pad move/change  A ok  B/Menu back", left, footY + 16);
+    frameSprite.drawString("D-pad move/change  A ok  B/Menu back", left, footY + 48);
     gbaDrawTouchControls();
     displayInvalidateShadow();
     pushDisplayFrame();
@@ -499,6 +525,20 @@ static bool gbaRunMenu(uint8_t& legacyButtons, uint16_t& touchButtons) {
                 else next = next == 3 ? 1 : next + 1;
                 gbaSetDisplayScale(next);
                 note = String(gbaScale) + "x: " + String(gbaOutW) + "x" + String(gbaOutH);
+                break;
+            }
+            case GBA_MENU_FRAME_SKIP: {
+                if (left) {
+                    gbaFrameSkip = gbaFrameSkip <= -1 ? GBA_MAX_FRAME_SKIP
+                                                      : gbaFrameSkip - 1;
+                } else {
+                    gbaFrameSkip = gbaFrameSkip >= GBA_MAX_FRAME_SKIP
+                                       ? -1 : gbaFrameSkip + 1;
+                }
+                note = gbaFrameSkip < 0
+                    ? "automatic deadline-based skipping"
+                    : "render 1 of every " + String(gbaFrameSkip + 1) +
+                      " emulated frames; panel remains capped at 66ms";
                 break;
             }
             case GBA_MENU_VOLUME:
@@ -575,9 +615,9 @@ void handleGbaCommand(const String parts[], int partCount) {
         outLine("gba: " + status, C_RED);
         return;
     }
-    // Let the core reserve its bounded executable/hot-memory working set
-    // before allocating an optional scale strip. The strip can fall back to
-    // PSRAM; executable code cannot.
+    // Let the core reserve its bounded executable/hot-memory working set first.
+    // Scaling now writes directly into the already-allocated DSI framebuffer,
+    // so changing display modes does not consume another RAM buffer.
     if (!gbaSetupDisplay()) {
         gbaScale = 1;
         gbaSetupDisplay();
@@ -598,15 +638,28 @@ void handleGbaCommand(const String parts[], int partCount) {
     uint16_t touchButtons = 0;
     constexpr uint32_t frameUs = 16743;  // 280896 GBA cycles at 16.777216 MHz
     uint32_t nextFrame = micros() + frameUs;
+    uint32_t nextBlitUs = micros();
     const uint32_t startedMs = millis();
     uint32_t framesRun = 0;
     uint32_t framesDrawn = 0;
     uint64_t coreTimeUs = 0;
+    uint64_t drawCoreTimeUs = 0;
+    uint64_t skipCoreTimeUs = 0;
+    uint64_t audioTimeUs = 0;
     uint64_t blitTimeUs = 0;
     uint32_t perfStartedUs = micros();
     uint32_t perfFrames = 0;
     uint32_t perfDraws = 0;
+    uint32_t perfSkips = 0;
+    doll_gba_perf_stats_t modeStart = {};
+    doll_gba_core_get_perf(&modeStart);
     int skipped = GBA_MAX_FRAME_SKIP;
+    gbaLastEmuFps10 = 0;
+    gbaLastCoreUs = 0;
+    gbaLastDrawCoreUs = 0;
+    gbaLastSkipCoreUs = 0;
+    gbaLastAudioUs = 0;
+    gbaLastBlitUs = 0;
 
     for (;;) {
         uint8_t events = gbPumpInput(legacyButtons);
@@ -617,24 +670,38 @@ void handleGbaCommand(const String parts[], int partCount) {
             if (gbaRunMenu(legacyButtons, touchButtons)) break;
             gbaClearPanel();
             nextFrame = micros() + frameUs;
-            skipped = GBA_MAX_FRAME_SKIP;
+            nextBlitUs = micros();
+            skipped = gbaFrameSkip < 0 ? GBA_MAX_FRAME_SKIP : gbaFrameSkip;
         }
 
         const bool late = static_cast<int32_t>(micros() - nextFrame) > 0;
-        const bool draw = !late || skipped >= GBA_MAX_FRAME_SKIP;
+        const uint32_t nowUs = micros();
+        const bool panelDue = static_cast<int32_t>(nowUs - nextBlitUs) >= 0;
+        const bool draw = gbaFrameSkip < 0
+            ? (panelDue && (!late || skipped >= GBA_MAX_FRAME_SKIP))
+            : (panelDue && skipped >= gbaFrameSkip);
         gbaHost.setButtons(static_cast<uint16_t>(legacyButtons) | touchButtons);
-        const uint32_t coreStartedUs = micros();
         gbaHost.runFrame(draw);
-        coreTimeUs += static_cast<uint32_t>(micros() - coreStartedUs);
+        const uint32_t coreUs = gbaHost.lastCoreTimeUs();
+        coreTimeUs += coreUs;
+        audioTimeUs += gbaHost.lastAudioTimeUs();
         ++perfFrames;
         if (draw) {
+            drawCoreTimeUs += coreUs;
             const uint32_t blitStartedUs = micros();
             gbaBlitFrame();
             blitTimeUs += static_cast<uint32_t>(micros() - blitStartedUs);
             ++framesDrawn;
             ++perfDraws;
             skipped = 0;
+            nextBlitUs += GBA_PANEL_INTERVAL_US;
+            if (static_cast<int32_t>(micros() - nextBlitUs) >=
+                static_cast<int32_t>(GBA_PANEL_INTERVAL_US)) {
+                nextBlitUs = micros() + GBA_PANEL_INTERVAL_US;
+            }
         } else {
+            skipCoreTimeUs += coreUs;
+            ++perfSkips;
             ++skipped;
         }
         gbaHost.tickSave();
@@ -647,27 +714,53 @@ void handleGbaCommand(const String parts[], int partCount) {
                 ? static_cast<uint32_t>(static_cast<uint64_t>(perfFrames) * 10000000ULL / elapsedUs) : 0;
             const uint32_t drawFps10 = elapsedUs
                 ? static_cast<uint32_t>(static_cast<uint64_t>(perfDraws) * 10000000ULL / elapsedUs) : 0;
+            gbaLastEmuFps10 = emuFps10;
+            gbaLastCoreUs = static_cast<uint32_t>(coreTimeUs / perfFrames);
+            gbaLastDrawCoreUs = perfDraws ? static_cast<uint32_t>(drawCoreTimeUs / perfDraws) : 0;
+            gbaLastSkipCoreUs = perfSkips ? static_cast<uint32_t>(skipCoreTimeUs / perfSkips) : 0;
+            gbaLastAudioUs = static_cast<uint32_t>(audioTimeUs / perfFrames);
+            gbaLastBlitUs = perfDraws ? static_cast<uint32_t>(blitTimeUs / perfDraws) : 0;
             doll_gba_perf_stats_t coreStats = {};
             doll_gba_core_get_perf(&coreStats);
-            Serial.printf("[gba perf] mode=%dx emu=%lu.%lu drawn=%lu.%lu core=%lluus blit=%lluus jit=%luK hit=%lu miss=%lu build=%lu rom=%lu+%lu\n",
+            const uint32_t armUpdates = coreStats.arm_updates - modeStart.arm_updates;
+            const uint32_t thumbUpdates = coreStats.thumb_updates - modeStart.thumb_updates;
+            const uint32_t haltUpdates = coreStats.halt_updates - modeStart.halt_updates;
+            Serial.printf("[gba perf] mode=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus audio=%lluus blit=%lluus arm/thumb/halt=%lu/%lu/%lu pc=%08lx cpsr=%08lx jit=%luK hit=%lu miss=%lu try=%lu off=%lu build=%lu rom=%lu+%lu cpu=%luMHz\n",
                           gbaScale,
+                          gbaFrameSkip,
                           static_cast<unsigned long>(emuFps10 / 10),
                           static_cast<unsigned long>(emuFps10 % 10),
                           static_cast<unsigned long>(drawFps10 / 10),
                           static_cast<unsigned long>(drawFps10 % 10),
-                          coreTimeUs / perfFrames,
-                          perfDraws ? blitTimeUs / perfDraws : 0,
-                          static_cast<unsigned long>(coreStats.jit_bytes / 1024),
-                          static_cast<unsigned long>(coreStats.jit_hits),
-                          static_cast<unsigned long>(coreStats.jit_misses),
-                          static_cast<unsigned long>(coreStats.jit_compiles),
+                           coreTimeUs / perfFrames,
+                           perfDraws ? drawCoreTimeUs / perfDraws : 0,
+                           perfSkips ? skipCoreTimeUs / perfSkips : 0,
+                           audioTimeUs / perfFrames,
+                           perfDraws ? blitTimeUs / perfDraws : 0,
+                           static_cast<unsigned long>(armUpdates),
+                           static_cast<unsigned long>(thumbUpdates),
+                           static_cast<unsigned long>(haltUpdates),
+                           static_cast<unsigned long>(coreStats.last_pc),
+                           static_cast<unsigned long>(coreStats.last_cpsr),
+                           static_cast<unsigned long>(coreStats.jit_bytes / 1024),
+                           static_cast<unsigned long>(coreStats.jit_hits),
+                           static_cast<unsigned long>(coreStats.jit_misses),
+                           static_cast<unsigned long>(coreStats.jit_attempts),
+                           static_cast<unsigned long>(coreStats.jit_disabled),
+                           static_cast<unsigned long>(coreStats.jit_compiles),
                           static_cast<unsigned long>(coreStats.rom_page_loads),
-                          static_cast<unsigned long>(coreStats.rom_page_prefetches));
+                           static_cast<unsigned long>(coreStats.rom_page_prefetches),
+                           static_cast<unsigned long>(getCpuFrequencyMhz()));
+            modeStart = coreStats;
             Serial.flush();
             coreTimeUs = 0;
+            drawCoreTimeUs = 0;
+            skipCoreTimeUs = 0;
+            audioTimeUs = 0;
             blitTimeUs = 0;
             perfFrames = 0;
             perfDraws = 0;
+            perfSkips = 0;
             perfStartedUs = micros();
         }
 
