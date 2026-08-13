@@ -213,8 +213,10 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    Stack writes and WRAM reads are enabled only with the byte-overlay validator.
    The reference pass must place PUSH and SP-relative stores in its shadow
    transaction, then compare generated RAM with that expected result. General
-   WRAM stores remain disabled after `STRB` at `08001008` failed reason `50`.
-   On any mismatch the validator restores original bytes before stock gpSP retries.
+   The `STRB` failure at `08001008` was an IWRAM-arm register-cache bug: the
+   store source must be loaded before generated control flow splits into EWRAM
+   and IWRAM paths. On any mismatch the validator restores original bytes before
+   stock gpSP retries.
 7. Confirm `[gb audio] ready, primed 1280 frames`, an `ES8388 readback ... OK`
    line, and an amp report ending in `pin driving`. During three performance
    windows, `[gba i2s]` pushed frames must keep advancing without drops and

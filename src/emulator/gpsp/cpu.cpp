@@ -3192,7 +3192,11 @@ static bool gba_p4_thumb_jit_emit_wram_store_imm_op(gba_p4_rv_emit_t *emit,
     return false;
 
   u32 branch_iwram_pos;
-  if(!(gba_p4_emit(emit, rv_addi(RV_T4, RV_T3, -3)) &&
+  // Materialize the source before control flow splits. Loading it only while
+  // emitting the EWRAM arm updated compile-time cache metadata, so an IWRAM
+  // branch skipped the actual load but reused that uninitialized host register.
+  if(!(gba_p4_thumb_jit_load_reg(emit, RV_T2, rd) &&
+       gba_p4_emit(emit, rv_addi(RV_T4, RV_T3, -3)) &&
        gba_p4_emit(emit, rv_sltiu(RV_T4, RV_T4, 1)) &&
        gba_p4_emit_branch_placeholder(emit, &branch_iwram_pos)))
     return false;
@@ -3200,8 +3204,7 @@ static bool gba_p4_thumb_jit_emit_wram_store_imm_op(gba_p4_rv_emit_t *emit,
   if(!(gba_p4_emit(emit, rv_slli(RV_T0, RV_T0, 14)) &&
        gba_p4_emit(emit, rv_srli(RV_T0, RV_T0, 14)) &&
        gba_p4_emit_li32(emit, RV_T1, (u32)(uintptr_t)ewram) &&
-       gba_p4_emit(emit, rv_add(RV_T0, RV_T0, RV_T1)) &&
-       gba_p4_thumb_jit_load_reg(emit, RV_T2, rd)))
+       gba_p4_emit(emit, rv_add(RV_T0, RV_T0, RV_T1))))
     return false;
 
   if(width == 4)
@@ -3231,8 +3234,7 @@ static bool gba_p4_thumb_jit_emit_wram_store_imm_op(gba_p4_rv_emit_t *emit,
        gba_p4_emit(emit, rv_slli(RV_T0, RV_T0, 17)) &&
        gba_p4_emit(emit, rv_srli(RV_T0, RV_T0, 17)) &&
        gba_p4_emit_li32(emit, RV_T1, (u32)(uintptr_t)(iwram + 0x8000)) &&
-       gba_p4_emit(emit, rv_add(RV_T0, RV_T0, RV_T1)) &&
-       gba_p4_thumb_jit_load_reg(emit, RV_T2, rd)))
+       gba_p4_emit(emit, rv_add(RV_T0, RV_T0, RV_T1))))
     return false;
 
   if(width == 4)

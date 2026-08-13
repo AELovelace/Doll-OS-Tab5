@@ -48,8 +48,9 @@ Build policy:
   observe prior shadow writes, generated execution performs the sole live write,
   and mismatches restore original bytes before stock gpSP retries the block. This
   corrects the live-stack mutation proven by the `082dfa78` failure.
-  General WRAM store generation remains disabled separately: a shadow comparison
-  caught `STRB` at `08001008` leaving the destination byte unchanged.
+  A shadow comparison caught `STRB` at `08001008` using stale data on the IWRAM
+  arm. Store emitters now load the source before the EWRAM/IWRAM branch so both
+  generated paths operate on an initialized host register.
   Batch and the broad fast dispatcher remain compiled only for later diagnostics.
 - A 128-entry JIT flight recorder captures each compiled block's start/end PC,
   SP, LR, return word, and first/last opcode signature. A model mismatch disables
