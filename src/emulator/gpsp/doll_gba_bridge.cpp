@@ -288,7 +288,7 @@ void doll_gba_core_stop(void) {
 void doll_gba_core_run(uint16_t buttons, bool draw) {
   if (!gbsp_memory) return;
   const uint16_t changedButtons = buttons ^ previousDebugButtons;
-  const uint16_t actionPressed = changedButtons & buttons & 0x090U;
+  const uint16_t debugPressed = changedButtons & buttons & 0x080U;
   currentButtons = buttons;
   skip_next_frame = draw ? 0 : 1;
   update_input();
@@ -299,13 +299,13 @@ void doll_gba_core_run(uint16_t buttons, bool draw) {
         static_cast<unsigned>(read_ioreg(REG_P1)), (unsigned long)reg[REG_PC],
         (unsigned long)reg[REG_LR], (unsigned long)reg[REG_SP]);
   }
-  if (actionPressed && !transitionCaptureConsumed) {
+  if (debugPressed && !transitionCaptureConsumed) {
     transitionCaptureConsumed = true;
     transitionDebugFrames = 600;
     transitionDebugSequence = 0;
     printf(
-        "[gba-step] action=%03x capture armed for 600 frames; CPU mode remains %lu\n",
-        static_cast<unsigned>(actionPressed),
+        "[gba-step] start=%03x capture armed for 600 frames; CPU mode remains %lu\n",
+        static_cast<unsigned>(debugPressed),
         (unsigned long)doll_gba_core_get_cpu_mode());
   }
   previousDebugButtons = buttons;

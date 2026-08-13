@@ -43,9 +43,10 @@ Build policy:
   hand-written ARM/Thumb fast dispatch. Each generated ROM block is compared
   with the stock interpreter eight times before direct trusted execution. A
   failed validation quarantines only that ROM block, leaving safe per-opcode
-  fallback without discarding acceleration everywhere else. WRAM stores remain
-  in the interpreter so validation has no memory side effects; enabled WRAM loads
-  can bail back to the stock interpreter when their live address is unsuitable.
+  fallback without discarding acceleration everywhere else. WRAM loads, WRAM
+  stores, PUSH, and SP-relative stores currently remain in the interpreter. A
+  validator failure at `082dfa78` proved that reference PUSH operations mutated
+  the live stack before generated execution, making validation itself unsafe.
   Batch and the broad fast dispatcher remain compiled only for later diagnostics.
 - A 128-entry JIT flight recorder captures each compiled block's start/end PC,
   SP, LR, return word, and first/last opcode signature. A model mismatch disables
@@ -72,7 +73,7 @@ Runtime lifecycle:
 - Quit flushes the battery save, shuts down gpSP/audio, clears the ticket, and
   restarts into Doll-OS. GBA ROM launches are intentionally SD-only in this mode.
 - Touch contact changes print raw coordinates and their mapped button mask. The
-  first A or Start edge arms one 600-frame trace without changing CPU engine,
+  first Start edge arms one 600-frame trace without changing CPU engine,
   so the input-dependent path is tested under the selected accelerator. Idle performance logs use a
   300-frame window; capture windows use ten frames so terminal copies retain the
   useful transition instead of filling with repeated intro telemetry.

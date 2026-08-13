@@ -405,7 +405,9 @@ static inline void gba_block_cache_touch_thumb(u32 pc, u8 *pc_address_block)
 #define GBA_P4_THUMB_JIT_HIREG_ALU   1
 #define GBA_P4_THUMB_JIT_HIREG_MOV   1
 #define GBA_P4_THUMB_JIT_STACK_READS 1
+#ifndef GBA_P4_THUMB_JIT_STACK_WRITES
 #define GBA_P4_THUMB_JIT_STACK_WRITES 1
+#endif
 #ifndef GBA_P4_THUMB_JIT_WRAM_LOADS
 #define GBA_P4_THUMB_JIT_WRAM_LOADS  0
 #endif

@@ -195,11 +195,11 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    then enter and leave the in-game Start menu repeatedly. No input-dependent
    branch may invoke SoftReset, replay the intro, freeze, or corrupt the save.
    A touchscreen edge must first produce `[gba touch]` with `buttons=010`, then
-   `[gba-input]`, and finally `[gba-step] action=010`. A contact with `pressed=1`
-   and `buttons=000` missed the hitbox. The first A or Start edge arms one
-   600-frame capture but must leave CPU mode at 2 throughout; later dialogue
-   presses do not extend or re-arm it. This exercises the exact title transition
-   under isolated JIT and then returns to representative performance logging.
+   `[gba-input]`. A contact with `pressed=1` and `buttons=000` missed the hitbox.
+   Use Start for the diagnostic title transition: the first Start edge emits
+   `[gba-step] start=080` and arms one 600-frame capture while leaving CPU mode
+   at 2. Normal A presses never arm or extend the expensive trace, so gameplay
+   returns to representative performance logging when the capture completes.
    If it does, preserve the first `[gba-jit] guard` line and all following
    `[gba-jit] trace` lines before relaunching. Reason `53575253` is SoftReset,
    `42414441` is a bad ARM fetch, `42414454` is a bad Thumb fetch, and a
@@ -210,6 +210,12 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
 6. From the Escape menu, activate `CPU engine` and confirm it remains
    `Isolated JIT (locked)` with a batch/fast-dispatch quarantine note. Do not
    enable Batch or Turbo until the title-state corruption is isolated.
+   This build also requires `GBA_P4_THUMB_JIT_STACK_WRITES=0`,
+   `GBA_P4_THUMB_JIT_WRAM_LOADS=0`, and `GBA_P4_THUMB_JIT_WRAM_STORES=0`.
+   PUSH/SP-relative stores otherwise mutate the real stack during the reference
+   validation pass, causing the generated pass to observe different memory.
+   Memory-writing blocks must fall back to stock gpSP while ROM/register
+   arithmetic blocks continue to use the JIT.
 7. Confirm `[gb audio] ready, primed 1280 frames`, an `ES8388 readback ... OK`
    line, and an amp report ending in `pin driving`. During three performance
    windows, `[gba i2s]` pushed frames must keep advancing without drops and
