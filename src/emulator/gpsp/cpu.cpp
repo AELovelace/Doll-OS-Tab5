@@ -26,6 +26,7 @@ extern "C" {
 #include <sdkconfig.h>
 #include <esp_attr.h>
 #include <esp_heap_caps.h>
+#include <esp_log.h>
 #include <esp_memory_utils.h>
 #include <string.h>
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
@@ -95,6 +96,23 @@ u32 gba_thumb_jit_fail_expected = 0;
 u32 gba_thumb_jit_fail_actual = 0;
 u32 gba_thumb_jit_fail_reason = 0;
 u32 gba_thumb_jit_arena_full = 0;
+u32 gba_thumb_jit_used_bytes = 0;
+u32 gba_thumb_jit_reject_hits = 0;
+u32 gba_thumb_jit_hot_waits = 0;
+u32 gba_thumb_jit_reuses = 0;
+u32 gba_thumb_jit_adapt_probes = 0;
+u32 gba_thumb_jit_top_break = 0;
+u32 gba_thumb_jit_top_break_count = 0;
+u32 gba_thumb_batch_runs = 0;
+u32 gba_thumb_batch_ops = 0;
+u32 gba_thumb_batch_enabled = 0;
+u32 gba_thumb_jit_runtime_enabled = 0;
+u32 gba_thumb_jit_debug_validate = 0;
+u32 gba_thumb_jit_guard_trips = 0;
+u32 gba_thumb_jit_last_pc = 0;
+u32 gba_thumb_jit_last_end_pc = 0;
+u32 gba_thumb_jit_last_ret = 0;
+u32 gba_thumb_jit_last_signature = 0;
 #if GBA_P4_THUMB_DYNAREC
 static u32 *gba_thumb_jit_break_histogram = NULL;
 static u32 *gba_thumb_jit_fail_histogram = NULL;
@@ -349,6 +367,14 @@ static inline void gba_block_cache_touch_thumb(u32 pc, u8 *pc_address_block)
 #ifndef GBA_P4_THUMB_JIT_MAX_OPS
 #define GBA_P4_THUMB_JIT_MAX_OPS     8
 #endif
+#ifndef GBA_P4_THUMB_JIT_WAYS
+#define GBA_P4_THUMB_JIT_WAYS        4
+#endif
+#define GBA_P4_THUMB_JIT_SETS        (GBA_P4_THUMB_JIT_ENTRIES / GBA_P4_THUMB_JIT_WAYS)
+#if (GBA_P4_THUMB_JIT_ENTRIES % GBA_P4_THUMB_JIT_WAYS) != 0 || \
+    (GBA_P4_THUMB_JIT_SETS & (GBA_P4_THUMB_JIT_SETS - 1)) != 0
+#error "GBA Thumb JIT sets must be a power of two"
+#endif
 #define GBA_P4_THUMB_JIT_MIN_OPS     3
 #ifndef GBA_P4_THUMB_JIT_ARENA_BYTES
 #define GBA_P4_THUMB_JIT_ARENA_BYTES (64 * 1024)
@@ -373,7 +399,7 @@ static inline void gba_block_cache_touch_thumb(u32 pc, u8 *pc_address_block)
 #ifndef GBA_P4_THUMB_JIT_WRAM_STORES
 #define GBA_P4_THUMB_JIT_WRAM_STORES 0
 #endif
-#define GBA_P4_THUMB_JIT_TRUST_VALIDATIONS 2
+#define GBA_P4_THUMB_JIT_TRUST_VALIDATIONS 8
 #define GBA_P4_THUMB_JIT_RECYCLE_ARENA 0
 #define GBA_P4_THUMB_JIT_REUSE_EXHAUSTED 1
 #ifndef GBA_P4_THUMB_JIT_HOT_ENTRIES
@@ -387,6 +413,7 @@ static inline void gba_block_cache_touch_thumb(u32 pc, u8 *pc_address_block)
 #define GBA_P4_THUMB_JIT_STALE_HIT_LIMIT 64
 #define GBA_P4_THUMB_JIT_SUSPEND_MISSES 8192
 #define GBA_P4_THUMB_JIT_SUSPEND_OPS 4194304
+#define GBA_P4_THUMB_JIT_ADAPT_SAMPLE_MASK 63U
 #define GBA_P4_THUMB_JIT_RET_OPS_MASK 0xFFFFU
 #define GBA_P4_THUMB_JIT_RET_EXTRA_SHIFT 16
 #define GBA_P4_THUMB_JIT_RET_EXTRA_MASK 0xFFU
@@ -406,10 +433,26 @@ typedef struct
   gba_p4_thumb_jit_fn fn;
 } gba_p4_thumb_jit_entry_t;
 
-// These tables cost roughly 48 KB in the Doll-OS configuration. Keeping them
-// as fixed BSS starves unrelated shell/network features even when GBA has never
-// run, so allocate them lazily from PSRAM with the executable arena.
+#define GBA_P4_THUMB_JIT_TRACE_COUNT 16
+typedef struct
+{
+  u32 pc;
+  u32 end_pc;
+  u32 sp;
+  u32 lr;
+  u32 ret;
+  u32 signature;
+} gba_p4_thumb_jit_trace_t;
+
+static gba_p4_thumb_jit_trace_t gba_p4_thumb_jit_trace[GBA_P4_THUMB_JIT_TRACE_COUNT];
+static u32 gba_p4_thumb_jit_trace_head;
+static bool gba_p4_thumb_jit_fault_reported;
+
+// These tables cost roughly 320 KB in the current associative configuration.
+// Keeping them as fixed BSS starves unrelated shell/network features even when
+// GBA has never run, so allocate them lazily from PSRAM with the executable arena.
 static gba_p4_thumb_jit_entry_t *gba_p4_thumb_jit_cache;
+static u8 *gba_p4_thumb_jit_replacement;
 static u32 *gba_p4_thumb_jit_reject_pc;
 static u32 *gba_p4_thumb_jit_reject_sig;
 static u16 *gba_p4_thumb_jit_reject_break;
@@ -424,6 +467,7 @@ static u32 gba_p4_thumb_jit_bank_index;
 static u32 gba_p4_thumb_jit_exhausted_hits;
 static u32 gba_p4_thumb_jit_exhausted_misses;
 static u32 gba_p4_thumb_jit_probe_suspend;
+static u32 gba_p4_thumb_jit_adapt_counter;
 static bool gba_p4_thumb_jit_ready;
 static bool gba_p4_thumb_jit_disabled;
 static bool gba_p4_thumb_jit_arena_exhausted;
@@ -596,6 +640,9 @@ static bool gba_p4_thumb_jit_init(void)
   static const u32 arena_sizes[] =
   {
     GBA_P4_THUMB_JIT_ARENA_BYTES,
+    160 * 1024,
+    128 * 1024,
+    96 * 1024,
     80 * 1024,
     64 * 1024,
     48 * 1024,
@@ -617,9 +664,13 @@ static bool gba_p4_thumb_jit_init(void)
   gba_p4_thumb_jit_exhausted_hits = 0;
   gba_p4_thumb_jit_exhausted_misses = 0;
   gba_p4_thumb_jit_probe_suspend = 0;
+  gba_p4_thumb_jit_adapt_counter = 0;
 
   gba_p4_thumb_jit_cache = (gba_p4_thumb_jit_entry_t *)heap_caps_calloc(
       GBA_P4_THUMB_JIT_ENTRIES, sizeof(*gba_p4_thumb_jit_cache),
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  gba_p4_thumb_jit_replacement = (u8 *)heap_caps_calloc(
+      GBA_P4_THUMB_JIT_SETS, sizeof(*gba_p4_thumb_jit_replacement),
       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   gba_p4_thumb_jit_reject_pc = (u32 *)heap_caps_calloc(
       GBA_P4_THUMB_JIT_REJECTS, sizeof(*gba_p4_thumb_jit_reject_pc),
@@ -642,12 +693,14 @@ static bool gba_p4_thumb_jit_init(void)
   gba_thumb_jit_fail_histogram = (u32 *)heap_caps_calloc(
       256, sizeof(*gba_thumb_jit_fail_histogram),
       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if(!(gba_p4_thumb_jit_cache && gba_p4_thumb_jit_reject_pc &&
+  if(!(gba_p4_thumb_jit_cache && gba_p4_thumb_jit_replacement &&
+       gba_p4_thumb_jit_reject_pc &&
        gba_p4_thumb_jit_reject_sig && gba_p4_thumb_jit_reject_break &&
        gba_p4_thumb_jit_hot_pc && gba_p4_thumb_jit_hot_count &&
        gba_thumb_jit_break_histogram && gba_thumb_jit_fail_histogram))
   {
     if(gba_p4_thumb_jit_cache) heap_caps_free(gba_p4_thumb_jit_cache);
+    if(gba_p4_thumb_jit_replacement) heap_caps_free(gba_p4_thumb_jit_replacement);
     if(gba_p4_thumb_jit_reject_pc) heap_caps_free(gba_p4_thumb_jit_reject_pc);
     if(gba_p4_thumb_jit_reject_sig) heap_caps_free(gba_p4_thumb_jit_reject_sig);
     if(gba_p4_thumb_jit_reject_break) heap_caps_free(gba_p4_thumb_jit_reject_break);
@@ -656,6 +709,7 @@ static bool gba_p4_thumb_jit_init(void)
     if(gba_thumb_jit_break_histogram) heap_caps_free(gba_thumb_jit_break_histogram);
     if(gba_thumb_jit_fail_histogram) heap_caps_free(gba_thumb_jit_fail_histogram);
     gba_p4_thumb_jit_cache = NULL;
+    gba_p4_thumb_jit_replacement = NULL;
     gba_p4_thumb_jit_reject_pc = NULL;
     gba_p4_thumb_jit_reject_sig = NULL;
     gba_p4_thumb_jit_reject_break = NULL;
@@ -703,6 +757,7 @@ static bool gba_p4_thumb_jit_init(void)
   if(!gba_p4_thumb_jit_bank_count)
   {
     heap_caps_free(gba_p4_thumb_jit_cache);
+    heap_caps_free(gba_p4_thumb_jit_replacement);
     heap_caps_free(gba_p4_thumb_jit_reject_pc);
     heap_caps_free(gba_p4_thumb_jit_reject_sig);
     heap_caps_free(gba_p4_thumb_jit_reject_break);
@@ -711,6 +766,7 @@ static bool gba_p4_thumb_jit_init(void)
     heap_caps_free(gba_thumb_jit_break_histogram);
     heap_caps_free(gba_thumb_jit_fail_histogram);
     gba_p4_thumb_jit_cache = NULL;
+    gba_p4_thumb_jit_replacement = NULL;
     gba_p4_thumb_jit_reject_pc = NULL;
     gba_p4_thumb_jit_reject_sig = NULL;
     gba_p4_thumb_jit_reject_break = NULL;
@@ -726,6 +782,8 @@ static bool gba_p4_thumb_jit_init(void)
   gba_p4_thumb_jit_arena_exhausted = false;
   memset(gba_p4_thumb_jit_cache, 0,
       GBA_P4_THUMB_JIT_ENTRIES * sizeof(*gba_p4_thumb_jit_cache));
+  memset(gba_p4_thumb_jit_replacement, 0,
+      GBA_P4_THUMB_JIT_SETS * sizeof(*gba_p4_thumb_jit_replacement));
   memset(gba_p4_thumb_jit_reject_pc, 0,
       GBA_P4_THUMB_JIT_REJECTS * sizeof(*gba_p4_thumb_jit_reject_pc));
   memset(gba_p4_thumb_jit_reject_sig, 0,
@@ -750,14 +808,83 @@ static void gba_p4_thumb_jit_flush(void)
 {
   memset(gba_p4_thumb_jit_cache, 0,
       GBA_P4_THUMB_JIT_ENTRIES * sizeof(*gba_p4_thumb_jit_cache));
+  memset(gba_p4_thumb_jit_replacement, 0,
+      GBA_P4_THUMB_JIT_SETS * sizeof(*gba_p4_thumb_jit_replacement));
   memset(gba_p4_thumb_jit_used_words, 0, sizeof(gba_p4_thumb_jit_used_words));
   gba_p4_thumb_jit_bank_index = 0;
   gba_p4_thumb_jit_exhausted_hits = 0;
   gba_p4_thumb_jit_exhausted_misses = 0;
   gba_p4_thumb_jit_probe_suspend = 0;
+  gba_p4_thumb_jit_adapt_counter = 0;
   gba_p4_thumb_jit_arena_exhausted = false;
+  gba_thumb_jit_used_bytes = 0;
   gba_thumb_jit_flushes++;
 }
+
+extern "C" void gba_p4_thumb_jit_reset_stats(void)
+{
+  gba_thumb_jit_hits = 0;
+  gba_thumb_jit_misses = 0;
+  gba_thumb_jit_compiles = 0;
+  gba_thumb_jit_ops = 0;
+  gba_thumb_jit_flushes = 0;
+  gba_thumb_jit_attempts = 0;
+  gba_thumb_jit_region_skips = 0;
+  gba_thumb_jit_short_blocks = 0;
+  gba_thumb_jit_disabled = 0;
+  gba_thumb_jit_validate_passes = 0;
+  gba_thumb_jit_validate_failures = 0;
+  gba_thumb_jit_arena_full = 0;
+  gba_thumb_jit_reject_hits = 0;
+  gba_thumb_jit_hot_waits = 0;
+  gba_thumb_jit_reuses = 0;
+  gba_thumb_jit_adapt_probes = 0;
+  gba_thumb_jit_top_break = 0;
+  gba_thumb_jit_top_break_count = 0;
+  gba_thumb_batch_runs = 0;
+  gba_thumb_batch_ops = 0;
+  gba_thumb_jit_guard_trips = 0;
+  gba_thumb_jit_last_pc = 0;
+  gba_thumb_jit_last_end_pc = 0;
+  gba_thumb_jit_last_ret = 0;
+  gba_thumb_jit_last_signature = 0;
+  gba_p4_thumb_jit_trace_head = 0;
+  gba_p4_thumb_jit_fault_reported = false;
+  memset(gba_p4_thumb_jit_trace, 0, sizeof(gba_p4_thumb_jit_trace));
+  if(gba_thumb_jit_break_histogram)
+    memset(gba_thumb_jit_break_histogram, 0, 256 * sizeof(*gba_thumb_jit_break_histogram));
+} // Starts each ROM with clean JIT telemetry while preserving its allocated arena.
+
+extern "C" void gba_p4_thumb_jit_report_fault(u32 reason, u32 fault_pc)
+{
+  gba_thumb_jit_guard_trips++;
+  gba_thumb_jit_runtime_enabled = 0;
+  gba_thumb_batch_enabled = 0;
+  if(gba_p4_thumb_jit_fault_reported)
+    return;
+
+  gba_p4_thumb_jit_fault_reported = true;
+  ESP_LOGE("gba-jit", "guard reason=%08lx fault=%08lx last=%08lx->%08lx ret=%08lx sig=%08lx",
+      (unsigned long)reason, (unsigned long)fault_pc,
+      (unsigned long)gba_thumb_jit_last_pc,
+      (unsigned long)gba_thumb_jit_last_end_pc,
+      (unsigned long)gba_thumb_jit_last_ret,
+      (unsigned long)gba_thumb_jit_last_signature);
+
+  u32 available = gba_p4_thumb_jit_trace_head < GBA_P4_THUMB_JIT_TRACE_COUNT ?
+      gba_p4_thumb_jit_trace_head : GBA_P4_THUMB_JIT_TRACE_COUNT;
+  u32 first = gba_p4_thumb_jit_trace_head - available;
+  for(u32 i = 0; i < available; i++)
+  {
+    const gba_p4_thumb_jit_trace_t *trace =
+        &gba_p4_thumb_jit_trace[(first + i) & (GBA_P4_THUMB_JIT_TRACE_COUNT - 1)];
+    ESP_LOGE("gba-jit", "trace[%02lu] pc=%08lx end=%08lx sp=%08lx lr=%08lx ret=%08lx sig=%08lx",
+        (unsigned long)i, (unsigned long)trace->pc,
+        (unsigned long)trace->end_pc, (unsigned long)trace->sp,
+        (unsigned long)trace->lr, (unsigned long)trace->ret,
+        (unsigned long)trace->signature);
+  }
+} // Freezes accelerators and prints the last sixteen compiled-block transitions.
 
 extern "C" void gba_p4_thumb_jit_reset(void)
 {
@@ -775,6 +902,7 @@ extern "C" void gba_p4_thumb_jit_shutdown(void)
     gba_p4_thumb_jit_write[i] = NULL;
   }
   if(gba_p4_thumb_jit_cache) heap_caps_free(gba_p4_thumb_jit_cache);
+  if(gba_p4_thumb_jit_replacement) heap_caps_free(gba_p4_thumb_jit_replacement);
   if(gba_p4_thumb_jit_reject_pc) heap_caps_free(gba_p4_thumb_jit_reject_pc);
   if(gba_p4_thumb_jit_reject_sig) heap_caps_free(gba_p4_thumb_jit_reject_sig);
   if(gba_p4_thumb_jit_reject_break) heap_caps_free(gba_p4_thumb_jit_reject_break);
@@ -783,6 +911,7 @@ extern "C" void gba_p4_thumb_jit_shutdown(void)
   if(gba_thumb_jit_break_histogram) heap_caps_free(gba_thumb_jit_break_histogram);
   if(gba_thumb_jit_fail_histogram) heap_caps_free(gba_thumb_jit_fail_histogram);
   gba_p4_thumb_jit_cache = NULL;
+  gba_p4_thumb_jit_replacement = NULL;
   gba_p4_thumb_jit_reject_pc = NULL;
   gba_p4_thumb_jit_reject_sig = NULL;
   gba_p4_thumb_jit_reject_break = NULL;
@@ -848,8 +977,48 @@ static inline bool gba_p4_thumb_jit_can_allocate_after_full(void)
 
 static inline u32 gba_p4_thumb_jit_hash(u32 pc)
 {
-  return ((pc >> 1) ^ (pc >> 7) ^ (pc >> 15)) & (GBA_P4_THUMB_JIT_ENTRIES - 1);
+  u32 set = ((pc >> 1) ^ (pc >> 7) ^ (pc >> 15)) &
+      (GBA_P4_THUMB_JIT_SETS - 1);
+  return set * GBA_P4_THUMB_JIT_WAYS;
 }
+
+static inline gba_p4_thumb_jit_entry_t *gba_p4_thumb_jit_lookup(u32 pc)
+{
+  u32 base = gba_p4_thumb_jit_hash(pc);
+  for(u32 way = 0; way < GBA_P4_THUMB_JIT_WAYS; way++)
+  {
+    gba_p4_thumb_jit_entry_t *entry = &gba_p4_thumb_jit_cache[base + way];
+    if(entry->pc == pc && entry->fn)
+      return entry;
+  }
+  return NULL;
+} // Searches every way so unrelated hot blocks with the same set remain resident.
+
+static inline gba_p4_thumb_jit_entry_t *gba_p4_thumb_jit_select_entry(u32 pc)
+{
+  u32 base = gba_p4_thumb_jit_hash(pc);
+  u32 set = base / GBA_P4_THUMB_JIT_WAYS;
+
+  if(!gba_p4_thumb_jit_arena_exhausted)
+  {
+    for(u32 way = 0; way < GBA_P4_THUMB_JIT_WAYS; way++)
+    {
+      gba_p4_thumb_jit_entry_t *entry = &gba_p4_thumb_jit_cache[base + way];
+      if(!entry->fn)
+        return entry;
+    }
+  }
+
+  u32 first = gba_p4_thumb_jit_replacement[set]++ % GBA_P4_THUMB_JIT_WAYS;
+  for(u32 probe = 0; probe < GBA_P4_THUMB_JIT_WAYS; probe++)
+  {
+    gba_p4_thumb_jit_entry_t *entry =
+        &gba_p4_thumb_jit_cache[base + ((first + probe) % GBA_P4_THUMB_JIT_WAYS)];
+    if(!gba_p4_thumb_jit_arena_exhausted || (entry->fn && entry->code_words))
+      return entry;
+  }
+  return NULL;
+} // Uses empty ways first, then round-robin replacement within the colliding set.
 
 static inline bool gba_p4_thumb_jit_hot_enough(u32 pc)
 {
@@ -956,18 +1125,36 @@ static inline bool gba_p4_thumb_jit_is_rejected(u32 pc, u8 *pc_address_block)
   if(gba_p4_thumb_jit_reject_pc[index] != pc)
     return false;
 
+  gba_thumb_jit_reject_hits++;
   if(gba_p4_thumb_jit_reject_break[index])
-    gba_thumb_jit_break_histogram[gba_p4_thumb_jit_reject_break[index] - 1]++;
+  {
+    u32 group = gba_p4_thumb_jit_reject_break[index] - 1;
+    u32 count = ++gba_thumb_jit_break_histogram[group];
+    if(count > gba_thumb_jit_top_break_count)
+    {
+      gba_thumb_jit_top_break = group;
+      gba_thumb_jit_top_break_count = count;
+    }
+  }
 
   return true;
 }
 
 static inline void gba_p4_thumb_jit_clear_entry(u32 pc)
 {
-  gba_p4_thumb_jit_entry_t *entry = &gba_p4_thumb_jit_cache[gba_p4_thumb_jit_hash(pc)];
-  if(entry->pc == pc)
+  gba_p4_thumb_jit_entry_t *entry = gba_p4_thumb_jit_lookup(pc);
+  if(entry)
     memset(entry, 0, sizeof(*entry));
 }
+
+static inline bool gba_p4_thumb_jit_control_flow_opcode(u32 opcode)
+{
+  u32 top = (opcode >> 8) & 0xFF;
+  return (top >= 0xD0 && top <= 0xDD) ||
+         (top >= 0xE0 && top <= 0xE7) ||
+         (top >= 0xF0 && top <= 0xFF) ||
+         gba_p4_thumb_jit_pc_write_opcode(opcode);
+} // Keeps data-dependent branches, calls, and returns in the exact interpreter.
 
 static inline bool gba_p4_thumb_jit_supported_opcode(u32 opcode)
 {
@@ -1071,7 +1258,14 @@ static inline void gba_p4_thumb_jit_mark_rejected(u32 pc, u8 *pc_address_block)
       (break_group < 0x100) ? (u16)(break_group + 1) : 0;
 
   if(break_group < 0x100)
-    gba_thumb_jit_break_histogram[break_group]++;
+  {
+    u32 count = ++gba_thumb_jit_break_histogram[break_group];
+    if(count > gba_thumb_jit_top_break_count)
+    {
+      gba_thumb_jit_top_break = break_group;
+      gba_thumb_jit_top_break_count = count;
+    }
+  }
 }
 
 static u32 gba_p4_thumb_jit_collect(u32 pc, u8 *pc_address_block, u16 *opcodes)
@@ -1082,19 +1276,18 @@ static u32 gba_p4_thumb_jit_collect(u32 pc, u8 *pc_address_block, u16 *opcodes)
   while(count < GBA_P4_THUMB_JIT_MAX_OPS && offset <= (0x8000 - 2))
   {
     u32 opcode = readaddress16(pc_address_block, offset);
+    if(gba_p4_thumb_jit_control_flow_opcode(opcode))
+      break;
     if(!gba_p4_thumb_jit_supported_opcode(opcode))
       break;
     opcodes[count++] = (u16)opcode;
-    if(gba_p4_thumb_jit_terminal_opcode(opcode) ||
-       gba_p4_thumb_jit_pc_write_opcode(opcode))
-      break;
     offset += 2;
   }
 
   return count;
 }
 
-static bool gba_p4_thumb_jit_matches(gba_p4_thumb_jit_entry_t *entry,
+static inline bool gba_p4_thumb_jit_matches(gba_p4_thumb_jit_entry_t *entry,
     u32 pc, u8 *pc_address_block)
 {
   if(entry->pc != pc || !entry->fn)
@@ -1103,6 +1296,13 @@ static bool gba_p4_thumb_jit_matches(gba_p4_thumb_jit_entry_t *entry,
   if(entry->op_count < GBA_P4_THUMB_JIT_MIN_OPS &&
      (entry->op_count == 0 || !gba_p4_thumb_jit_allow_single_opcode(entry->opcodes[0])))
     return false;
+
+  // Cartridge ROM is immutable after loading, and load/state transitions flush
+  // the JIT. Once the safety interpreter has validated a block twice, its PC is
+  // therefore a sufficient identity check and the hot path can avoid rereading
+  // as many as 16 opcodes from the PSRAM-backed ROM cache on every execution.
+  if(entry->validated >= GBA_P4_THUMB_JIT_TRUST_VALIDATIONS)
+    return true;
 
   u32 offset = pc & 0x7FFF;
   for(u32 i = 0; i < entry->op_count; i++, offset += 2)
@@ -1707,10 +1907,14 @@ static inline bool gba_p4_thumb_jit_record_fail(gba_p4_thumb_jit_entry_t *entry,
   gba_thumb_jit_fail_expected = expected;
   gba_thumb_jit_fail_actual = actual;
   gba_thumb_jit_fail_reason = reason;
+  if(reason != 1)
+    gba_p4_thumb_jit_report_fault(0x4A000000U | reason,
+        entry ? entry->pc : reg[REG_PC]);
   return false;
 }
 
-static bool gba_p4_thumb_jit_validate_and_commit(gba_p4_thumb_jit_entry_t *entry,
+static __attribute__((noinline, cold)) bool gba_p4_thumb_jit_validate_and_commit(
+    gba_p4_thumb_jit_entry_t *entry,
     u32 &n_flag, u32 &z_flag, u32 &c_flag, u32 &v_flag, u32 *jit_ret)
 {
   struct
@@ -3002,7 +3206,8 @@ static inline void gba_p4_thumb_jit_commit_entry(gba_p4_thumb_jit_entry_t *entry
   entry->fn = (gba_p4_thumb_jit_fn)emit->exec;
 }
 
-static gba_p4_thumb_jit_entry_t *gba_p4_thumb_jit_compile(u32 pc,
+static __attribute__((noinline, cold)) gba_p4_thumb_jit_entry_t *
+gba_p4_thumb_jit_compile(u32 pc,
     u8 *pc_address_block)
 {
   u16 opcodes[GBA_P4_THUMB_JIT_MAX_OPS];
@@ -3020,8 +3225,11 @@ static gba_p4_thumb_jit_entry_t *gba_p4_thumb_jit_compile(u32 pc,
   if(!gba_p4_thumb_jit_init())
     return NULL;
 
-  u32 index = gba_p4_thumb_jit_hash(pc);
-  gba_p4_thumb_jit_entry_t *entry = &gba_p4_thumb_jit_cache[index];
+  gba_p4_thumb_jit_entry_t *entry = gba_p4_thumb_jit_lookup(pc);
+  if(!entry)
+    entry = gba_p4_thumb_jit_select_entry(pc);
+  if(!entry)
+    return NULL;
 
   if(GBA_P4_THUMB_JIT_REUSE_EXHAUSTED &&
      gba_p4_thumb_jit_arena_exhausted && entry->fn && entry->code_words)
@@ -3047,6 +3255,7 @@ static gba_p4_thumb_jit_entry_t *gba_p4_thumb_jit_compile(u32 pc,
       gba_p4_thumb_jit_commit_entry(entry, pc, opcodes, op_count, terminal,
           can_bail, &emit, reserve_words);
       gba_thumb_jit_compiles++;
+      gba_thumb_jit_reuses++;
       return entry;
     }
   }
@@ -3102,6 +3311,9 @@ static gba_p4_thumb_jit_entry_t *gba_p4_thumb_jit_compile(u32 pc,
       can_bail, &emit, reserve_words);
 
   gba_p4_thumb_jit_used_words[bank] = start_words + reserve_words;
+  gba_thumb_jit_used_bytes = 0;
+  for(u32 i = 0; i < gba_p4_thumb_jit_bank_count; i++)
+    gba_thumb_jit_used_bytes += gba_p4_thumb_jit_used_words[i] * sizeof(u32);
   gba_thumb_jit_compiles++;
   return entry;
 }
@@ -3133,8 +3345,8 @@ static inline int gba_p4_thumb_jit_try(u8 *pc_address_block, s32 cycles_remainin
   if(!gba_p4_thumb_jit_init())
     return 0;
 
-  gba_p4_thumb_jit_entry_t *entry = &gba_p4_thumb_jit_cache[gba_p4_thumb_jit_hash(pc)];
-  if(!gba_p4_thumb_jit_matches(entry, pc, pc_address_block))
+  gba_p4_thumb_jit_entry_t *entry = gba_p4_thumb_jit_lookup(pc);
+  if(!entry || !gba_p4_thumb_jit_matches(entry, pc, pc_address_block))
   {
     gba_thumb_jit_misses++;
 
@@ -3162,6 +3374,7 @@ static inline int gba_p4_thumb_jit_try(u8 *pc_address_block, s32 cycles_remainin
 
     if(!gba_p4_thumb_jit_hot_enough(pc))
     {
+      gba_thumb_jit_hot_waits++;
       gba_thumb_jit_short_blocks++;
       return 0;
     }
@@ -3170,21 +3383,10 @@ static inline int gba_p4_thumb_jit_try(u8 *pc_address_block, s32 cycles_remainin
     {
       gba_p4_thumb_jit_exhausted_misses++;
 #if GBA_P4_THUMB_JIT_REUSE_EXHAUSTED
-      bool can_reuse_entry = entry->fn && entry->code_words;
-      if(!can_reuse_entry)
-      {
-        gba_thumb_jit_short_blocks++;
-        return 0;
-      }
-      if(!(gba_p4_thumb_jit_recycle_stale_arena() ||
-           gba_p4_thumb_jit_recycle_arena()))
-      {
-        if(!can_reuse_entry)
-        {
-          gba_thumb_jit_short_blocks++;
-          return 0;
-        }
-      }
+      // The compiler selects a reusable executable slot from any way in this
+      // set. The requested PC is necessarily absent here, so `entry` may be null.
+      (void)gba_p4_thumb_jit_recycle_stale_arena();
+      (void)gba_p4_thumb_jit_recycle_arena();
 #else
       if(!(gba_p4_thumb_jit_recycle_stale_arena() ||
            gba_p4_thumb_jit_recycle_arena()))
@@ -3235,14 +3437,41 @@ static inline int gba_p4_thumb_jit_try(u8 *pc_address_block, s32 cycles_remainin
     return 0;
   }
 
+  u32 trace_index = gba_p4_thumb_jit_trace_head++ &
+      (GBA_P4_THUMB_JIT_TRACE_COUNT - 1);
+  gba_p4_thumb_jit_trace_t *trace = &gba_p4_thumb_jit_trace[trace_index];
+  trace->pc = pc;
+  trace->end_pc = pc;
+  trace->sp = reg[REG_SP];
+  trace->lr = reg[REG_LR];
+  trace->ret = 0;
+  trace->signature = entry->opcodes[0] |
+      ((u32)entry->opcodes[entry->op_count - 1] << 16);
+  gba_thumb_jit_last_pc = pc;
+  gba_thumb_jit_last_end_pc = pc;
+  gba_thumb_jit_last_ret = 0;
+  gba_thumb_jit_last_signature = trace->signature;
+
   u32 jit_ret = entry->op_count;
   bool ok;
-  if(entry->validated >= GBA_P4_THUMB_JIT_TRUST_VALIDATIONS)
+  if(!gba_thumb_jit_debug_validate &&
+     entry->validated >= GBA_P4_THUMB_JIT_TRUST_VALIDATIONS)
     ok = gba_p4_thumb_jit_execute_committed(entry, n_flag, z_flag, c_flag, v_flag,
         &jit_ret);
   else
     ok = gba_p4_thumb_jit_validate_and_commit(entry, n_flag, z_flag, c_flag, v_flag,
         &jit_ret);
+
+  trace->end_pc = reg[REG_PC];
+  trace->ret = jit_ret;
+  gba_thumb_jit_last_end_pc = trace->end_pc;
+  gba_thumb_jit_last_ret = jit_ret;
+
+  u32 executed_ops = jit_ret & GBA_P4_THUMB_JIT_RET_OPS_MASK;
+  u32 expected_pc = pc + executed_ops * 2;
+  if(ok && reg[REG_PC] != expected_pc)
+    ok = gba_p4_thumb_jit_record_fail(entry, 0x80, executed_ops,
+        expected_pc, reg[REG_PC]);
 
   if(!ok)
   {
@@ -3258,6 +3487,16 @@ static inline int gba_p4_thumb_jit_try(u8 *pc_address_block, s32 cycles_remainin
 
 static inline bool gba_p4_thumb_jit_can_start(u32 opcode, u8 *pc_address_block)
 {
+  if(!gba_thumb_jit_runtime_enabled)
+    return false;
+
+  u32 pc = reg[REG_PC] & ~1U;
+
+  // The P4 emitter only accepts immutable Game Pak ROM. Reject IWRAM and
+  // invalid fetches here so they never enter the larger JIT lookup routine.
+  if(!pc_address_block || !gba_p4_thumb_jit_region_allowed(pc >> 24))
+    return false;
+
   if(gba_p4_thumb_jit_probe_suspend)
   {
     gba_p4_thumb_jit_probe_suspend--;
@@ -3267,15 +3506,24 @@ static inline bool gba_p4_thumb_jit_can_start(u32 opcode, u8 *pc_address_block)
   if(!gba_p4_thumb_jit_supported_opcode(opcode))
     return false;
 
+  if(gba_p4_thumb_jit_control_flow_opcode(opcode))
+    return false;
+
   if(gba_p4_thumb_jit_arena_exhausted)
   {
-    if(!gba_p4_thumb_jit_ready || !pc_address_block)
+    if(!gba_p4_thumb_jit_ready)
       return false;
 
-    u32 pc = reg[REG_PC] & ~1U;
-    gba_p4_thumb_jit_entry_t *entry =
-        &gba_p4_thumb_jit_cache[gba_p4_thumb_jit_hash(pc)];
-    return gba_p4_thumb_jit_matches(entry, pc, pc_address_block);
+    gba_p4_thumb_jit_entry_t *entry = gba_p4_thumb_jit_lookup(pc);
+    // Cached blocks remain the zero-overhead path. One in every 64 uncached
+    // candidates may enter the hotness filter so a long-running game can replace
+    // stale startup code without paying a PSRAM cache lookup on every instruction.
+    if(entry)
+      return true;
+    if((++gba_p4_thumb_jit_adapt_counter & GBA_P4_THUMB_JIT_ADAPT_SAMPLE_MASK) != 0)
+      return false;
+    gba_thumb_jit_adapt_probes++;
+    return true;
   }
 
   return true;
@@ -3294,8 +3542,20 @@ extern "C" void gba_p4_thumb_jit_reset(void)
 {
 }
 
+extern "C" void gba_p4_thumb_jit_reset_stats(void)
+{
+}
+
 extern "C" void gba_p4_thumb_jit_shutdown(void)
 {
+}
+
+extern "C" void gba_p4_thumb_jit_report_fault(u32 reason, u32 fault_pc)
+{
+  (void)reason;
+  (void)fault_pc;
+  gba_thumb_jit_runtime_enabled = 0;
+  gba_thumb_batch_enabled = 0;
 }
 
 static inline int gba_p4_thumb_jit_try(u8 *pc_address_block, s32 cycles_remaining,
@@ -5558,6 +5818,8 @@ static inline void gba_hle_softreset(void)
   const u32 target = iwram[0xFFFA] ? 0x02000000 : 0x08000000;
 
   gba_swi_hle_softreset_count++;
+  if(gba_thumb_jit_runtime_enabled || gba_thumb_batch_enabled)
+    gba_p4_thumb_jit_report_fault(0x53575253U, reg[REG_PC]);
 
   memset(&iwram[0xFE00], 0, 0x200);
 
@@ -8053,6 +8315,8 @@ arm_loop:
           gba_bad_pc_count++;
           gba_bad_pc_last = reg[REG_PC];
           gba_bad_pc_last_cpsr = reg[REG_CPSR];
+          if(gba_thumb_jit_runtime_enabled || gba_thumb_batch_enabled)
+            gba_p4_thumb_jit_report_fault(0x42414441U, reg[REG_PC]);
           opcode = reg[REG_BUS_VALUE];
        }
        else
@@ -9702,21 +9966,89 @@ thumb_loop:
           }
        }
 
+       bool fast_dispatch_already_missed = false;
+       bool opcode_already_profiled = false;
+#if !defined(TRACE_INSTRUCTIONS) && !defined(REGISTER_USAGE_ANALYZE) && !GBA_DECODED_BLOCK_CACHE
+       if(gba_thumb_batch_enabled && opcode_prefetched && cycles_remaining >= 32)
+       {
+          constexpr u32 GBA_THUMB_BATCH_MAX = 16;
+          const u32 batch_pc_region = reg[REG_PC] >> 15;
+          u32 batch_ops = 0;
+
+          while(batch_ops < GBA_THUMB_BATCH_MAX)
+          {
+             u32 batch_pc = reg[REG_PC];
+             gba_thumb_profile_opcode(opcode);
+             opcode_already_profiled = true;
+             int fast_result = gba_thumb_execute_fast_dispatch(opcode, n_flag,
+                z_flag, c_flag, v_flag, cpu_alert, cycles_remaining);
+             if(!fast_result)
+             {
+                fast_dispatch_already_missed = true;
+                break;
+             }
+
+             batch_ops++;
+             if(fast_result == 2)
+             {
+                gba_thumb_batch_runs++;
+                gba_thumb_batch_ops += batch_ops;
+                collapse_flags();
+                goto arm_loop;
+             }
+
+             cycles_remaining -= ws_cyc_seq[(reg[REG_PC] >> 24) & 0xF][0];
+             if(reg[REG_PC] == idle_loop_target_pc && cycles_remaining > 0)
+                cycles_remaining = 0;
+             if(cpu_alert & (CPU_ALERT_HALT | CPU_ALERT_IRQ))
+             {
+                gba_thumb_batch_runs++;
+                gba_thumb_batch_ops += batch_ops;
+                goto alert;
+             }
+
+             // A changed PC is a real basic-block boundary. Return to the outer
+             // loop there so the JIT sees stable branch targets instead of every
+             // interior instruction in a straight-line sequence.
+             if(cycles_remaining <= 0 || reg[REG_PC] != batch_pc + 2 ||
+                (reg[REG_PC] >> 15) != batch_pc_region ||
+                reg[REG_PC] == cheat_master_hook ||
+                batch_ops == GBA_THUMB_BATCH_MAX)
+                break;
+
+             opcode = readaddress16(pc_address_block, reg[REG_PC] & 0x7FFF);
+             opcode_already_profiled = false;
+          }
+
+          if(batch_ops)
+          {
+             gba_thumb_batch_runs++;
+             gba_thumb_batch_ops += batch_ops;
+             if(!fast_dispatch_already_missed)
+                continue;
+          }
+       }
+#endif
+
        if(!pc_address_block)
        {
           gba_bad_pc_count++;
           gba_bad_pc_last = reg[REG_PC];
           gba_bad_pc_last_cpsr = reg[REG_CPSR];
+          if(gba_thumb_jit_runtime_enabled || gba_thumb_batch_enabled)
+            gba_p4_thumb_jit_report_fault(0x42414454U, reg[REG_PC]);
           opcode = (reg[REG_BUS_VALUE] >> ((reg[REG_PC] & 0x02) << 3)) & 0xFFFF;
        }
        else if(!opcode_prefetched)
           opcode = readaddress16(pc_address_block, (reg[REG_PC] & 0x7FFF));
-       gba_thumb_profile_opcode(opcode);
+       if(!opcode_already_profiled)
+          gba_thumb_profile_opcode(opcode);
 
        #ifdef TRACE_INSTRUCTIONS
        interp_trace_instruction(reg[REG_PC], 0);
        #endif
 
+       if(!fast_dispatch_already_missed)
        {
           int fast_result = gba_thumb_execute_fast_dispatch(opcode, n_flag, z_flag,
              c_flag, v_flag, cpu_alert, cycles_remaining);

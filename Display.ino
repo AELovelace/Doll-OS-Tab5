@@ -331,6 +331,26 @@ void displaySetSleeping(bool sleeping) {
     markDisplayDirty();                           // Repaint status after network and wake state change.
 }
 
+void displayPrepareForRestart() {
+    // The P4 resets independently of PI4IO1 and the ST7123. If DSI scanout is
+    // severed while the external panel remains awake, its receiver can latch in
+    // a state that survives esp_restart() and only a full power removal clears.
+    tft.setBrightness(0);
+    tft.sleep();
+    delay(20);
+
+    // PI4IO1 OUT_SET bit4 is LCD_RST and bit5 is TP_RST. Hold both low across
+    // the CPU reset; M5GFX's Tab5 autodetect sequence releases them on next boot.
+    bool resetHeld = false;
+    if (boardI2cLock(1000)) {
+        resetHeld = M5.In_I2C.bitOff(0x43, 0x05, 0x30, 100000);
+        boardI2cUnlock();
+    }
+    Serial.printf("[display] restart fence: panel reset %s\n",
+                  resetHeld ? "held low" : "write failed");
+    delay(20);
+}  // Quiesces DSI and carries the external panel reset across a P4 restart.
+
 void drawDisplayBootSplash() {
     frameSprite.fillSprite(TFT_CYAN);
     const int splashWidth = min(DISPLAY_WIDTH - (DISPLAY_PADDING * 4), 360);

@@ -104,6 +104,7 @@ void handleRebootCommand(const String parts[], int partCount) {
                            //otherwise a keyboard-driven reboot gives no on-device feedback
     telnetClient.flush();
     delay(500);
+    displayPrepareForRestart();  // Holds the external ST7123 reset across the P4 restart.
     ESP.restart();
 }
 

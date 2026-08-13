@@ -30,6 +30,16 @@ bool ensureSystemConfDirectory() {
     return true;
 }
 
+bool initSdStorageOnly() {
+    if (sdCardMounted) return true;
+    SD_MMC.setPins(SD_MMC_CLK_PIN, SD_MMC_CMD_PIN, SD_MMC_D0_PIN,
+                   SD_MMC_D1_PIN, SD_MMC_D2_PIN, SD_MMC_D3_PIN);
+    sdCardMounted = SD_MMC.begin("/sdcard", false, false);
+    ledSetSdMounted(sdCardMounted);
+    if (!sdCardMounted) Serial.println("SD: not detected");
+    return sdCardMounted;
+}  // Mounts only the ROM/save filesystem for the low-overhead emulator boot path.
+
 //mounts LittleFS (formatting it on first boot if needed) and the SD card, called once from setup()
 void initStorage() {
     //begin(true) asks esp_littlefs to auto-format when the mount fails, which covers a
@@ -52,12 +62,7 @@ void initStorage() {
     ensureSystemConfDirectory();
     ensureDefaultAliases();
 
-    SD_MMC.setPins(SD_MMC_CLK_PIN, SD_MMC_CMD_PIN, SD_MMC_D0_PIN, SD_MMC_D1_PIN, SD_MMC_D2_PIN, SD_MMC_D3_PIN);
-    sdCardMounted = SD_MMC.begin("/sdcard", false, false);
-    ledSetSdMounted(sdCardMounted);
-    if (!sdCardMounted) {
-        Serial.println("SD: not detected");
-    }
+    initSdStorageOnly();
 }
 
 //lists one directory of a mounted filesystem into the terminal.

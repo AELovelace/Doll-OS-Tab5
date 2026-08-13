@@ -51,13 +51,19 @@ void setup() {
         delay(10);
     }
 
+    const bool gbaBootMode = gbaClaimBootMode();  // Claims a one-shot RTC launch before OS allocation begins.
     Serial.println();
-    Serial.printf("Starting DOLL-OS on %s...\n", DOLL_BOARD_NAME);
+    Serial.printf("Starting %s on %s...\n",
+                  gbaBootMode ? "GBA minimal mode" : "DOLL-OS",
+                  DOLL_BOARD_NAME);
     Serial.flush();   //force this out over UART now, in case something below hangs before the next line
 
     auto m5Config = M5.config();
     m5Config.serial_baudrate = 0;                 // Serial is already initialized above.
-    m5Config.clear_display = false;               // Display.ino paints the first complete frame.
+    // M5Unified maps clear_display=false to init_without_reset(). That shortcut is
+    // unsafe after esp_restart(): the P4 resets while the ST7123 remains in its old
+    // DSI state, leaving both minimal GBA mode and Doll-OS alive behind a dark panel.
+    m5Config.clear_display = true;                // Fully resets/wakes the panel on every boot.
     m5Config.output_power = true;                 // Keep Ext.Port1 and USB-A power available.
     m5Config.internal_imu = false;                // Defer unused devices to later port milestones.
     m5Config.internal_rtc = false;
@@ -83,6 +89,20 @@ void setup() {
     //WiFi, storage and every later malloc/new/String below spill into PSRAM instead of
     //internal SRAM wherever they can (see enablePsramHeap)
     enablePsramHeap();
+
+    if (gbaBootMode) {
+        // Game mode deliberately stops here: no frameSprite/display shadow, shell
+        // history, LittleFS settings, Wi-Fi/C6, telnet, FTP, or command runtime.
+        gbaInitMinimalDisplay();                  // Paints directly into the DSI framebuffer.
+        if (!initSdStorageOnly()) {
+            gbaAbortBootMode("SD card unavailable");
+            return;
+        }
+        initKeyboardSerial();                    // Keeps the official keyboard/game mappings.
+        slaveLinkBegin();                        // Leaves the shared input compatibility shim ready.
+        gbaRunBootMode();                        // Runs until quit, then saves and restarts into Doll-OS.
+        return;
+    }
 
     //bring the panel up first so boot progress is visible on it too -- it mirrors
     //the shell session (see Display.ino) but does not gate on a network client
