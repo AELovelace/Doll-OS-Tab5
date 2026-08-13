@@ -1027,6 +1027,16 @@ static void gbaRunBootSession() {
                           static_cast<unsigned long>(coreStats.sound_last_available),
                           static_cast<unsigned long>(coreStats.sound_max_available),
                           static_cast<unsigned long>(coreStats.sound_drop_events));
+            // Register and channel state separates a muted GBA mixer from an
+            // enabled DirectSound channel whose DMA FIFO is starving.
+            Serial.printf("[gba mixer] cnt=%04lx/%04lx/%04lx gbc=%lx ds=%lx fifo=%lu/%lu\n",
+                          static_cast<unsigned long>(coreStats.sound_cnt_l),
+                          static_cast<unsigned long>(coreStats.sound_cnt_h),
+                          static_cast<unsigned long>(coreStats.sound_cnt_x),
+                          static_cast<unsigned long>(coreStats.sound_gbc_active),
+                          static_cast<unsigned long>(coreStats.sound_direct_status),
+                          static_cast<unsigned long>(coreStats.sound_fifo_empty_reads),
+                          static_cast<unsigned long>(coreStats.sound_fifo_short_reads));
             modeStart = coreStats;
             Serial.flush();
             coreTimeUs = 0;

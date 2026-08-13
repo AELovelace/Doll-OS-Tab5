@@ -193,6 +193,9 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    `[gba-jit] trace` lines before relaunching. Reason `53575253` is SoftReset,
    `42414441` is a bad ARM fetch, `42414454` is a bad Thumb fetch, and a
    `4A0000xx` reason is a generated-state or straight-line-PC mismatch.
+   A `4A0000xx` mismatch must fall back to engine 1 (Batch), continue advancing,
+   and leave the title/game state intact. SoftReset and bad-fetch guards may fall
+   back to engine 0 because they indicate a wider CPU-state failure.
 6. From the Escape menu, test `Safe`, `Batch`, and `Turbo` separately over the
    same title-to-game transition. Safe isolates the exact interpreter, Batch
    isolates the batching loop, and Turbo combines batching with trusted JIT.
@@ -200,8 +203,10 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
 7. Confirm `[gb audio] ready, primed 1280 frames`, an `ES8388 readback ... OK`
    line, and an amp report ending in `pin driving`. During three performance
    windows, `[gba i2s]` pushed frames must keep advancing without drops and
-   `[gba audio]` must report nonzero samples. Listen for continuous, correctly
-   pitched sound through drawn-frame bursts and after opening/resuming the menu.
+   `[gba audio]` must report nonzero samples. If it stays zero, preserve the paired
+   `[gba mixer]` line so SOUNDCNT, active channels, and FIFO starvation can be
+   distinguished. Listen for continuous, correctly pitched sound through
+   drawn-frame bursts and after opening/resuming the menu.
 8. Choose Quit ROM. Confirm the battery save is written, the device reboots once,
    and the ordinary Doll-OS shell returns with display history, WiFi, and telnet
    initialized normally. Launch a different ROM, then return to the first ROM;

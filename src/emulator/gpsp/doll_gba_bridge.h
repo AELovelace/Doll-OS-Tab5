@@ -73,6 +73,13 @@ typedef struct {
   uint32_t sound_nonzero_samples;
   uint32_t sound_peak_sample;
   uint32_t sound_underrun_samples;
+  uint32_t sound_cnt_l;
+  uint32_t sound_cnt_h;
+  uint32_t sound_cnt_x;
+  uint32_t sound_gbc_active;
+  uint32_t sound_direct_status;
+  uint32_t sound_fifo_empty_reads;
+  uint32_t sound_fifo_short_reads;
   uint32_t guest_reset_prev_pc;
   uint32_t guest_reset_lr;
   uint32_t guest_reset_sp;

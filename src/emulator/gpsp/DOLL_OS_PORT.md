@@ -41,12 +41,14 @@ Build policy:
 - The in-game CPU engine selector separates `Safe`, `Batch`, `JIT trace`, and
   `Turbo`. `JIT trace` enables the JIT without batching and continuously compares
   every generated result with the C safety model, even after a block has warmed.
-  `Turbo` is the default now that the transition failure was traced to and fixed
-  in BIOS CpuFastSet/LZ77 HLE; it combines batching with trusted validated blocks.
+  `Turbo` is the default and combines batching with trusted validated blocks.
+  JIT WRAM loads remain enabled, while WRAM stores stay in the interpreter until
+  validation has a memory rollback buffer; otherwise a rejected test block can
+  mutate live game state before its generated result is accepted.
 - A 16-entry JIT flight recorder captures each compiled block's start/end PC,
-  SP, LR, return word, and first/last opcode signature. A model mismatch,
-  unexpected straight-line PC, SoftReset, or bad fetch disables both accelerators
-  and emits `[gba-jit] guard` plus ordered `[gba-jit] trace` lines to serial.
+  SP, LR, return word, and first/last opcode signature. A model mismatch disables
+  JIT and falls back to Batch; SoftReset or a bad fetch disables both accelerators.
+  Every fault emits `[gba-jit] guard` plus ordered `[gba-jit] trace` lines to serial.
 - The 32 KB read-memory page map and 96 KB VRAM are reserved in internal L2 before
   the JIT, with fallbacks reported in the launch log and `V:L2`/`V:P` in the menu.
 - `GBA_SOUND_FREQUENCY=32768` matches Doll-OS `AudioOut`. The sink primes five

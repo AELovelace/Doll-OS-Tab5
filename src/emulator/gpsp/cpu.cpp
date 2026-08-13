@@ -870,9 +870,11 @@ extern "C" void gba_p4_thumb_jit_reset_stats(void)
 
 extern "C" void gba_p4_thumb_jit_report_fault(u32 reason, u32 fault_pc)
 {
+  const bool validation_fault = (reason & 0xFF000000U) == 0x4A000000U;
   gba_thumb_jit_guard_trips++;
   gba_thumb_jit_runtime_enabled = 0;
-  gba_thumb_batch_enabled = 0;
+  if(!validation_fault)
+    gba_thumb_batch_enabled = 0;
   if(gba_p4_thumb_jit_fault_reported)
     return;
 
@@ -897,7 +899,7 @@ extern "C" void gba_p4_thumb_jit_report_fault(u32 reason, u32 fault_pc)
         (unsigned long)trace->lr, (unsigned long)trace->ret,
         (unsigned long)trace->signature);
   }
-} // Freezes accelerators and prints the last sixteen compiled-block transitions.
+} // Falls back to Batch after a JIT mismatch, but freezes both engines for CPU faults.
 
 extern "C" void gba_p4_thumb_jit_reset(void)
 {

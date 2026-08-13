@@ -328,6 +328,17 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
   stats->sound_nonzero_samples = sound_nonzero_samples;
   stats->sound_peak_sample = sound_peak_sample;
   stats->sound_underrun_samples = sound_underrun_samples;
+  stats->sound_cnt_l = read_ioreg(REG_SOUNDCNT_L);
+  stats->sound_cnt_h = read_ioreg(REG_SOUNDCNT_H);
+  stats->sound_cnt_x = read_ioreg(REG_SOUNDCNT_X);
+  stats->sound_gbc_active = (gbc_sound_channel[0].active_flag ? 1U : 0U) |
+      (gbc_sound_channel[1].active_flag ? 2U : 0U) |
+      (gbc_sound_channel[2].active_flag ? 4U : 0U) |
+      (gbc_sound_channel[3].active_flag ? 8U : 0U);
+  stats->sound_direct_status = (direct_sound_channel[0].status & 3U) |
+      ((direct_sound_channel[1].status & 3U) << 2U);
+  stats->sound_fifo_empty_reads = sound_fifo_empty_reads;
+  stats->sound_fifo_short_reads = sound_fifo_short_reads;
   stats->guest_reset_prev_pc = gba_guest_reset_prev_pc;
   stats->guest_reset_lr = gba_guest_reset_lr;
   stats->guest_reset_sp = gba_guest_reset_sp;
