@@ -246,6 +246,90 @@ static void emulatorReturnToOs(const char* reason) {
 
 #include "../KeyboardSerial.ino"
 #include "../SlaveLink.ino"
+
+// GameboyAdvance.ino historically shares these small frontend helpers with the
+// OG Game Boy sketch. Keep local GBA-image equivalents here so ota_1 does not
+// include Gameboy.ino, GameBoyHost, or any gnuboy state/code.
+static constexpr uint8_t GB_EVT_QUIT = 0x01;
+static constexpr uint8_t GB_EVT_MENU = 0x02;
+
+static uint8_t gbPumpInput(uint8_t& buttons) {
+    static uint8_t phase = 0;  // Tracks whether the next slave byte presses or releases a button bit.
+    uint8_t events = 0;
+    int value = 0;
+    while ((value = keyboardReadRawByte()) >= 0) {
+        const uint8_t byte = static_cast<uint8_t>(value);
+        if (phase == 1) {
+            buttons |= byte;
+            phase = 0;
+            continue;
+        }
+        if (phase == 2) {
+            buttons &= ~byte;
+            phase = 0;
+            continue;
+        }
+        if (byte == 0xF0) phase = 1;
+        else if (byte == 0xF1) phase = 2;
+        else if (byte == 0xF2 || byte == 0x14) events |= GB_EVT_QUIT;
+        else if (byte == 0xF3) events |= GB_EVT_MENU;
+    }
+    return events;
+}  // Decodes the shared keyboard-slave protocol without linking either Game Boy core.
+
+static String gbSiblingPath(const String& romPath, const char* extension) {
+    const int dot = romPath.lastIndexOf('.');
+    const int slash = romPath.lastIndexOf('/');
+    return dot > slash ? romPath.substring(0, dot) + extension
+                       : romPath + extension;
+}  // Places GBA saves and states beside their source ROM.
+
+static bool gbNameLess(const String& left, const String& right) {
+    String foldedLeft = left;
+    String foldedRight = right;
+    foldedLeft.toLowerCase();
+    foldedRight.toLowerCase();
+    return foldedLeft < foldedRight;
+}  // Preserves the shell picker's case-insensitive ordering in compiled fallback code.
+
+static String gbBaseName(const String& path) {
+    const int slash = path.lastIndexOf('/');
+    return slash >= 0 ? path.substring(slash + 1) : path;
+}  // Extracts a leaf name for the dormant dedicated-image picker helpers.
+
+static String gbJoinChildPath(const String& parent, const String& child) {
+    return parent.isEmpty() || parent == "/" ? "/" + child : parent + "/" + child;
+}  // Joins a filesystem directory and child without producing a double slash.
+
+static String gbJoinRelativePath(const String& parent, const String& child) {
+    return parent.isEmpty() ? child : parent + "/" + child;
+}  // Joins the relative label shown by the dormant picker helpers.
+
+static String gbFitMenuText(String value, int maxWidth) {
+    if (frameSprite.textWidth(value) <= maxWidth) return value;
+    if (maxWidth <= 0) return "";
+    while (value.length() > 1 && frameSprite.textWidth(value + "~") > maxWidth) {
+        value.remove(value.length() - 1);
+    }
+    return value + "~";
+}  // Retains bounded menu rendering without importing the OG Game Boy sketch.
+
+static void gbResetTelnetMenuInput() {}  // The dedicated GBA image intentionally has no telnet service.
+
+static uint8_t gbPumpTelnetMenuInput(uint8_t& pressed) {
+    pressed = 0;
+    return 0;
+}  // Makes dormant picker code inert when no telnet stack is linked.
+
+static bool gbIsHelpArg(const String& argument) {
+    return argument == "help" || argument == "-h" ||
+           argument == "--help" || argument == "?";
+}  // Keeps the uncalled shell-command parser self-contained for this translation unit.
+
+static String gbVfsPath(const String& path) {
+    return path.startsWith("/sdcard/") ? path : String();
+}  // Accepts only the shared SD VFS namespace used by cross-image launch records.
+
 #include "../GameboyAdvance.ino"
 
 static void prioritizeEmulatorDisplay() {

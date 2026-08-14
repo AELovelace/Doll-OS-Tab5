@@ -306,16 +306,17 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
 ## Static and lazy allocation regression
 
 1. After both release builds, run `riscv32-esp-elf-size -A` on the two ELFs.
-   The 2026-08-13 dual-image baselines are:
+   The 2026-08-14 split-image baselines are:
 
-   - Doll-OS: 26,737 bytes `.dram0.data`, 42,116 bytes `.dram0.bss`, and
-     16,984 bytes `.dram1.bss` (85,837 fixed internal bytes total).
-   - Emulator: 15,441 bytes `.dram0.data`, 56,972 bytes `.dram0.bss`, and
-     8,424 bytes `.dram1.bss` (80,837 fixed internal bytes total).
+   - Doll-OS: 26,737 bytes `.dram0.data`, 43,264 bytes `.dram0.bss`, and
+     17,552 bytes `.dram1.bss` (87,553 fixed internal bytes total).
+   - GBA image: 15,441 bytes `.dram0.data`, 60,004 bytes `.dram0.bss`, and
+     2,408 bytes `.dram1.bss` (77,853 fixed internal bytes total).
 
    The last combined OS/emulator image totaled 110,137 fixed internal bytes, so
-   the normal OS now retains 24,300 additional bytes. Losing that separation
-   needs an explicit explanation.
+   Doll-OS still retains 22,584 bytes despite keeping OG Game Boy in-process.
+   Removing OG Game Boy from the second image also saves 2,984 fixed bytes there.
+   Losing either separation needs an explicit explanation.
 2. Inspect both sorted ELF symbol tables. `gnuboy_init` must be present only in
    Doll-OS. `gbaRunBootMode`, `gba_thumb_predecode_hot`, and `execute_arm` must
    be absent from Doll-OS and present in the GBA image. In the OS,

@@ -15,9 +15,10 @@ are the active accelerators; the experimental RISC-V Thumb dynarec is retired.
 Build policy:
 
 - `RETRO_GO=1` selects the fork's dynamically allocated GBA memory layout.
-- `ROM_BUFFER_SIZE=16` caps the PSRAM ROM cache; larger ROMs page from SD. The
-  measured save-state peak remains about 20.3 MiB, leaving roughly 11.7 MiB of
-  the Tab5's 32 MiB PSRAM for allocator and runtime overhead.
+- `ROM_BUFFER_SIZE=16` caps the PSRAM ROM cache; larger ROMs page from SD. Based
+  on the measured 8 MiB-cache baseline, the projected save-state peak is about
+  20.3 MiB, leaving roughly 11.7 MiB of the Tab5's 32 MiB PSRAM for allocator
+  and runtime overhead; confirm that projection in the next hardware soak.
 - `GBA_P4_THUMB_DYNAREC=0` is both the source default and an explicit gpSP
   component definition. Experimental builds must opt in deliberately; release
   ELFs contain only the no-op compatibility stubs and allocate no JIT arena,
