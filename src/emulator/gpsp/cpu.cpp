@@ -120,6 +120,7 @@ u32 gba_thumb_jit_adapt_probes = 0;
 u32 gba_thumb_jit_top_break = 0;
 u32 gba_thumb_jit_top_break_count = 0;
 u32 gba_thumb_jit_word_specialized = 0;
+u32 gba_thumb_jit_word_store_specialized = 0;
 u32 gba_thumb_jit_region_guard_bails = 0;
 u32 gba_thumb_batch_runs = 0;
 u32 gba_thumb_batch_ops = 0;
@@ -735,6 +736,9 @@ extern "C" void gba_thumb_predecode_shutdown(void) {}
 #ifndef GBA_P4_THUMB_JIT_WRAM_WORD_LOADS
 #define GBA_P4_THUMB_JIT_WRAM_WORD_LOADS 0
 #endif
+#ifndef GBA_P4_THUMB_JIT_WRAM_WORD_STORES
+#define GBA_P4_THUMB_JIT_WRAM_WORD_STORES 0
+#endif
 #ifndef GBA_P4_THUMB_JIT_WRAM_STORES
 #define GBA_P4_THUMB_JIT_WRAM_STORES 0
 #endif
@@ -1207,6 +1211,7 @@ extern "C" void gba_p4_thumb_jit_reset_stats(void)
   gba_thumb_jit_top_break = 0;
   gba_thumb_jit_top_break_count = 0;
   gba_thumb_jit_word_specialized = 0;
+  gba_thumb_jit_word_store_specialized = 0;
   gba_thumb_jit_region_guard_bails = 0;
   gba_thumb_batch_runs = 0;
   gba_thumb_batch_ops = 0;
@@ -1503,7 +1508,9 @@ static inline bool gba_p4_thumb_jit_wram_store_opcode(u32 opcode)
   return GBA_P4_THUMB_JIT_WRAM_STORES &&
       ((top >= 0x60 && top <= 0x67) ||
        (top >= 0x70 && top <= 0x77) ||
-       (top >= 0x80 && top <= 0x87));
+       (top >= 0x80 && top <= 0x87)) ||
+      (GBA_P4_THUMB_JIT_WRAM_WORD_STORES &&
+       top >= 0x60 && top <= 0x67);
 }
 
 static inline bool gba_p4_thumb_jit_allow_single_opcode(u32 opcode)
@@ -2468,7 +2475,11 @@ static u16 gba_p4_thumb_jit_prepare_word_regions(const u16 *opcodes,
   {
     u32 opcode = opcodes[i];
     u32 top = (opcode >> 8) & 0xFF;
-    if(GBA_P4_THUMB_JIT_WRAM_WORD_LOADS && top >= 0x68 && top <= 0x6F)
+    const bool word_load = GBA_P4_THUMB_JIT_WRAM_WORD_LOADS &&
+        top >= 0x68 && top <= 0x6F;
+    const bool word_store = GBA_P4_THUMB_JIT_WRAM_WORD_STORES &&
+        top >= 0x60 && top <= 0x67;
+    if(word_load || word_store)
     {
       u32 rb = (opcode >> 3) & 0x07;
       u32 address = sim_regs[rb] + (((opcode >> 6) & 0x1F) * 4);
@@ -2486,7 +2497,7 @@ static u16 gba_p4_thumb_jit_prepare_word_regions(const u16 *opcodes,
   }
 
   return guard_mask;
-} // Predicts each word load from the live entry state without mutating GBA RAM.
+} // Predicts each word memory access from live state without mutating GBA RAM.
 
 static inline bool gba_p4_thumb_jit_record_fail(gba_p4_thumb_jit_entry_t *entry,
     u32 reason, u32 index, u32 expected, u32 actual)
@@ -3630,7 +3641,7 @@ static bool gba_p4_thumb_jit_emit_wram_load_imm_op(gba_p4_rv_emit_t *emit,
 }
 
 static bool gba_p4_thumb_jit_emit_wram_store_imm_op(gba_p4_rv_emit_t *emit,
-    u32 opcode, u32 pc, u32 executed_ops)
+    u32 opcode, u32 pc, u32 executed_ops, u32 specialized_region)
 {
   u32 top = (opcode >> 8) & 0xFF;
   u32 rb = (opcode >> 3) & 0x07;
@@ -3661,6 +3672,36 @@ static bool gba_p4_thumb_jit_emit_wram_store_imm_op(gba_p4_rv_emit_t *emit,
        gba_p4_emit(emit, rv_addi(RV_T0, RV_T0, imm)) &&
        gba_p4_emit(emit, rv_srli(RV_T3, RV_T0, 24))))
     return false;
+
+  if(width == 4 && (specialized_region == 0x02 || specialized_region == 0x03))
+  {
+    if(!(gba_p4_emit(emit, rv_addi(RV_T4, RV_T3, -(s32)specialized_region)) &&
+         gba_p4_emit(emit, rv_andi(RV_T5, RV_T0, 3)) &&
+         gba_p4_emit(emit, rv_or(RV_T4, RV_T4, RV_T5))))
+      return false;
+
+    u32 branch_ok_pos;
+    if(!gba_p4_emit_branch_placeholder(emit, &branch_ok_pos))
+      return false;
+    if(!gba_p4_thumb_jit_emit_bail(emit, pc, executed_ops))
+      return false;
+    if(!gba_p4_patch_branch(emit, branch_ok_pos, emit->words,
+          RV_T4, RV_ZERO, 0x0))
+      return false;
+
+    u32 shift = specialized_region == 0x02 ? 14 : 17;
+    u8 *host_base = specialized_region == 0x02 ? ewram :
+        iwram + GBA_IWRAM_DATA_OFFSET;
+    if(!(gba_p4_thumb_jit_load_reg(emit, RV_T2, rd) &&
+         gba_p4_emit(emit, rv_slli(RV_T0, RV_T0, shift)) &&
+         gba_p4_emit(emit, rv_srli(RV_T0, RV_T0, shift)) &&
+         gba_p4_emit_li32(emit, RV_T1, (u32)(uintptr_t)host_base) &&
+         gba_p4_emit(emit, rv_add(RV_T0, RV_T0, RV_T1)) &&
+         gba_p4_emit(emit, rv_sw(RV_T2, RV_T0, 0))))
+      return false;
+
+    return true;
+  }
 
   if(align_mask)
   {
@@ -3921,7 +3962,8 @@ static bool gba_p4_thumb_jit_emit_op(gba_p4_rv_emit_t *emit, u32 opcode,
     return gba_p4_thumb_jit_emit_pop_op(emit, opcode);
 
   if(gba_p4_thumb_jit_wram_store_opcode(opcode))
-    return gba_p4_thumb_jit_emit_wram_store_imm_op(emit, opcode, pc, op_index);
+    return gba_p4_thumb_jit_emit_wram_store_imm_op(emit, opcode, pc, op_index,
+        specialized_region);
 
   if(gba_p4_thumb_jit_wram_load_opcode(opcode))
     return gba_p4_thumb_jit_emit_wram_load_imm_op(emit, opcode, pc, op_index,
@@ -3983,7 +4025,16 @@ static inline void gba_p4_thumb_jit_commit_entry(gba_p4_thumb_jit_entry_t *entry
   memcpy(entry->opcodes, opcodes, sizeof(opcodes[0]) * op_count);
   entry->fn = (gba_p4_thumb_jit_fn)emit->exec;
   gba_p4_thumb_jit_front_store(pc, entry);
-  gba_thumb_jit_word_specialized += __builtin_popcount((u32)region_guard_mask);
+  for(u32 i = 0; i < op_count; i++)
+  {
+    if(!(region_guard_mask & (u16)(1U << i)))
+      continue;
+    u32 top = (opcodes[i] >> 8) & 0xFF;
+    if(top >= 0x68 && top <= 0x6F)
+      gba_thumb_jit_word_specialized++;
+    else if(top >= 0x60 && top <= 0x67)
+      gba_thumb_jit_word_store_specialized++;
+  }
 }
 
 static __attribute__((noinline, cold)) gba_p4_thumb_jit_entry_t *

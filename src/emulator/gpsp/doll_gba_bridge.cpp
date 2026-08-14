@@ -165,6 +165,7 @@ extern u32 gba_thumb_jit_adapt_probes;
 extern u32 gba_thumb_jit_top_break;
 extern u32 gba_thumb_jit_top_break_count;
 extern u32 gba_thumb_jit_word_specialized;
+extern u32 gba_thumb_jit_word_store_specialized;
 extern u32 gba_thumb_jit_region_guard_bails;
 extern u32 gba_thumb_batch_runs;
 extern u32 gba_thumb_batch_ops;
@@ -488,6 +489,7 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
   stats->jit_top_break = gba_thumb_jit_top_break;
   stats->jit_top_break_count = gba_thumb_jit_top_break_count;
   stats->jit_word_specialized = gba_thumb_jit_word_specialized;
+  stats->jit_word_store_specialized = gba_thumb_jit_word_store_specialized;
   stats->jit_region_guard_bails = gba_thumb_jit_region_guard_bails;
   stats->thumb_batch_runs = gba_thumb_batch_runs;
   stats->thumb_batch_ops = gba_thumb_batch_ops;
