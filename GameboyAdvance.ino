@@ -1111,6 +1111,12 @@ static void gbaRunBootSession() {
             const uint32_t fastMisses = coreStats.thumb_fast_misses - modeStart.thumb_fast_misses;
             const uint32_t predecodeRequests = coreStats.thumb_predecode_requests -
                 modeStart.thumb_predecode_requests;
+            const uint32_t predecodeQueueDrops = coreStats.thumb_predecode_queue_drops -
+                modeStart.thumb_predecode_queue_drops;
+            const uint32_t predecodeSetDrops = coreStats.thumb_predecode_set_drops -
+                modeStart.thumb_predecode_set_drops;
+            const uint32_t predecodeDuplicates = coreStats.thumb_predecode_duplicates -
+                modeStart.thumb_predecode_duplicates;
             const uint32_t romPageLoads = coreStats.rom_page_loads - modeStart.rom_page_loads;
             const uint32_t romPagePrefetches = coreStats.rom_page_prefetches -
                 modeStart.rom_page_prefetches;
@@ -1121,7 +1127,7 @@ static void gbaRunBootSession() {
             const uint64_t otherTimeUs = elapsedUs > accountedTimeUs
                 ? static_cast<uint64_t>(elapsedUs) - accountedTimeUs : 0;
 #if DOLL_GBA_VERBOSE_DIAGNOSTICS
-            Serial.printf("[gba perf] mode=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus audio=%lluus blit=%lluus arm/thumb/halt=%lu/%lu/%lu pc=%08lx cpsr=%08lx jit=%lu/%luK hit/miss/try=%lu/%lu/%lu ops=%lu build=%lu full=%lu reuse=%lu wait/reject/probe=%lu/%lu/%lu break=%02lx:%lu batch=%lu/%lu fast=%lu/%lu vram=%s rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
+            Serial.printf("[gba perf] mode=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus audio=%lluus blit=%lluus arm/thumb/halt=%lu/%lu/%lu pc=%08lx cpsr=%08lx jit=%lu/%luK hit/miss/try=%lu/%lu/%lu ops=%lu build=%lu full=%lu reuse=%lu wait/reject/probe=%lu/%lu/%lu break=%02lx:%lu batch=%lu/%lu fast=%lu/%lu predrop=q/set/dup:%lu/%lu/%lu preocc=now/cap/high:%lu/%lu/%lu vram=%s rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
                           gbaScale,
                           gbaFrameSkip,
                           static_cast<unsigned long>(emuFps10 / 10),
@@ -1156,6 +1162,12 @@ static void gbaRunBootSession() {
                            static_cast<unsigned long>(coreStats.thumb_batch_runs - modeStart.thumb_batch_runs),
                            static_cast<unsigned long>(fastHits),
                            static_cast<unsigned long>(fastMisses),
+                           static_cast<unsigned long>(predecodeQueueDrops),
+                           static_cast<unsigned long>(predecodeSetDrops),
+                           static_cast<unsigned long>(predecodeDuplicates),
+                           static_cast<unsigned long>(coreStats.thumb_predecode_resident),
+                           static_cast<unsigned long>(coreStats.thumb_predecode_capacity),
+                           static_cast<unsigned long>(coreStats.thumb_predecode_highwater),
                            coreStats.vram_internal ? "L2" : "PSRAM",
                            static_cast<unsigned long>(romPageLoads),
                            static_cast<unsigned long>(romPagePrefetches),
@@ -1265,7 +1277,7 @@ static void gbaRunBootSession() {
             const uint64_t avgUpdateUs = perfFrames ? updateUs / perfFrames : 0;
             const uint64_t avgCpuUs = perfFrames && coreTimeUs > updateUs
                 ? (coreTimeUs - updateUs) / perfFrames : 0;
-            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/update/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu upd=arm/thumb/halt:%lu/%lu/%lu fast=%lu/%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu batch=%lu/%lu pre=hit/miss/ops/build/req/drop:%lu/%lu/%lu/%lu/%lu/%lu rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
+            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/update/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu upd=arm/thumb/halt:%lu/%lu/%lu fast=%lu/%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu batch=%lu/%lu pre=hit/miss/ops/build/req/drop:%lu/%lu/%lu/%lu/%lu/%lu predrop=q/set/dup:%lu/%lu/%lu preocc=now/cap/high:%lu/%lu/%lu rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
                           gbaScale,
                           gbaFrameSkip,
                           static_cast<unsigned long>(emuFps10 / 10),
@@ -1305,6 +1317,12 @@ static void gbaRunBootSession() {
                            static_cast<unsigned long>(coreStats.thumb_predecode_builds - modeStart.thumb_predecode_builds),
                            static_cast<unsigned long>(predecodeRequests),
                            static_cast<unsigned long>(coreStats.thumb_predecode_drops - modeStart.thumb_predecode_drops),
+                           static_cast<unsigned long>(predecodeQueueDrops),
+                           static_cast<unsigned long>(predecodeSetDrops),
+                           static_cast<unsigned long>(predecodeDuplicates),
+                           static_cast<unsigned long>(coreStats.thumb_predecode_resident),
+                           static_cast<unsigned long>(coreStats.thumb_predecode_capacity),
+                           static_cast<unsigned long>(coreStats.thumb_predecode_highwater),
                            static_cast<unsigned long>(romPageLoads),
                            static_cast<unsigned long>(romPagePrefetches),
                            static_cast<unsigned long>(pacingResyncs),

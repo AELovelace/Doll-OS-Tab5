@@ -127,6 +127,12 @@ u32 gba_thumb_predecode_ops = 0;
 u32 gba_thumb_predecode_builds = 0;
 u32 gba_thumb_predecode_requests = 0;
 u32 gba_thumb_predecode_drops = 0;
+u32 gba_thumb_predecode_queue_drops = 0;
+u32 gba_thumb_predecode_set_drops = 0;
+u32 gba_thumb_predecode_duplicates = 0;
+u32 gba_thumb_predecode_resident = 0;
+u32 gba_thumb_predecode_capacity = 0;
+u32 gba_thumb_predecode_highwater = 0;
 u32 gba_thumb_fast_hits = 0;
 u32 gba_thumb_fast_misses = 0;
 // The hand-written ARM and Thumb fast paths ran unconditionally, so "Safe" was
@@ -514,6 +520,8 @@ extern "C" bool gba_thumb_predecode_init(void)
     return false;
 
   gba_thumb_predecode_bytes = (u32)bytes;
+  gba_thumb_predecode_capacity =
+      GBA_THUMB_PREDECODE_SETS * GBA_THUMB_PREDECODE_WAYS;
   return true;
 }
 
@@ -531,6 +539,11 @@ extern "C" void gba_thumb_predecode_reset(void)
   gba_thumb_predecode_builds = 0;
   gba_thumb_predecode_requests = 0;
   gba_thumb_predecode_drops = 0;
+  gba_thumb_predecode_queue_drops = 0;
+  gba_thumb_predecode_set_drops = 0;
+  gba_thumb_predecode_duplicates = 0;
+  gba_thumb_predecode_resident = 0;
+  gba_thumb_predecode_highwater = 0;
 }
 
 extern "C" void gba_thumb_predecode_shutdown(void)
@@ -539,6 +552,7 @@ extern "C" void gba_thumb_predecode_shutdown(void)
     heap_caps_free(gba_thumb_predecode_cache);
   gba_thumb_predecode_cache = NULL;
   gba_thumb_predecode_bytes = 0;
+  gba_thumb_predecode_capacity = 0;
   gba_thumb_predecode_reset();
 }
 
@@ -573,6 +587,7 @@ static inline void gba_thumb_predecode_request(u32 pc, u8 *pc_address_block)
     // on every execution like the first experiment did.
     hot->count = GBA_THUMB_PREDECODE_HOT_COUNT / 2U;
     gba_thumb_predecode_drops++;
+    gba_thumb_predecode_queue_drops++;
     return;
   }
 
@@ -7215,7 +7230,13 @@ extern "C" u32 gba_thumb_predecode_worker_run(u32 max_requests)
       }
     }
 
-    if(!target)
+    if(target)
+    {
+      // A hot-table collision can enqueue a block already being built or ready.
+      // Name that harmless race separately instead of disguising it as churn.
+      gba_thumb_predecode_duplicates++;
+    }
+    else
     {
       for(u32 way = 0; way < GBA_THUMB_PREDECODE_WAYS; way++)
       {
@@ -7249,9 +7270,15 @@ extern "C" u32 gba_thumb_predecode_worker_run(u32 max_requests)
             (target_count << GBA_THUMB_PREDECODE_COUNT_SHIFT);
         __atomic_store_n(&target->state, ready_state, __ATOMIC_RELEASE);
         gba_thumb_predecode_builds++;
+        gba_thumb_predecode_resident++;
+        if(gba_thumb_predecode_resident > gba_thumb_predecode_highwater)
+          gba_thumb_predecode_highwater = gba_thumb_predecode_resident;
       }
       else
+      {
         gba_thumb_predecode_drops++;
+        gba_thumb_predecode_set_drops++;
+      }
     }
     tail++;
     processed++;

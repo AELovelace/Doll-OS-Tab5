@@ -57,6 +57,12 @@ typedef struct {
   uint32_t thumb_predecode_builds;
   uint32_t thumb_predecode_requests;
   uint32_t thumb_predecode_drops;
+  uint32_t thumb_predecode_queue_drops;
+  uint32_t thumb_predecode_set_drops;
+  uint32_t thumb_predecode_duplicates;
+  uint32_t thumb_predecode_resident;
+  uint32_t thumb_predecode_capacity;
+  uint32_t thumb_predecode_highwater;
   uint32_t thumb_fast_hits;
   uint32_t thumb_fast_misses;
   uint32_t vram_internal;
