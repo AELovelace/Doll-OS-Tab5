@@ -133,6 +133,8 @@ u32 gba_thumb_predecode_duplicates = 0;
 u32 gba_thumb_predecode_resident = 0;
 u32 gba_thumb_predecode_capacity = 0;
 u32 gba_thumb_predecode_highwater = 0;
+u32 gba_thumb_predecode_evictions = 0;
+u32 gba_thumb_predecode_completion_stalls = 0;
 u32 gba_thumb_fast_hits = 0;
 u32 gba_thumb_fast_misses = 0;
 // The hand-written ARM and Thumb fast paths ran unconditionally, so "Safe" was
@@ -410,7 +412,8 @@ static inline void gba_block_cache_touch_thumb(u32 pc, u8 *pc_address_block)
 #define GBA_THUMB_PREDECODE_QUEUE      32U
 #define GBA_THUMB_PREDECODE_HOT_SLOTS  2048U
 #define GBA_THUMB_PREDECODE_HOT_COUNT  24U
-#define GBA_THUMB_PREDECODE_STATE_MASK 0xFFU
+#define GBA_THUMB_PREDECODE_STATE_MASK 0x03U
+#define GBA_THUMB_PREDECODE_REFERENCED 0x04U
 #define GBA_THUMB_PREDECODE_COUNT_SHIFT 8U
 
 enum gba_thumb_predecode_state
@@ -451,7 +454,7 @@ enum gba_thumb_predecode_kind
 
 typedef struct
 {
-  volatile u32 state;
+  u32 state;
   u32 pc;
   u16 opcode[GBA_THUMB_PREDECODE_OPS];
   u8 kind[GBA_THUMB_PREDECODE_OPS];
@@ -474,6 +477,18 @@ typedef struct
 typedef struct
 {
   u32 pc;
+  u16 opcode[GBA_THUMB_PREDECODE_OPS];
+  u8 kind[GBA_THUMB_PREDECODE_OPS];
+  u8 count;
+  u8 reserved[3];
+} gba_thumb_predecode_completed_t;
+
+static_assert(sizeof(gba_thumb_predecode_completed_t) == 32,
+    "Thumb completed entry must stay cache-line sized");
+
+typedef struct
+{
+  u32 pc;
   u16 count;
   u16 queued;
 } gba_thumb_predecode_hot_t;
@@ -483,6 +498,13 @@ static gba_thumb_predecode_request_t
     gba_thumb_predecode_queue[GBA_THUMB_PREDECODE_QUEUE];
 static volatile u32 gba_thumb_predecode_head;
 static volatile u32 gba_thumb_predecode_tail;
+// Core 0 classifies immutable request snapshots into this reverse SPSC queue.
+// Core 1 owns all cache installation and replacement between emulated frames.
+static gba_thumb_predecode_completed_t
+    gba_thumb_predecode_completed[GBA_THUMB_PREDECODE_QUEUE];
+static volatile u32 gba_thumb_predecode_completed_head;
+static volatile u32 gba_thumb_predecode_completed_tail;
+static u8 gba_thumb_predecode_clock_hand[GBA_THUMB_PREDECODE_SETS];
 // This admission filter is touched only by the emulation core. The worker sees
 // only the bounded SPSC request queue, so counting a hot PC needs no atomics.
 static gba_thumb_predecode_hot_t
@@ -492,6 +514,12 @@ static inline u32 gba_thumb_predecode_set(u32 pc)
 {
   return ((pc >> 1) ^ (pc >> 9) ^ (pc >> 17)) &
       (GBA_THUMB_PREDECODE_SETS - 1U);
+}
+
+static inline u32 gba_thumb_predecode_hot_index(u32 pc)
+{
+  return ((pc >> 1) ^ (pc >> 10) ^ (pc >> 18)) &
+      (GBA_THUMB_PREDECODE_HOT_SLOTS - 1U);
 }
 
 static inline bool gba_thumb_predecode_rom_pc(u32 pc)
@@ -530,9 +558,15 @@ extern "C" void gba_thumb_predecode_reset(void)
   if(gba_thumb_predecode_cache)
     memset(gba_thumb_predecode_cache, 0, gba_thumb_predecode_bytes);
   memset(gba_thumb_predecode_queue, 0, sizeof(gba_thumb_predecode_queue));
+  memset(gba_thumb_predecode_completed, 0,
+      sizeof(gba_thumb_predecode_completed));
   memset(gba_thumb_predecode_hot, 0, sizeof(gba_thumb_predecode_hot));
+  memset(gba_thumb_predecode_clock_hand, 0,
+      sizeof(gba_thumb_predecode_clock_hand));
   __atomic_store_n(&gba_thumb_predecode_head, 0, __ATOMIC_RELEASE);
   __atomic_store_n(&gba_thumb_predecode_tail, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&gba_thumb_predecode_completed_head, 0, __ATOMIC_RELEASE);
+  __atomic_store_n(&gba_thumb_predecode_completed_tail, 0, __ATOMIC_RELEASE);
   gba_thumb_predecode_hits = 0;
   gba_thumb_predecode_misses = 0;
   gba_thumb_predecode_ops = 0;
@@ -544,6 +578,8 @@ extern "C" void gba_thumb_predecode_reset(void)
   gba_thumb_predecode_duplicates = 0;
   gba_thumb_predecode_resident = 0;
   gba_thumb_predecode_highwater = 0;
+  gba_thumb_predecode_evictions = 0;
+  gba_thumb_predecode_completion_stalls = 0;
 }
 
 extern "C" void gba_thumb_predecode_shutdown(void)
@@ -562,8 +598,7 @@ static inline void gba_thumb_predecode_request(u32 pc, u8 *pc_address_block)
       !gba_thumb_predecode_rom_pc(pc))
     return;
 
-  const u32 hot_index = ((pc >> 1) ^ (pc >> 10) ^ (pc >> 18)) &
-      (GBA_THUMB_PREDECODE_HOT_SLOTS - 1U);
+  const u32 hot_index = gba_thumb_predecode_hot_index(pc);
   gba_thumb_predecode_hot_t *hot = &gba_thumb_predecode_hot[hot_index];
   if(hot->pc != pc)
   {
@@ -7125,13 +7160,15 @@ static inline const gba_thumb_predecode_entry_t *gba_thumb_predecode_lookup(
   {
     gba_thumb_predecode_entry_t *entry = &gba_thumb_predecode_cache[
         set * GBA_THUMB_PREDECODE_WAYS + way];
-    const u32 state = __atomic_load_n(&entry->state, __ATOMIC_ACQUIRE);
+    const u32 state = entry->state;
     if((state & GBA_THUMB_PREDECODE_STATE_MASK) !=
         GBA_THUMB_PREDECODE_READY || entry->pc != pc)
       continue;
-    // READY entries are never replaced until the ROM stops, so execution is a
-    // read-only cache hit with no cross-core ownership writeback.
     count = state >> GBA_THUMB_PREDECODE_COUNT_SHIFT;
+    // Lookup and replacement both run on core 1. Mark useful decoded blocks for
+    // CLOCK without introducing a cross-core write into the execution path.
+    if(count && !(state & GBA_THUMB_PREDECODE_REFERENCED))
+      entry->state = state | GBA_THUMB_PREDECODE_REFERENCED;
     return entry;
   }
   return NULL;
@@ -7200,95 +7237,207 @@ static inline int gba_thumb_predecode_try_execute(u32 &n_flag, u32 &z_flag,
   return outcome;
 }
 
-extern "C" u32 gba_thumb_predecode_worker_run(u32 max_requests)
+extern "C" u32 gba_thumb_predecode_install(u32 max_completed)
 {
   if(!gba_thumb_predecode_cache)
     return 0;
 
-  u32 tail = __atomic_load_n(&gba_thumb_predecode_tail, __ATOMIC_RELAXED);
-  u32 head = __atomic_load_n(&gba_thumb_predecode_head, __ATOMIC_ACQUIRE);
+  u32 tail = __atomic_load_n(&gba_thumb_predecode_completed_tail,
+      __ATOMIC_RELAXED);
+  u32 head = __atomic_load_n(&gba_thumb_predecode_completed_head,
+      __ATOMIC_ACQUIRE);
+  u32 installed = 0;
   u32 processed = 0;
-  while(tail != head && processed < max_requests)
+  while(tail != head && processed < max_completed)
   {
-    gba_thumb_predecode_request_t *request =
-        &gba_thumb_predecode_queue[tail & (GBA_THUMB_PREDECODE_QUEUE - 1U)];
-    const u32 pc = request->pc;
-    const u32 set = gba_thumb_predecode_set(pc);
+    gba_thumb_predecode_completed_t *completed =
+        &gba_thumb_predecode_completed[
+            tail & (GBA_THUMB_PREDECODE_QUEUE - 1U)];
+    const u32 set = gba_thumb_predecode_set(completed->pc);
     gba_thumb_predecode_entry_t *target = NULL;
-    bool needs_build = false;
+    bool already_present = false;
+    bool replacing = false;
 
+    // A block may become resident while an older request is being classified.
+    // Consume that duplicate without disturbing the cache or CLOCK hand.
     for(u32 way = 0; way < GBA_THUMB_PREDECODE_WAYS; way++)
     {
       gba_thumb_predecode_entry_t *entry = &gba_thumb_predecode_cache[
           set * GBA_THUMB_PREDECODE_WAYS + way];
-      u32 state = __atomic_load_n(&entry->state, __ATOMIC_ACQUIRE);
-      if((state & GBA_THUMB_PREDECODE_STATE_MASK) !=
-          GBA_THUMB_PREDECODE_EMPTY && entry->pc == pc)
+      if((entry->state & GBA_THUMB_PREDECODE_STATE_MASK) ==
+          GBA_THUMB_PREDECODE_READY && entry->pc == completed->pc)
       {
         target = entry;
+        already_present = true;
         break;
       }
     }
 
-    if(target)
-    {
-      // A hot-table collision can enqueue a block already being built or ready.
-      // Name that harmless race separately instead of disguising it as churn.
-      gba_thumb_predecode_duplicates++;
-    }
-    else
+    // Preserve cold-start behavior by filling an empty way before replacing.
+    if(!target)
     {
       for(u32 way = 0; way < GBA_THUMB_PREDECODE_WAYS; way++)
       {
         gba_thumb_predecode_entry_t *entry = &gba_thumb_predecode_cache[
             set * GBA_THUMB_PREDECODE_WAYS + way];
-        u32 expected = GBA_THUMB_PREDECODE_EMPTY;
-        if(__atomic_compare_exchange_n(&entry->state, &expected,
-            GBA_THUMB_PREDECODE_BUILDING, false, __ATOMIC_ACQ_REL,
-            __ATOMIC_RELAXED))
+        if((entry->state & GBA_THUMB_PREDECODE_STATE_MASK) ==
+            GBA_THUMB_PREDECODE_EMPTY)
         {
           target = entry;
-          needs_build = true;
           break;
         }
       }
+    }
 
-      if(target && needs_build)
+    if(!target)
+    {
+      // Two-way CLOCK gives recently executed blocks one second chance. If both
+      // ways were referenced, clear both bits and evict from the rotating hand.
+      const u32 first_way = gba_thumb_predecode_clock_hand[set] & 1U;
+      u32 victim_way = first_way;
+      for(u32 scan = 0; scan < GBA_THUMB_PREDECODE_WAYS; scan++)
       {
-        target->pc = pc;
-        u32 target_count = 0;
-        for(u32 i = 0; i < request->count; i++)
+        const u32 way = (first_way + scan) & 1U;
+        gba_thumb_predecode_entry_t *candidate =
+            &gba_thumb_predecode_cache[
+                set * GBA_THUMB_PREDECODE_WAYS + way];
+        if(!(candidate->state & GBA_THUMB_PREDECODE_REFERENCED))
         {
-          u8 kind = gba_thumb_predecode_classify(request->opcode[i]);
-          if(kind == GBA_THUMB_PRE_NONE)
-            break;
-          target->opcode[target_count] = request->opcode[i];
-          target->kind[target_count] = kind;
-          target_count++;
+          target = candidate;
+          victim_way = way;
+          break;
         }
-        const u32 ready_state = GBA_THUMB_PREDECODE_READY |
-            (target_count << GBA_THUMB_PREDECODE_COUNT_SHIFT);
-        __atomic_store_n(&target->state, ready_state, __ATOMIC_RELEASE);
-        gba_thumb_predecode_builds++;
+      }
+      if(!target)
+      {
+        for(u32 way = 0; way < GBA_THUMB_PREDECODE_WAYS; way++)
+        {
+          gba_thumb_predecode_entry_t *entry = &gba_thumb_predecode_cache[
+              set * GBA_THUMB_PREDECODE_WAYS + way];
+          entry->state &= ~GBA_THUMB_PREDECODE_REFERENCED;
+        }
+        target = &gba_thumb_predecode_cache[
+            set * GBA_THUMB_PREDECODE_WAYS + first_way];
+        victim_way = first_way;
+      }
+
+      const u32 evicted_pc = target->pc;
+      gba_thumb_predecode_hot_t *hot = &gba_thumb_predecode_hot[
+          gba_thumb_predecode_hot_index(evicted_pc)];
+      if(hot->pc == evicted_pc)
+      {
+        // Let an evicted block prove itself hot again instead of permanently
+        // suppressing it behind the admission table's queued latch.
+        hot->queued = 0;
+        hot->count = GBA_THUMB_PREDECODE_HOT_COUNT / 2U;
+      }
+      gba_thumb_predecode_clock_hand[set] = (u8)(victim_way ^ 1U);
+      gba_thumb_predecode_evictions++;
+      replacing = true;
+    }
+
+    if(already_present)
+    {
+      gba_thumb_predecode_duplicates++;
+    }
+    else
+    {
+      target->pc = completed->pc;
+      for(u32 i = 0; i < completed->count; i++)
+      {
+        target->opcode[i] = completed->opcode[i];
+        target->kind[i] = completed->kind[i];
+      }
+      target->state = GBA_THUMB_PREDECODE_READY |
+          ((u32)completed->count << GBA_THUMB_PREDECODE_COUNT_SHIFT);
+      gba_thumb_predecode_builds++;
+      installed++;
+      if(!replacing)
+      {
         gba_thumb_predecode_resident++;
         if(gba_thumb_predecode_resident > gba_thumb_predecode_highwater)
           gba_thumb_predecode_highwater = gba_thumb_predecode_resident;
       }
-      else
-      {
-        gba_thumb_predecode_drops++;
-        gba_thumb_predecode_set_drops++;
-      }
     }
+
     tail++;
     processed++;
-    __atomic_store_n(&gba_thumb_predecode_tail, tail, __ATOMIC_RELEASE);
-    head = __atomic_load_n(&gba_thumb_predecode_head, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&gba_thumb_predecode_completed_tail, tail,
+        __ATOMIC_RELEASE);
+    head = __atomic_load_n(&gba_thumb_predecode_completed_head,
+        __ATOMIC_ACQUIRE);
+  }
+  return installed;
+}
+
+extern "C" u32 gba_thumb_predecode_worker_run(u32 max_requests)
+{
+  if(!gba_thumb_predecode_cache)
+    return 0;
+
+  u32 request_tail = __atomic_load_n(&gba_thumb_predecode_tail,
+      __ATOMIC_RELAXED);
+  u32 request_head = __atomic_load_n(&gba_thumb_predecode_head,
+      __ATOMIC_ACQUIRE);
+  u32 completed_head = __atomic_load_n(&gba_thumb_predecode_completed_head,
+      __ATOMIC_RELAXED);
+  u32 completed_tail = __atomic_load_n(&gba_thumb_predecode_completed_tail,
+      __ATOMIC_ACQUIRE);
+  u32 processed = 0;
+  while(request_tail != request_head && processed < max_requests)
+  {
+    if(completed_head - completed_tail >= GBA_THUMB_PREDECODE_QUEUE)
+    {
+      // Return idle when the reverse queue is full. The next frame-boundary
+      // install frees slots and normal host notifications wake this task again.
+      gba_thumb_predecode_completion_stalls++;
+      break;
+    }
+
+    gba_thumb_predecode_request_t *request =
+        &gba_thumb_predecode_queue[
+            request_tail & (GBA_THUMB_PREDECODE_QUEUE - 1U)];
+    gba_thumb_predecode_completed_t *completed =
+        &gba_thumb_predecode_completed[
+            completed_head & (GBA_THUMB_PREDECODE_QUEUE - 1U)];
+    completed->pc = request->pc;
+    completed->count = 0;
+    for(u32 i = 0; i < request->count; i++)
+    {
+      const u8 kind = gba_thumb_predecode_classify(request->opcode[i]);
+      if(kind == GBA_THUMB_PRE_NONE)
+        break;
+      completed->opcode[completed->count] = request->opcode[i];
+      completed->kind[completed->count] = kind;
+      completed->count++;
+    }
+
+    // Publish the completed immutable entry before releasing its source slot.
+    // Each queue has one producer and one consumer, keeping the handoff cheap.
+    completed_head++;
+    __atomic_store_n(&gba_thumb_predecode_completed_head, completed_head,
+        __ATOMIC_RELEASE);
+    request_tail++;
+    processed++;
+    __atomic_store_n(&gba_thumb_predecode_tail, request_tail, __ATOMIC_RELEASE);
+    request_head = __atomic_load_n(&gba_thumb_predecode_head, __ATOMIC_ACQUIRE);
+    completed_tail = __atomic_load_n(&gba_thumb_predecode_completed_tail,
+        __ATOMIC_ACQUIRE);
   }
 
-  return head - tail;
+  // Do not busy-spin the host worker behind a full completion queue. Core 1
+  // drains it once per frame and later notifications resume classification.
+  if(completed_head - completed_tail >= GBA_THUMB_PREDECODE_QUEUE)
+    return 0;
+  return request_head - request_tail;
 }
 #else
+extern "C" u32 gba_thumb_predecode_install(u32 max_completed)
+{
+  (void)max_completed;
+  return 0;
+}
+
 extern "C" u32 gba_thumb_predecode_worker_run(u32 max_requests)
 {
   (void)max_requests;

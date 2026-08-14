@@ -192,13 +192,18 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    `batch=ops/runs` measures batched Thumb work, `fast=hits/misses` measures the
    isolated single-op fast fallback, and
    `pre=hit/miss/ops/build/req/drop` exposes predecode coverage and worker
-   pressure. In the counter-only baseline, `predrop=q/set/dup` separates a full
-   request queue, a full two-way cache set, and a request for an entry already
-   present or building. `preocc=now/cap/high` reports absolute resident entries,
-   allocated capacity, and the lifetime high-water mark. Capture these fields
-   before enabling replacement so eviction gains can be compared against the
-   frozen-cache behavior. `rom=loads+prefetches` must remain zero for a warmed
-   ROM that fits in the 8 MB cache.
+   pressure. `predrop=q/set/dup` separates a full request queue, the retired
+   frozen-cache set-full path, and a completion whose block was already
+   resident. With frame-boundary CLOCK replacement enabled, `set` must remain
+   zero. `prechurn=evict/stall` reports replacements and moments when core 0
+   found its completion queue full; occasional evictions are expected after the
+   working set fills, but sustained stalls indicate the eight-entry install
+   budget is too small. `preocc=now/cap/high` reports absolute resident entries,
+   allocated capacity, and the lifetime high-water mark. Compare hit rate,
+   eviction rate, `corepart=cpu`, and `emu` against the captured counter-only
+   frozen-cache baseline in both overworld and battle gameplay.
+   `rom=loads+prefetches` must remain zero for a warmed ROM that fits in the
+   8 MB cache.
 6. Check pacing in both a slow and a lightweight scene. When `core` remains over
    16743 us, `front=...pace...` should be near zero even if `pace_resync` rises;
    resynchronization drops stale lateness and must not grant an extra sleep

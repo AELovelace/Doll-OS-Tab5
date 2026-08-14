@@ -126,6 +126,7 @@ void gba_p4_thumb_jit_shutdown(void);
 bool gba_thumb_predecode_init(void);
 void gba_thumb_predecode_reset(void);
 void gba_thumb_predecode_shutdown(void);
+u32 gba_thumb_predecode_install(u32 max_completed);
 u32 gba_thumb_predecode_worker_run(u32 max_requests);
 bool gba_video_scratch_init(void);
 void gba_video_scratch_term(void);
@@ -161,6 +162,8 @@ extern u32 gba_thumb_predecode_duplicates;
 extern u32 gba_thumb_predecode_resident;
 extern u32 gba_thumb_predecode_capacity;
 extern u32 gba_thumb_predecode_highwater;
+extern u32 gba_thumb_predecode_evictions;
+extern u32 gba_thumb_predecode_completion_stalls;
 extern u32 gba_thumb_fast_hits;
 extern u32 gba_thumb_fast_misses;
 extern u32 gba_interp_fast_enabled;
@@ -322,6 +325,9 @@ void doll_gba_core_stop(void) {
 
 void doll_gba_core_run(uint16_t buttons, bool draw) {
   if (!gbsp_memory) return;
+  // Install a bounded completion batch before executing the next guest frame.
+  // Core 1 therefore owns every cache mutation as well as every cache lookup.
+  gba_thumb_predecode_install(8);
 #if DOLL_GBA_VERBOSE_DIAGNOSTICS
   const uint16_t changedButtons = buttons ^ previousDebugButtons;
   const uint16_t debugPressed = changedButtons & buttons & 0x080U;
@@ -456,6 +462,9 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
   stats->thumb_predecode_resident = gba_thumb_predecode_resident;
   stats->thumb_predecode_capacity = gba_thumb_predecode_capacity;
   stats->thumb_predecode_highwater = gba_thumb_predecode_highwater;
+  stats->thumb_predecode_evictions = gba_thumb_predecode_evictions;
+  stats->thumb_predecode_completion_stalls =
+      gba_thumb_predecode_completion_stalls;
   stats->thumb_fast_hits = gba_thumb_fast_hits;
   stats->thumb_fast_misses = gba_thumb_fast_misses;
   stats->vram_internal = gbsp_memory && esp_ptr_internal(gbsp_memory->p_vram);

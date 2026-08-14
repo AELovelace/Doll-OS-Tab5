@@ -185,10 +185,10 @@ void GameBoyAdvanceHost::saveTaskEntry(void* argument) {
       __atomic_store_n(&host->saveBusy_, false, __ATOMIC_RELEASE);
     }
 
-    // The emulation core only queues immutable ROM snapshots. Decode a bounded
-    // group on core 0 and immediately loop while work remains, still checking
-    // task notifications between groups so touch and DSI presentation stay
-    // responsive. Core 1 never waits for a decoded block.
+    // The emulation core only queues immutable ROM snapshots. Classify a
+    // bounded group on core 0 and publish immutable completions back to core 1,
+    // still checking task notifications between groups so touch and DSI remain
+    // responsive. Core 1 installs completions only between guest frames.
     predecodePending = doll_gba_core_predecode_worker(8) != 0;
   }
   __atomic_store_n(&host->saveStopped_, true, __ATOMIC_RELEASE);
