@@ -1,4 +1,4 @@
-"""Routes the dedicated emulator firmware to its ota_1 flash partition."""
+"""Validates the dedicated emulator partition and exports its debug metadata."""
 
 from pathlib import Path
 import csv
@@ -27,11 +27,10 @@ def emulator_partition() -> tuple[int, int]:
 
 
 emulator_offset, emulator_size = emulator_partition()
-env.Replace(ESP32_APP_OFFSET=hex(emulator_offset))
 env.BoardConfig().update("upload.maximum_size", emulator_size)
 env["INTEGRATION_EXTRA_DATA"].update(
     {"application_offset": hex(emulator_offset)}
-)  # Keeps debugger/upload metadata aligned with esptool's ota_1 address.
+)  # Keeps debugger metadata aligned with the custom ota_1 upload command.
 print(
     f"[pio] Emulator upload target: 0x{emulator_offset:x} "
     f"({emulator_size // 1024} KiB slot)"

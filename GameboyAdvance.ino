@@ -564,11 +564,13 @@ static String gbaCpuEngineName(uint32_t mode) {
     switch (mode) {
         case DOLL_GBA_CPU_SAFE: return "Safe";
         case DOLL_GBA_CPU_BATCH: return "Batch";
+        case DOLL_GBA_CPU_JIT_ISOLATED: return "JIT only";
+        case DOLL_GBA_CPU_TURBO: return "JIT+batch+fast";
         case DOLL_GBA_CPU_FAST_ISOLATED: return "Fast";
         case DOLL_GBA_CPU_BATCH_FAST: return "Batch+fast";
         default: return "Mapped";
     }
-}  // Names only the four engines that remain executable in this build.
+}  // Names each interpreter/JIT combination available to the live A/B menu.
 
 static uint32_t gbaStepCpuEngine(bool backwards) {
     constexpr uint32_t modes[] = {
@@ -576,6 +578,8 @@ static uint32_t gbaStepCpuEngine(bool backwards) {
         DOLL_GBA_CPU_BATCH,
         DOLL_GBA_CPU_FAST_ISOLATED,
         DOLL_GBA_CPU_BATCH_FAST,
+        DOLL_GBA_CPU_JIT_ISOLATED,
+        DOLL_GBA_CPU_TURBO,
     };
     const uint32_t active = doll_gba_core_get_cpu_mode();
     size_t index = 0;
@@ -589,7 +593,7 @@ static uint32_t gbaStepCpuEngine(bool backwards) {
         : (index + 1) % (sizeof(modes) / sizeof(modes[0]));
     doll_gba_core_set_cpu_mode(modes[index]);
     return doll_gba_core_get_cpu_mode();
-}  // Cycles the live core through comparable interpreter combinations.
+}  // Cycles the live core through interpreter and sampled-JIT combinations.
 
 static String gbaMenuValue(int item) {
     if (item == GBA_MENU_DISPLAY) return String(gbaScale) + "x";
@@ -1032,6 +1036,18 @@ static void gbaRunBootSession() {
             const uint32_t jitAttempts = coreStats.jit_attempts - modeStart.jit_attempts;
             const uint32_t jitCompiles = coreStats.jit_compiles - modeStart.jit_compiles;
             const uint32_t jitOps = coreStats.jit_ops - modeStart.jit_ops;
+            const uint32_t jitProbes = coreStats.jit_adapt_probes -
+                modeStart.jit_adapt_probes;
+            const uint32_t jitReuses = coreStats.jit_reuses - modeStart.jit_reuses;
+            const uint32_t jitWaits = coreStats.jit_hot_waits - modeStart.jit_hot_waits;
+            const uint32_t jitRejects = coreStats.jit_reject_hits -
+                modeStart.jit_reject_hits;
+            const uint32_t jitGuards = coreStats.jit_guard_trips -
+                modeStart.jit_guard_trips;
+            const uint32_t jitWordSpecialized = coreStats.jit_word_specialized -
+                modeStart.jit_word_specialized;
+            const uint32_t jitRegionGuardBails = coreStats.jit_region_guard_bails -
+                modeStart.jit_region_guard_bails;
             const uint32_t fastHits = coreStats.thumb_fast_hits - modeStart.thumb_fast_hits;
             const uint32_t fastMisses = coreStats.thumb_fast_misses - modeStart.thumb_fast_misses;
             const uint32_t predecodeRequests = coreStats.thumb_predecode_requests -
@@ -1072,7 +1088,7 @@ static void gbaRunBootSession() {
             const uint64_t otherTimeUs = elapsedUs > accountedTimeUs
                 ? static_cast<uint64_t>(elapsedUs) - accountedTimeUs : 0;
 #if DOLL_GBA_VERBOSE_DIAGNOSTICS
-            Serial.printf("[gba perf] mode=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus audio=%lluus blit=%lluus arm/thumb/halt=%lu/%lu/%lu pc=%08lx cpsr=%08lx jit=%lu/%luK hit/miss/try=%lu/%lu/%lu ops=%lu build=%lu full=%lu reuse=%lu wait/reject/probe=%lu/%lu/%lu break=%02lx:%lu batch=%lu/%lu fast=%lu/%lu predrop=q/set/dup:%lu/%lu/%lu prechurn=evict/stall:%lu/%lu preprobe=1/2/3/4/m:%lu/%lu/%lu/%lu/%lu preocc=now/cap/high:%lu/%lu/%lu vram=%s rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
+            Serial.printf("[gba perf] mode=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus audio=%lluus blit=%lluus arm/thumb/halt=%lu/%lu/%lu pc=%08lx cpsr=%08lx jit=%lu/%luK hit/miss/try=%lu/%lu/%lu ops=%lu build=%lu full=%lu reuse=%lu wait/reject/probe=%lu/%lu/%lu break=%02lx:%lu spec=%lu/%lu batch=%lu/%lu fast=%lu/%lu predrop=q/set/dup:%lu/%lu/%lu prechurn=evict/stall:%lu/%lu preprobe=1/2/3/4/m:%lu/%lu/%lu/%lu/%lu preocc=now/cap/high:%lu/%lu/%lu vram=%s rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
                           gbaScale,
                           gbaFrameSkip,
                           static_cast<unsigned long>(emuFps10 / 10),
@@ -1103,6 +1119,8 @@ static void gbaRunBootSession() {
                            static_cast<unsigned long>(coreStats.jit_adapt_probes),
                            static_cast<unsigned long>(coreStats.jit_top_break),
                            static_cast<unsigned long>(coreStats.jit_top_break_count),
+                           static_cast<unsigned long>(jitWordSpecialized),
+                           static_cast<unsigned long>(jitRegionGuardBails),
                            static_cast<unsigned long>(coreStats.thumb_batch_ops - modeStart.thumb_batch_ops),
                            static_cast<unsigned long>(coreStats.thumb_batch_runs - modeStart.thumb_batch_runs),
                            static_cast<unsigned long>(fastHits),
@@ -1232,7 +1250,7 @@ static void gbaRunBootSession() {
             const uint64_t avgEventUs = perfFrames ? eventUs / perfFrames : 0;
             const uint64_t avgCpuUs = perfFrames && coreTimeUs > updateUs
                 ? (coreTimeUs - updateUs) / perfFrames : 0;
-            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/event/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu upd=arm/thumb/halt:%lu/%lu/%lu fast=%lu/%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu batch=%lu/%lu pre=hit/miss/ops/build/req/drop:%lu/%lu/%lu/%lu/%lu/%lu predrop=q/set/dup:%lu/%lu/%lu prechurn=evict/stall:%lu/%lu preprobe=1/2/3/4/m:%lu/%lu/%lu/%lu/%lu preocc=now/cap/high:%lu/%lu/%lu rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
+            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/event/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu upd=arm/thumb/halt:%lu/%lu/%lu fast=%lu/%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu jitwork=try/build/probe/reuse/wait/reject/guard:%lu/%lu/%lu/%lu/%lu/%lu/%lu jitshape=short/top/count:%lu/%02lx/%lu jitspec=word/bail:%lu/%lu batch=%lu/%lu pre=hit/miss/ops/build/req/drop:%lu/%lu/%lu/%lu/%lu/%lu predrop=q/set/dup:%lu/%lu/%lu prechurn=evict/stall:%lu/%lu preprobe=1/2/3/4/m:%lu/%lu/%lu/%lu/%lu preocc=now/cap/high:%lu/%lu/%lu rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
                           gbaScale,
                           gbaFrameSkip,
                           static_cast<unsigned long>(emuFps10 / 10),
@@ -1264,6 +1282,19 @@ static void gbaRunBootSession() {
                           static_cast<unsigned long>(jitHits),
                           static_cast<unsigned long>(jitMisses),
                            static_cast<unsigned long>(jitOps),
+                           static_cast<unsigned long>(jitAttempts),
+                           static_cast<unsigned long>(jitCompiles),
+                           static_cast<unsigned long>(jitProbes),
+                           static_cast<unsigned long>(jitReuses),
+                           static_cast<unsigned long>(jitWaits),
+                           static_cast<unsigned long>(jitRejects),
+                           static_cast<unsigned long>(jitGuards),
+                           static_cast<unsigned long>(coreStats.jit_short_blocks -
+                               modeStart.jit_short_blocks),
+                           static_cast<unsigned long>(coreStats.jit_top_break),
+                           static_cast<unsigned long>(coreStats.jit_top_break_count),
+                           static_cast<unsigned long>(jitWordSpecialized),
+                           static_cast<unsigned long>(jitRegionGuardBails),
                            static_cast<unsigned long>(coreStats.thumb_batch_ops - modeStart.thumb_batch_ops),
                            static_cast<unsigned long>(coreStats.thumb_batch_runs - modeStart.thumb_batch_runs),
                            static_cast<unsigned long>(coreStats.thumb_predecode_hits - modeStart.thumb_predecode_hits),

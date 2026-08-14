@@ -80,9 +80,10 @@ bool GameBoyAdvanceHost::begin() {
   status_ = "GBA core ready";
   doll_gba_perf_stats_t perf = {};
   doll_gba_core_get_perf(&perf);
-  Serial.printf("[gba] P4 gpSP core ready, %d MB ROM cache, predecode=%luK, JIT=off\n",
+  Serial.printf("[gba] P4 gpSP core ready, %d MB ROM cache, predecode=%luK, JIT=%luK\n",
                 ROM_BUFFER_SIZE,
-                static_cast<unsigned long>(perf.thumb_predecode_bytes / 1024));  // Reports the configured cache instead of a stale fixed value.
+                static_cast<unsigned long>(perf.thumb_predecode_bytes / 1024),
+                static_cast<unsigned long>(perf.jit_bytes / 1024));
   return true;
 }
 

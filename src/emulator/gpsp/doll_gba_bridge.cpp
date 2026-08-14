@@ -83,13 +83,13 @@ void* allocEwram() {
   const size_t largestInternal = heap_caps_get_largest_free_block(internalCaps);
   const bool internalHasRoom = largestInternal >=
       GBA_EWRAM_SIZE + kEwramInternalReserve;
-  ESP_LOGI("gba",
-           "EWRAM request=%luK internal-free=%luK largest=%luK reserve=%luK -> %s",
-           static_cast<unsigned long>(GBA_EWRAM_SIZE / 1024),
-           static_cast<unsigned long>(freeInternal / 1024),
-           static_cast<unsigned long>(largestInternal / 1024),
-           static_cast<unsigned long>(kEwramInternalReserve / 1024),
-           internalHasRoom ? "L2" : "PSRAM");
+  printf("[gba] EWRAM request=%luK internal-free=%luK largest=%luK "
+         "reserve=%luK -> %s\n",
+         static_cast<unsigned long>(GBA_EWRAM_SIZE / 1024),
+         static_cast<unsigned long>(freeInternal / 1024),
+         static_cast<unsigned long>(largestInternal / 1024),
+         static_cast<unsigned long>(kEwramInternalReserve / 1024),
+         internalHasRoom ? "L2" : "PSRAM");
   return allocRegion(GBA_EWRAM_SIZE, internalHasRoom);
 }  // Uses internal EWRAM only when a 128 KB peripheral/task reserve survives.
 
@@ -164,6 +164,8 @@ extern u32 gba_thumb_jit_reuses;
 extern u32 gba_thumb_jit_adapt_probes;
 extern u32 gba_thumb_jit_top_break;
 extern u32 gba_thumb_jit_top_break_count;
+extern u32 gba_thumb_jit_word_specialized;
+extern u32 gba_thumb_jit_region_guard_bails;
 extern u32 gba_thumb_batch_runs;
 extern u32 gba_thumb_batch_ops;
 extern u32 gba_thumb_batch_enabled;
@@ -248,6 +250,7 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
 
   gbsp_memory->p_vram = static_cast<u8*>(allocRegion(GBA_VRAM_SIZE, true));
   (void)gba_thumb_predecode_init();
+  gba_p4_thumb_jit_preinit();
 
   // The no-dynarec build needs only the physical 256 KB EWRAM image. Prefer L2
   // when it fits without consuming the reserve needed by audio and host tasks.
@@ -268,20 +271,21 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
     return false;
   }
 
-  ESP_LOGI("gba", "memory IWRAM=%s/%luK EWRAM=%s MAP=%s VRAM=%s IO=%s PRE=%luK JIT=%luK",
-           esp_ptr_internal(gbsp_memory->p_iwram) ? "L2" : "PSRAM",
-           static_cast<unsigned long>(GBA_IWRAM_SIZE / 1024),
-           esp_ptr_internal(gbsp_memory->p_ewram) ? "L2" : "PSRAM",
-           esp_ptr_internal(gbsp_memory->p_memory_map_read) ? "L2" : "PSRAM",
-           esp_ptr_internal(gbsp_memory->p_vram) ? "L2" : "PSRAM",
-           esp_ptr_internal(gbsp_memory->p_io_registers) ? "L2" : "PSRAM",
-           static_cast<unsigned long>(gba_thumb_predecode_bytes / 1024),
-           static_cast<unsigned long>(gba_thumb_jit_bytes / 1024));
-  ESP_LOGI("gba", "post-allocation internal-free=%luK largest=%luK",
-           static_cast<unsigned long>(heap_caps_get_free_size(
-               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
-           static_cast<unsigned long>(heap_caps_get_largest_free_block(
-               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024));
+  printf("[gba] memory IWRAM=%s/%luK EWRAM=%s MAP=%s VRAM=%s IO=%s "
+         "PRE=%luK JIT=%luK\n",
+         esp_ptr_internal(gbsp_memory->p_iwram) ? "L2" : "PSRAM",
+         static_cast<unsigned long>(GBA_IWRAM_SIZE / 1024),
+         esp_ptr_internal(gbsp_memory->p_ewram) ? "L2" : "PSRAM",
+         esp_ptr_internal(gbsp_memory->p_memory_map_read) ? "L2" : "PSRAM",
+         esp_ptr_internal(gbsp_memory->p_vram) ? "L2" : "PSRAM",
+         esp_ptr_internal(gbsp_memory->p_io_registers) ? "L2" : "PSRAM",
+         static_cast<unsigned long>(gba_thumb_predecode_bytes / 1024),
+         static_cast<unsigned long>(gba_thumb_jit_bytes / 1024));
+  printf("[gba] post-allocation internal-free=%luK largest=%luK\n",
+         static_cast<unsigned long>(heap_caps_get_free_size(
+             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+         static_cast<unsigned long>(heap_caps_get_largest_free_block(
+             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024));
 
   gba_screen_pixels = framebuffer;
   libretro_supports_bitmasks = true;
@@ -411,23 +415,31 @@ bool doll_gba_core_debug_capture_active(void) {
 
 void doll_gba_core_set_cpu_mode(uint32_t mode) {
   if (mode >= DOLL_GBA_CPU_MODE_COUNT) mode = DOLL_GBA_CPU_SAFE;
+#if !GBA_P4_THUMB_DYNAREC
   if (mode == DOLL_GBA_CPU_JIT_ISOLATED || mode == DOLL_GBA_CPU_TURBO) {
     mode = DOLL_GBA_CPU_BATCH_FAST;
   }
+#endif
   gba_thumb_batch_enabled = mode == DOLL_GBA_CPU_BATCH ||
-      mode == DOLL_GBA_CPU_BATCH_FAST;
-  gba_thumb_jit_runtime_enabled = 0;
+      mode == DOLL_GBA_CPU_BATCH_FAST || mode == DOLL_GBA_CPU_TURBO;
+  gba_thumb_jit_runtime_enabled =
+      mode == DOLL_GBA_CPU_JIT_ISOLATED || mode == DOLL_GBA_CPU_TURBO;
   gba_thumb_jit_debug_validate = 0;
   gba_interp_fast_enabled =
-      mode == DOLL_GBA_CPU_FAST_ISOLATED || mode == DOLL_GBA_CPU_BATCH_FAST;
+      mode == DOLL_GBA_CPU_FAST_ISOLATED || mode == DOLL_GBA_CPU_BATCH_FAST ||
+      mode == DOLL_GBA_CPU_TURBO;
   printf("[gba cpu] requested=%lu active=%lu jit=%lu batch=%lu fast=%lu\n",
       (unsigned long)mode, (unsigned long)doll_gba_core_get_cpu_mode(),
       (unsigned long)gba_thumb_jit_runtime_enabled,
       (unsigned long)gba_thumb_batch_enabled,
       (unsigned long)gba_interp_fast_enabled);
-}  // Selects only interpreter/batch engines; JIT modes map to batch+fast.
+}  // Keeps Batch+fast as the baseline while allowing isolated and combined JIT A/Bs.
 
 uint32_t doll_gba_core_get_cpu_mode(void) {
+  if (gba_thumb_jit_runtime_enabled) {
+    if (gba_thumb_batch_enabled && gba_interp_fast_enabled) return DOLL_GBA_CPU_TURBO;
+    return DOLL_GBA_CPU_JIT_ISOLATED;
+  }
   if (gba_thumb_batch_enabled && gba_interp_fast_enabled) return DOLL_GBA_CPU_BATCH_FAST;
   if (gba_thumb_batch_enabled) return DOLL_GBA_CPU_BATCH;
   if (gba_interp_fast_enabled) return DOLL_GBA_CPU_FAST_ISOLATED;
@@ -475,6 +487,8 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
   stats->jit_adapt_probes = gba_thumb_jit_adapt_probes;
   stats->jit_top_break = gba_thumb_jit_top_break;
   stats->jit_top_break_count = gba_thumb_jit_top_break_count;
+  stats->jit_word_specialized = gba_thumb_jit_word_specialized;
+  stats->jit_region_guard_bails = gba_thumb_jit_region_guard_bails;
   stats->thumb_batch_runs = gba_thumb_batch_runs;
   stats->thumb_batch_ops = gba_thumb_batch_ops;
   stats->thumb_predecode_bytes = gba_thumb_predecode_bytes;
