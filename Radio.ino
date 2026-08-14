@@ -26,6 +26,7 @@
 #include <SD_MMC.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <esp_heap_caps.h>
 #include <new>   //std::nothrow -- radioEnsureCodec heap-constructs the Audio engine
 
 //RADIO_VOLUME_MAX lives in global.h -- Gameboy.ino's settings menu shows the level
@@ -70,12 +71,28 @@ static uint32_t radioCurrentSeconds = 0;
 static uint32_t radioDurationSeconds = 0;
 static bool radioLocalEofPending = false;
 
-static char radioDirectoryNames[RADIO_DIRECTORY_MAX_STATIONS][RADIO_DIRECTORY_NAME_MAX];
-static char radioDirectoryUrls[RADIO_DIRECTORY_MAX_STATIONS][RADIO_DIRECTORY_URL_MAX];
-static bool radioDirectoryRunning[RADIO_DIRECTORY_MAX_STATIONS];
-static int radioDirectoryClients[RADIO_DIRECTORY_MAX_STATIONS];
+struct RadioDirectoryStorage {
+    char names[RADIO_DIRECTORY_MAX_STATIONS][RADIO_DIRECTORY_NAME_MAX];
+    char urls[RADIO_DIRECTORY_MAX_STATIONS][RADIO_DIRECTORY_URL_MAX];
+    bool running[RADIO_DIRECTORY_MAX_STATIONS];
+    int clients[RADIO_DIRECTORY_MAX_STATIONS];
+    char base[RADIO_DIRECTORY_BASE_MAX];
+};
+
+//The station directory is only needed while somebody is using the radio shell.
+//Keeping its 5.4KB backing store out of static DRAM leaves that scarce memory for
+//USB and the GBA core, while PSRAM comfortably retains the list between commands.
+static RadioDirectoryStorage* radioDirectory = nullptr;
 static int radioDirectoryCount = 0;
-static char radioDirectoryBase[RADIO_DIRECTORY_BASE_MAX] = "";
+
+static bool radioEnsureDirectoryStorage() {
+    if (radioDirectory != nullptr) {
+        return true;
+    }
+    radioDirectory = static_cast<RadioDirectoryStorage*>(heap_caps_calloc(
+        1, sizeof(RadioDirectoryStorage), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    return radioDirectory != nullptr;
+}
 
 //Runs once, lazily, the first time "radio" is used post-boot. radioVolume's static
 //initializer above runs at global-construction time, before LittleFS is mounted, so
@@ -802,7 +819,7 @@ static String radioDirectoryPlayableUrl(const String& pathOrUrl) {
     if (!path.startsWith("/")) {
         path = "/" + path;
     }
-    String base = radioDirectoryBase[0] != '\0' ? String(radioDirectoryBase) : radioDirectoryBaseUrl(RADIO_DIRECTORY_URL);
+    String base = radioDirectory->base[0] != '\0' ? String(radioDirectory->base) : radioDirectoryBaseUrl(RADIO_DIRECTORY_URL);
     return base + path;
 }
 
@@ -825,12 +842,12 @@ static bool radioDirectoryAddStation(JsonObjectConst station) {
     }
 
     String playableUrl = radioDirectoryPlayableUrl(path);
-    strncpy(radioDirectoryNames[radioDirectoryCount], name.c_str(), RADIO_DIRECTORY_NAME_MAX - 1);
-    radioDirectoryNames[radioDirectoryCount][RADIO_DIRECTORY_NAME_MAX - 1] = '\0';
-    strncpy(radioDirectoryUrls[radioDirectoryCount], playableUrl.c_str(), RADIO_DIRECTORY_URL_MAX - 1);
-    radioDirectoryUrls[radioDirectoryCount][RADIO_DIRECTORY_URL_MAX - 1] = '\0';
-    radioDirectoryRunning[radioDirectoryCount] = station["running"] | false;
-    radioDirectoryClients[radioDirectoryCount] = station["clients"] | 0;
+    strncpy(radioDirectory->names[radioDirectoryCount], name.c_str(), RADIO_DIRECTORY_NAME_MAX - 1);
+    radioDirectory->names[radioDirectoryCount][RADIO_DIRECTORY_NAME_MAX - 1] = '\0';
+    strncpy(radioDirectory->urls[radioDirectoryCount], playableUrl.c_str(), RADIO_DIRECTORY_URL_MAX - 1);
+    radioDirectory->urls[radioDirectoryCount][RADIO_DIRECTORY_URL_MAX - 1] = '\0';
+    radioDirectory->running[radioDirectoryCount] = station["running"] | false;
+    radioDirectory->clients[radioDirectoryCount] = station["clients"] | 0;
     radioDirectoryCount++;
     return true;
 }
@@ -844,8 +861,12 @@ static bool radioDirectoryReadArray(JsonArrayConst stations) {
 }
 
 static bool radioFetchDirectory(String& error) {
+    if (!radioEnsureDirectoryStorage()) {
+        error = "not enough PSRAM for the station directory";
+        return false;
+    }
     radioDirectoryCount = 0;
-    radioDirectoryBase[0] = '\0';
+    radioDirectory->base[0] = '\0';
     if (WiFi.status() != WL_CONNECTED) {
         error = "WiFi not connected. Run 'wifi connect' first.";
         return false;
@@ -853,8 +874,8 @@ static bool radioFetchDirectory(String& error) {
 
     String directoryUrl = settingsGet("radio.directory_url", RADIO_DIRECTORY_URL);
     String baseUrl = radioDirectoryBaseUrl(directoryUrl);
-    strncpy(radioDirectoryBase, baseUrl.c_str(), RADIO_DIRECTORY_BASE_MAX - 1);
-    radioDirectoryBase[RADIO_DIRECTORY_BASE_MAX - 1] = '\0';
+    strncpy(radioDirectory->base, baseUrl.c_str(), RADIO_DIRECTORY_BASE_MAX - 1);
+    radioDirectory->base[RADIO_DIRECTORY_BASE_MAX - 1] = '\0';
     bool secure = directoryUrl.startsWith("https://");
     WiFiClient plainClient;
     WiFiClientSecure secureClient;
@@ -910,14 +931,14 @@ static void radioPrintDirectory() {
     outLine("Radio stations", C_CYAN);
     outLine("--------------");
     for (int i = 0; i < radioDirectoryCount; i++) {
-        String line = String(i + 1) + ". " + String(radioDirectoryNames[i]);
-        line += radioDirectoryRunning[i] ? " [on]" : " [idle]";
-        line += " " + String(radioDirectoryClients[i]) + " listener";
-        if (radioDirectoryClients[i] != 1) {
+        String line = String(i + 1) + ". " + String(radioDirectory->names[i]);
+        line += radioDirectory->running[i] ? " [on]" : " [idle]";
+        line += " " + String(radioDirectory->clients[i]) + " listener";
+        if (radioDirectory->clients[i] != 1) {
             line += "s";
         }
         outLine(line);
-        outLine("   " + String(radioDirectoryUrls[i]));
+        outLine("   " + String(radioDirectory->urls[i]));
     }
     outLine("");
 }
@@ -938,7 +959,7 @@ static bool radioParseDirectoryChoice(const String& input, int& index) {
     }
 
     for (int i = 0; i < radioDirectoryCount; i++) {
-        String name = String(radioDirectoryNames[i]);
+        String name = String(radioDirectory->names[i]);
         name.toLowerCase();
         if (choice == name) {
             index = i;
@@ -1015,7 +1036,7 @@ static void radioHandleListCommand(const String parts[], int partCount) {
         return;
     }
 
-    radioPlayUrl(radioDirectoryUrls[index]);
+    radioPlayUrl(radioDirectory->urls[index]);
 }
 
 //Hand the audio hardware to something else -- currently only the Game Boy emulator

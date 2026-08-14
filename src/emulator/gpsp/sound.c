@@ -28,6 +28,10 @@ gbc_sound_struct gbc_sound_channel[4];
 
 const u32 sound_frequency = GBA_SOUND_FREQUENCY;
 
+#ifndef GBA_SOUND_DIAGNOSTICS
+#define GBA_SOUND_DIAGNOSTICS 0
+#endif // Keeps sample-quality counters out of the release audio hot path.
+
 u32 sound_on;
 #ifdef RETRO_GO
 typedef struct
@@ -105,12 +109,14 @@ void sound_timer_queue32(u32 channel, u32 value)
 {
   direct_sound_struct *ds = &direct_sound_channel[channel];
 
+#if GBA_SOUND_DIAGNOSTICS
   sound_fifo_queue_words[channel]++;
   for(u32 shift = 0; shift < 32; shift += 8)
   {
     if(((value >> shift) & 0xFF) != 0)
       sound_fifo_queue_nonzero_bytes[channel]++;
   }
+#endif
 
   ds->fifo[ds->fifo_top++] = value & 0xFF;
   ds->fifo_top &= 31;
@@ -136,13 +142,16 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
   int ret = 0;
   u32 sample_status = DIRECT_SOUND_INACTIVE;
   direct_sound_struct *ds = &direct_sound_channel[channel];
+#if GBA_SOUND_DIAGNOSTICS
   sound_timer_calls[channel]++;
+#endif
 
   fixed8_24 fifo_fractional = ds->fifo_fractional;
   u32 buffer_index = ds->buffer_index;
   s16 current_sample, next_sample;
 
   current_sample = ((s8)ds->fifo[ds->fifo_base]) * 16;
+#if GBA_SOUND_DIAGNOSTICS
   if(current_sample != 0)
   {
     u32 magnitude = current_sample < 0 ? (u32)(-current_sample) : (u32)current_sample;
@@ -150,6 +159,7 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
     if(magnitude > sound_timer_peak_samples[channel])
       sound_timer_peak_samples[channel] = magnitude;
   }
+#endif
   ds->fifo_base = (ds->fifo_base + 1) % 32;
   next_sample = ((s8)ds->fifo[ds->fifo_base]) * 16;
 
@@ -1001,22 +1011,29 @@ u32 sound_read_samples(s16 *out, u32 frames)
       u32 source_index   = (sound_buffer_base + i) & BUFFER_SIZE_MASK;
       s32 current_sample = sound_buffer[source_index];
       s32 sample;
+#if GBA_SOUND_DIAGNOSTICS
       u32 abs_sample;
+#endif
 
       sound_buffer[source_index] = 0;
 
       if(current_sample > 2047)
       {
          current_sample = 2047;
+#if GBA_SOUND_DIAGNOSTICS
          sound_clip_samples++;
+#endif
       }
       if(current_sample < -2048)
       {
          current_sample = -2048;
+#if GBA_SOUND_DIAGNOSTICS
          sound_clip_samples++;
+#endif
       }
 
       sample = current_sample * 16;
+#if GBA_SOUND_DIAGNOSTICS
       abs_sample = (sample < 0) ? (u32)(-sample) : (u32)sample;
       if(abs_sample != 0)
       {
@@ -1026,9 +1043,10 @@ u32 sound_read_samples(s16 *out, u32 frames)
          if(abs_sample > sound_peak_sample)
             sound_peak_sample = abs_sample;
       }
+#endif
 
       s16 output_sample = sound_soft_gate(sample);
-#ifdef RETRO_GO
+#if defined(RETRO_GO) && GBA_SOUND_DIAGNOSTICS
       u32 channel = i & 1;
       if(sound_have_last_output_sample[channel])
       {

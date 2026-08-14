@@ -62,6 +62,9 @@ extern "C" {
 #ifndef GBA_THUMB_PREDECODE_PROBE_PROFILE
 #define GBA_THUMB_PREDECODE_PROBE_PROFILE 0
 #endif // Enables expensive per-way lookup counters only in diagnostic builds.
+#ifndef GBA_RUNTIME_HOT_STATS
+#define GBA_RUNTIME_HOT_STATS 0
+#endif // Removes global counter writes from release interpreter hot paths.
 #ifndef GBA_SWI_HLE
 #define GBA_SWI_HLE 0
 #endif
@@ -257,6 +260,14 @@ static inline void gba_arm_profile_exact_opcode(u32 pc, u32 opcode)
 // out in performance firmware once the representative opcode mix is known.
 #define GBA_THUMB_MIX_COUNT(counter) do { } while(0)
 #endif
+
+#if GBA_RUNTIME_HOT_STATS
+#define GBA_HOT_STAT_INC(counter) do { (counter)++; } while(0)
+#define GBA_HOT_STAT_ADD(counter, value) do { (counter) += (value); } while(0)
+#else
+#define GBA_HOT_STAT_INC(counter) do { } while(0)
+#define GBA_HOT_STAT_ADD(counter, value) do { } while(0)
+#endif // Keeps performance telemetry opt-in without taxing every release block.
 }
 
 #if GBA_DECODED_BLOCK_CACHE
@@ -2192,7 +2203,7 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
       return false;
 
     sim_regs[rd] = gba_p4_thumb_jit_txn_read(txn,
-        iwram + (address & 0x7FFF) + 0x8000, 4);
+        iwram + (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET, 4);
     sim_regs[REG_PC] += 2;
     return true;
   }
@@ -2205,7 +2216,8 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
       return false;
 
     if(!gba_p4_thumb_jit_txn_write(txn,
-          iwram + (address & 0x7FFF) + 0x8000, 4, sim_regs[rd]))
+          iwram + (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET, 4,
+          sim_regs[rd]))
       return false;
     sim_regs[REG_PC] += 2;
     return true;
@@ -2228,7 +2240,8 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
       if(reglist & (1U << i))
       {
         if(!gba_p4_thumb_jit_txn_write(txn,
-              iwram + ((address + offset) & 0x7FFF) + 0x8000, 4, sim_regs[i]))
+              iwram + ((address + offset) & 0x7FFF) +
+              GBA_IWRAM_DATA_OFFSET, 4, sim_regs[i]))
           return false;
         offset += 4;
       }
@@ -2236,7 +2249,7 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
     if(has_lr)
     {
       if(!gba_p4_thumb_jit_txn_write(txn,
-            iwram + ((address + offset) & 0x7FFF) + 0x8000, 4,
+            iwram + ((address + offset) & 0x7FFF) + GBA_IWRAM_DATA_OFFSET, 4,
             sim_regs[REG_LR]))
         return false;
     }
@@ -2257,7 +2270,8 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
       if(reglist & (1U << i))
       {
         sim_regs[i] = gba_p4_thumb_jit_txn_read(txn,
-            iwram + ((address + offset) & 0x7FFF) + 0x8000, 4);
+            iwram + ((address + offset) & 0x7FFF) +
+            GBA_IWRAM_DATA_OFFSET, 4);
         offset += 4;
       }
     }
@@ -2314,19 +2328,22 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
         if(top >= 0x60 && top <= 0x67)
         {
           if(!gba_p4_thumb_jit_txn_write(txn,
-                iwram + (address & 0x7FFF) + 0x8000, 4, sim_regs[rd]))
+                iwram + (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET, 4,
+                sim_regs[rd]))
             return false;
         }
         else if(top >= 0x80 && top <= 0x87)
         {
           if(!gba_p4_thumb_jit_txn_write(txn,
-                iwram + (address & 0x7FFF) + 0x8000, 2, sim_regs[rd]))
+                iwram + (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET, 2,
+                sim_regs[rd]))
             return false;
         }
         else
         {
           if(!gba_p4_thumb_jit_txn_write(txn,
-                iwram + (address & 0x7FFF) + 0x8000, 1, sim_regs[rd]))
+                iwram + (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET, 1,
+                sim_regs[rd]))
             return false;
         }
         break;
@@ -2377,13 +2394,13 @@ static bool gba_p4_thumb_jit_simulate_one(u32 opcode, u32 *sim_regs,
       case 0x03:
         if(top >= 0x68 && top <= 0x6F)
           sim_regs[rd] = gba_p4_thumb_jit_txn_read(txn,
-              iwram + (address & 0x7FFF) + 0x8000, 4);
+              iwram + (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET, 4);
         else if(top >= 0x88 && top <= 0x8F)
           sim_regs[rd] = gba_p4_thumb_jit_txn_read(txn,
-              iwram + (address & 0x7FFF) + 0x8000, 2);
+              iwram + (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET, 2);
         else
           sim_regs[rd] = gba_p4_thumb_jit_txn_read(txn,
-              iwram + (address & 0x7FFF) + 0x8000, 1);
+              iwram + (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET, 1);
         break;
 
       default:
@@ -3264,7 +3281,8 @@ static bool gba_p4_thumb_jit_emit_iwram_addr(gba_p4_rv_emit_t *emit,
 {
   return gba_p4_emit(emit, rv_slli(gba_addr_reg, gba_addr_reg, 17)) &&
          gba_p4_emit(emit, rv_srli(gba_addr_reg, gba_addr_reg, 17)) &&
-         gba_p4_emit_li32(emit, RV_T1, (u32)(uintptr_t)(iwram + 0x8000)) &&
+         gba_p4_emit_li32(emit, RV_T1,
+             (u32)(uintptr_t)(iwram + GBA_IWRAM_DATA_OFFSET)) &&
          gba_p4_emit(emit, rv_add(gba_addr_reg, gba_addr_reg, RV_T1));
 }
 
@@ -3476,7 +3494,8 @@ static bool gba_p4_thumb_jit_emit_wram_load_imm_op(gba_p4_rv_emit_t *emit,
   // redundant and another opportunity for branch-only cache mutation.
   if(!(gba_p4_emit(emit, rv_slli(RV_T0, RV_T0, 17)) &&
        gba_p4_emit(emit, rv_srli(RV_T0, RV_T0, 17)) &&
-       gba_p4_emit_li32(emit, RV_T1, (u32)(uintptr_t)(iwram + 0x8000)) &&
+       gba_p4_emit_li32(emit, RV_T1,
+           (u32)(uintptr_t)(iwram + GBA_IWRAM_DATA_OFFSET)) &&
        gba_p4_emit(emit, rv_add(RV_T0, RV_T0, RV_T1))))
     return false;
 
@@ -3603,7 +3622,8 @@ static bool gba_p4_thumb_jit_emit_wram_store_imm_op(gba_p4_rv_emit_t *emit,
        gba_p4_emit(emit, rv_addi(RV_T0, RV_T0, imm)) &&
        gba_p4_emit(emit, rv_slli(RV_T0, RV_T0, 17)) &&
        gba_p4_emit(emit, rv_srli(RV_T0, RV_T0, 17)) &&
-       gba_p4_emit_li32(emit, RV_T1, (u32)(uintptr_t)(iwram + 0x8000)) &&
+       gba_p4_emit_li32(emit, RV_T1,
+           (u32)(uintptr_t)(iwram + GBA_IWRAM_DATA_OFFSET)) &&
        gba_p4_emit(emit, rv_add(RV_T0, RV_T0, RV_T1))))
     return false;
 
@@ -4939,7 +4959,8 @@ static inline bool gba_thumb_store_direct_u32_fast(u32 address, u32 value)
       return true;
 
     case 0x03:
-      address32(iwram, (address & 0x7FFF) + 0x8000) = eswap32(value);
+      address32(iwram, (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET) =
+          eswap32(value);
       return true;
 
     default:
@@ -4956,7 +4977,8 @@ static inline bool gba_thumb_store_direct_u16_fast(u32 address, u32 value)
       return true;
 
     case 0x03:
-      address16(iwram, (address & 0x7FFF) + 0x8000) = eswap16((u16)value);
+      address16(iwram, (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET) =
+          eswap16((u16)value);
       return true;
 
     default:
@@ -4973,7 +4995,7 @@ static inline bool gba_thumb_store_direct_u8_fast(u32 address, u32 value)
       return true;
 
     case 0x03:
-      iwram[(address & 0x7FFF) + 0x8000] = (u8)value;
+      iwram[(address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET] = (u8)value;
       return true;
 
     default:
@@ -5048,7 +5070,8 @@ static inline bool gba_thumb_load_direct_u32_fast(u32 address, u32 &value)
       return true;
 
     case 0x03:
-      value = readaddress32(iwram, (address & 0x7FFF) + 0x8000);
+      value = readaddress32(iwram,
+          (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET);
       return true;
 
     default:
@@ -5065,7 +5088,8 @@ static inline bool gba_thumb_load_direct_u16_fast(u32 address, u32 &value)
       return true;
 
     case 0x03:
-      value = readaddress16(iwram, (address & 0x7FFF) + 0x8000);
+      value = readaddress16(iwram,
+          (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET);
       return true;
 
     default:
@@ -5082,7 +5106,7 @@ static inline bool gba_thumb_load_direct_u8_fast(u32 address, u32 &value)
       return true;
 
     case 0x03:
-      value = iwram[(address & 0x7FFF) + 0x8000];
+      value = iwram[(address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET];
       return true;
 
     default:
@@ -5310,7 +5334,7 @@ static inline bool gba_thumb_direct_ram_span(u32 address, u32 bytes,
   {
     if(((address & 0x7FFF) + bytes) <= 0x8000)
     {
-      base = iwram + 0x8000;
+      base = iwram + GBA_IWRAM_DATA_OFFSET;
       mask = 0x7FFF;
       return true;
     }
@@ -5748,7 +5772,8 @@ static inline u8 gba_hle_read8_fast(u32 address)
       return readaddress8(ewram, address & 0x3FFFF);
 
     case 0x03:
-      return readaddress8(iwram, (address & 0x7FFF) + 0x8000);
+      return readaddress8(iwram,
+          (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET);
 
     case 0x05:
       return readaddress8(palette_ram, address & 0x3FF);
@@ -5775,7 +5800,8 @@ static inline u16 gba_hle_read16_fast(u32 address)
       return readaddress16(ewram, address & 0x3FFFF);
 
     case 0x03:
-      return readaddress16(iwram, (address & 0x7FFF) + 0x8000);
+      return readaddress16(iwram,
+          (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET);
 
     case 0x05:
       return readaddress16(palette_ram, address & 0x3FF);
@@ -5802,7 +5828,8 @@ static inline u32 gba_hle_read32_fast(u32 address)
       return readaddress32(ewram, address & 0x3FFFF);
 
     case 0x03:
-      return readaddress32(iwram, (address & 0x7FFF) + 0x8000);
+      return readaddress32(iwram,
+          (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET);
 
     case 0x05:
       return readaddress32(palette_ram, address & 0x3FF);
@@ -5831,7 +5858,7 @@ static inline void gba_hle_write8_fast(u32 address, u8 value,
       break;
 
     case 0x03:
-      address8(iwram, (address & 0x7FFF) + 0x8000) = value;
+      address8(iwram, (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET) = value;
       break;
 
     default:
@@ -5850,7 +5877,8 @@ static inline void gba_hle_write16_fast(u32 address, u16 value,
       break;
 
     case 0x03:
-      address16(iwram, (address & 0x7FFF) + 0x8000) = eswap16(value);
+      address16(iwram, (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET) =
+          eswap16(value);
       break;
 
     case 0x06:
@@ -5881,7 +5909,8 @@ static inline void gba_hle_write32_fast(u32 address, u32 value,
       break;
 
     case 0x03:
-      address32(iwram, (address & 0x7FFF) + 0x8000) = eswap32(value);
+      address32(iwram, (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET) =
+          eswap32(value);
       break;
 
     case 0x06:
@@ -6532,7 +6561,7 @@ static inline void gba_hle_register_ram_reset(u32 flags)
     memset(ewram, 0, GBA_EWRAM_SIZE);
 
   if(flags & 0x02)
-    memset(&iwram[0x8000], 0, 0x7E00);
+    memset(&iwram[GBA_IWRAM_DATA_OFFSET], 0, 0x7E00);
 
   if(flags & 0x04)
   {
@@ -7203,11 +7232,11 @@ static inline int gba_thumb_predecode_try_execute(u32 &n_flag, u32 &z_flag,
       gba_thumb_predecode_lookup(reg[REG_PC], entry_count);
   if(!entry)
   {
-    gba_thumb_predecode_misses++;
+    GBA_HOT_STAT_INC(gba_thumb_predecode_misses);
     return 0;
   }
 
-  gba_thumb_predecode_hits++;
+  GBA_HOT_STAT_INC(gba_thumb_predecode_hits);
   if(!entry_count)
     return 4;
 
@@ -7250,9 +7279,9 @@ static inline int gba_thumb_predecode_try_execute(u32 &n_flag, u32 &z_flag,
 
   if(batch_ops)
   {
-    gba_thumb_batch_runs++;
-    gba_thumb_batch_ops += batch_ops;
-    gba_thumb_predecode_ops += batch_ops;
+    GBA_HOT_STAT_INC(gba_thumb_batch_runs);
+    GBA_HOT_STAT_ADD(gba_thumb_batch_ops, batch_ops);
+    GBA_HOT_STAT_ADD(gba_thumb_predecode_ops, batch_ops);
   }
   return outcome;
 }
@@ -8568,7 +8597,8 @@ static inline bool gba_arm_execute_hot_fast_single(u32 opcode,
       const u32 address = reg[5] & ~3U;
       const u8 region = address >> 24;
       if(region == 0x03)
-        address32(iwram, (address & 0x7FFF) + 0x8000) = eswap32(reg[6]);
+        address32(iwram, (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET) =
+            eswap32(reg[6]);
       else if(region == 0x02)
         address32(ewram, address & 0x3FFFF) = eswap32(reg[6]);
       else
@@ -8588,7 +8618,8 @@ static inline bool gba_arm_execute_hot_fast_single(u32 opcode,
       const u32 address = reg[7] + reg[6];
       const u8 region = address >> 24;
       if(region == 0x03)
-        reg[1] = (u32)(s32)(s8)iwram[(address & 0x7FFF) + 0x8000];
+        reg[1] = (u32)(s32)(s8)iwram[
+            (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET];
       else if(region == 0x02)
         reg[1] = (u32)(s32)(s8)ewram[address & 0x3FFFF];
       else
@@ -8607,7 +8638,8 @@ static inline bool gba_arm_execute_hot_fast_single(u32 opcode,
       const u32 address = reg[5] + 208;
       const u8 region = address >> 24;
       if(region == 0x03)
-        reg[1] = (u32)(s32)(s8)iwram[(address & 0x7FFF) + 0x8000];
+        reg[1] = (u32)(s32)(s8)iwram[
+            (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET];
       else if(region == 0x02)
         reg[1] = (u32)(s32)(s8)ewram[address & 0x3FFFF];
       else
@@ -8787,7 +8819,8 @@ static inline bool gba_arm_execute_hot_fast_single(u32 opcode,
       if(region == 0x03)
       {
         cycles_remaining -= ws_cyc_nseq[region][0];
-        reg[rd] = (u32)(s32)(s8)iwram[(address & 0x7FFF) + 0x8000];
+        reg[rd] = (u32)(s32)(s8)iwram[
+            (address & 0x7FFF) + GBA_IWRAM_DATA_OFFSET];
       }
       else if(region == 0x02)
       {
@@ -9594,7 +9627,8 @@ arm_loop:
        interp_trace_instruction(reg[REG_PC], 1);
        #endif
 
-       if(!arm_fast_attempted && gba_arm_hot_fast_can_start(opcode) &&
+       if(interp_fast && !arm_fast_attempted &&
+          gba_arm_hot_fast_can_start(opcode) &&
           gba_arm_execute_hot_fast(opcode, n_flag, z_flag, c_flag, v_flag,
             cycles_remaining))
           goto skip_instruction;
@@ -11162,8 +11196,8 @@ thumb_loop:
              batch_ops++;
              if(fast_result == 2)
              {
-                gba_thumb_batch_runs++;
-                gba_thumb_batch_ops += batch_ops;
+                GBA_HOT_STAT_INC(gba_thumb_batch_runs);
+                GBA_HOT_STAT_ADD(gba_thumb_batch_ops, batch_ops);
                 collapse_flags();
                 goto arm_loop;
              }
@@ -11173,8 +11207,8 @@ thumb_loop:
                 cycles_remaining = 0;
              if(cpu_alert & (CPU_ALERT_HALT | CPU_ALERT_IRQ))
              {
-                gba_thumb_batch_runs++;
-                gba_thumb_batch_ops += batch_ops;
+                GBA_HOT_STAT_INC(gba_thumb_batch_runs);
+                GBA_HOT_STAT_ADD(gba_thumb_batch_ops, batch_ops);
                 goto alert;
              }
 
@@ -11193,8 +11227,8 @@ thumb_loop:
 
           if(batch_ops)
           {
-             gba_thumb_batch_runs++;
-             gba_thumb_batch_ops += batch_ops;
+             GBA_HOT_STAT_INC(gba_thumb_batch_runs);
+             GBA_HOT_STAT_ADD(gba_thumb_batch_ops, batch_ops);
              if(!fast_dispatch_already_missed)
                 continue;
           }
@@ -11224,9 +11258,9 @@ thumb_loop:
           int fast_result = gba_thumb_execute_fast_dispatch(opcode, n_flag, z_flag,
              c_flag, v_flag, cpu_alert, cycles_remaining);
           if(fast_result)
-             gba_thumb_fast_hits++;
+             GBA_HOT_STAT_INC(gba_thumb_fast_hits);
           else
-             gba_thumb_fast_misses++;
+             GBA_HOT_STAT_INC(gba_thumb_fast_misses);
           if(fast_result == 1)
              goto thumb_instruction_done;
           if(fast_result == 2)

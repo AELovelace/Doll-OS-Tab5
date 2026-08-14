@@ -1301,10 +1301,13 @@ static void gbaRunBootSession() {
             const uint64_t updateUs = cyclesPerUs ? updateCycles / cyclesPerUs : 0;
             const uint64_t videoUs = cyclesPerUs ? videoCycles / cyclesPerUs : 0;
             const uint64_t soundUs = cyclesPerUs ? soundCycles / cyclesPerUs : 0;
-            const uint64_t avgUpdateUs = perfFrames ? updateUs / perfFrames : 0;
+            const uint64_t nestedUpdateUs = videoUs + soundUs;
+            const uint64_t eventUs = updateUs > nestedUpdateUs
+                ? updateUs - nestedUpdateUs : 0;
+            const uint64_t avgEventUs = perfFrames ? eventUs / perfFrames : 0;
             const uint64_t avgCpuUs = perfFrames && coreTimeUs > updateUs
                 ? (coreTimeUs - updateUs) / perfFrames : 0;
-            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/update/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu upd=arm/thumb/halt:%lu/%lu/%lu fast=%lu/%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu batch=%lu/%lu pre=hit/miss/ops/build/req/drop:%lu/%lu/%lu/%lu/%lu/%lu predrop=q/set/dup:%lu/%lu/%lu prechurn=evict/stall:%lu/%lu preprobe=1/2/3/4/m:%lu/%lu/%lu/%lu/%lu preocc=now/cap/high:%lu/%lu/%lu rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
+            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/event/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu upd=arm/thumb/halt:%lu/%lu/%lu fast=%lu/%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu batch=%lu/%lu pre=hit/miss/ops/build/req/drop:%lu/%lu/%lu/%lu/%lu/%lu predrop=q/set/dup:%lu/%lu/%lu prechurn=evict/stall:%lu/%lu preprobe=1/2/3/4/m:%lu/%lu/%lu/%lu/%lu preocc=now/cap/high:%lu/%lu/%lu rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
                           gbaScale,
                           gbaFrameSkip,
                           static_cast<unsigned long>(emuFps10 / 10),
@@ -1315,7 +1318,7 @@ static void gbaRunBootSession() {
                           perfDraws ? drawCoreTimeUs / perfDraws : 0,
                           perfSkips ? skipCoreTimeUs / perfSkips : 0,
                           avgCpuUs,
-                          avgUpdateUs,
+                          avgEventUs,
                           perfFrames ? videoUs / perfFrames : 0,
                           perfFrames ? soundUs / perfFrames : 0,
                           audioTimeUs / perfFrames,

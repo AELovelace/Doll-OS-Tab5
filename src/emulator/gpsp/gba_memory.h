@@ -264,8 +264,20 @@ extern dma_transfer_type dma[DMA_CHAN_CNT];
 
 #define GBA_VRAM_SIZE            (1024 * 96)
 #define GBA_BIOS_ROM_SIZE        (1024 * 16)
-#define GBA_EWRAM_SIZE           (1024 * 256 * 2)
-#define GBA_IWRAM_SIZE           (1024 * 32 * 2)
+#define GBA_EWRAM_DATA_SIZE      (1024 * 256)
+#ifdef HAVE_DYNAREC
+#define GBA_EWRAM_SIZE           (GBA_EWRAM_DATA_SIZE * 2)
+#else
+#define GBA_EWRAM_SIZE           GBA_EWRAM_DATA_SIZE
+#endif
+#define GBA_IWRAM_DATA_SIZE      (1024 * 32)
+#ifdef HAVE_DYNAREC
+#define GBA_IWRAM_DATA_OFFSET    GBA_IWRAM_DATA_SIZE
+#define GBA_IWRAM_SIZE           (GBA_IWRAM_DATA_SIZE * 2)
+#else
+#define GBA_IWRAM_DATA_OFFSET    0
+#define GBA_IWRAM_SIZE           GBA_IWRAM_DATA_SIZE
+#endif
 #define GBA_MEMORY_MAP_READ_SIZE (sizeof(u8 *) * 8 * 1024)
 #define GBA_GAMEPAK_BACKUP_SIZE  (1024 * 128)
 

@@ -126,7 +126,7 @@ def patch_esp_usb_host() -> None:
 
 
 def patch_esp32_audio_i2s() -> None:
-    """Uses the Tab5 speaker backend's native 128x MCLK instead of 384x."""
+    """Uses Tab5's native MCLK and allocates the decoder task stack lazily."""
     libdeps_dir = Path(env.subst("$PROJECT_LIBDEPS_DIR"))
     candidates = list(libdeps_dir.glob("*/ESP32-audioI2S/src/Audio.cpp"))
     if not candidates:
@@ -145,11 +145,53 @@ def patch_esp32_audio_i2s() -> None:
     elif tab5_clock not in source:
         raise RuntimeError("Expected ESP32-audioI2S MCLK setting was not found")
 
+    upstream_stack = "StackType_t __attribute__((unused))  xAudioStack[AUDIO_STACK_SIZE];"
+    lazy_stack = "StackType_t __attribute__((unused))* xAudioStack = nullptr;"
+    if upstream_stack in source:
+        source = source.replace(upstream_stack, lazy_stack)
+    elif lazy_stack not in source:
+        raise RuntimeError("Expected ESP32-audioI2S static task stack was not found")
+
+    upstream_task_start = """    m_f_audioTaskIsRunning = true;
+
+    m_audioTaskHandle = xTaskCreateStaticPinnedToCore"""
+    lazy_task_guard = """    if (xAudioStack == nullptr) {
+        xAudioStack = static_cast<StackType_t*>(heap_caps_malloc(
+            AUDIO_STACK_SIZE * sizeof(StackType_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        if (xAudioStack == nullptr) {
+            AUDIO_LOG_ERROR(\"Not enough internal RAM for the audio task stack\");
+            return;
+        }
+    }
+"""
+    lazy_task_start = lazy_task_guard + upstream_task_start
+    while lazy_task_guard + lazy_task_guard in source:
+        source = source.replace(lazy_task_guard + lazy_task_guard, lazy_task_guard)
+    if lazy_task_start in source:
+        pass
+    elif upstream_task_start in source:
+        source = source.replace(upstream_task_start, lazy_task_start)
+    else:
+        raise RuntimeError("Expected ESP32-audioI2S task startup block was not found")
+
+    upstream_task_stop = """    stopAudioTask();
+    vSemaphoreDelete(mutex_playAudioData);"""
+    lazy_task_stop = """    stopAudioTask();
+    if (xAudioStack != nullptr) {
+        heap_caps_free(xAudioStack);
+        xAudioStack = nullptr;
+    }
+    vSemaphoreDelete(mutex_playAudioData);"""
+    if upstream_task_stop in source:
+        source = source.replace(upstream_task_stop, lazy_task_stop)
+    elif lazy_task_stop not in source:
+        raise RuntimeError("Expected ESP32-audioI2S destructor task cleanup was not found")
+
     if source != original:
         source_path.write_text(source, encoding="utf-8")
-        print(f"[pio] Patched ESP32-audioI2S for Tab5 128x MCLK: {source_path}")
+        print(f"[pio] Patched ESP32-audioI2S for Tab5 MCLK and lazy task RAM: {source_path}")
     else:
-        print(f"[pio] ESP32-audioI2S Tab5 128x MCLK already active: {source_path}")
+        print(f"[pio] ESP32-audioI2S Tab5 MCLK and lazy task RAM already active: {source_path}")
 
 
 def verify_tab5_sdkconfig(source, target, env) -> None:

@@ -32,12 +32,30 @@ Build policy:
 - Per-way probe-depth counters are disabled in release builds after the baseline
   capture showed ways three and four serving nearly half of late cache hits.
   Diagnostic builds can opt in with `GBA_THUMB_PREDECODE_PROBE_PROFILE=1`.
-- The 32 KB read-memory page map, 96 KB VRAM, IWRAM, and I/O storage are reserved
-  in internal L2 before the preclassification cache. Allocation placement and
-  fallbacks are reported in the launch log and as `V:L2`/`V:P` in the menu.
+- `GBA_RUNTIME_HOT_STATS=0` removes hit, miss, and completed-block counter writes
+  from release dispatch. Coverage captures can opt in, but their FPS is not a
+  release-performance result. `Safe` now guards both Thumb and ARM handwritten
+  paths, so engine comparisons use a genuine stock-interpreter baseline.
+- The 32 KB read-memory page map, 96 KB VRAM, physical 32 KB IWRAM image, and I/O
+  storage are reserved in internal L2 before the preclassification cache. The
+  retired dynarec's second 32 KB IWRAM SMC-marker shadow is compiled out.
+  Allocation placement and fallbacks are reported in the launch log and as
+  `V:L2`/`V:P` in the menu.
+- With the retired dynarec compiled out, EWRAM allocates only its physical
+  256 KB image instead of retaining a second 256 KB SMC-marker shadow. Startup
+  prefers internal EWRAM only when the largest free block can also preserve a
+  128 KB reserve for audio and host tasks; otherwise it falls back to PSRAM.
+  Launch telemetry reports free and largest internal blocks before this decision
+  and again after all core allocations.
+- `GBA_RFU_ENABLED=0` replaces wireless-adapter emulation with inert stubs. The
+  Doll-OS frontend always passes `SERIAL_MODE_DISABLED` and has no RFU transport,
+  so retaining the RFU session, peer, and packet buffers only consumed internal
+  BSS. A future link-cable feature must restore both pieces deliberately.
 - `GBA_SOUND_FREQUENCY=32768` matches Doll-OS `AudioOut`. The sink primes five
   DMA descriptors with silence before enabling the amp and pads the core's short
   startup read, preserving the queue cushion through panel-update bursts.
+  `GBA_SOUND_DIAGNOSTICS=0` removes per-sample quality and Direct Sound flow
+  counters from release builds while leaving operational underrun accounting.
 
 Runtime lifecycle:
 
@@ -57,9 +75,9 @@ Runtime lifecycle:
   so the input-dependent path is tested under the selected accelerator. Idle performance logs use a
   300-frame window; capture windows use ten frames so terminal copies retain the
   useful transition instead of filling with repeated intro telemetry.
-- Direct Sound diagnostics include cumulative nonzero FIFO bytes and nonzero
-  timer-consumed samples. These counters avoid the recurring-buffer-phase alias
-  that made instantaneous FIFO snapshots appear permanently empty.
+- Diagnostic builds with `GBA_SOUND_DIAGNOSTICS=1` include cumulative nonzero
+  FIFO bytes and timer-consumed samples. These counters avoid the recurring
+  buffer-phase alias that made instantaneous FIFO snapshots appear empty.
 - Before either reboot, Doll-OS sleeps the ST7123, disables its backlight, and
   holds PI4IO1 LCD/touch reset low. The expander and panel remain powered while
   the P4 resets, so this fence prevents an abrupt DSI stop from latching the

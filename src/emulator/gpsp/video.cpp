@@ -1656,6 +1656,12 @@ u32 layer_count;
 static void order_layers(u32 layer_flags, u32 vcnt)
 {
   bool obj_enabled = (layer_flags & 0x10);
+  const u16 bg_priority[4] = {
+    (u16)(read_ioreg(REG_BGxCNT(0)) & 0x03),
+    (u16)(read_ioreg(REG_BGxCNT(1)) & 0x03),
+    (u16)(read_ioreg(REG_BGxCNT(2)) & 0x03),
+    (u16)(read_ioreg(REG_BGxCNT(3)) & 0x03),
+  };
   s32 priority;
 
   layer_count = 0;
@@ -1667,8 +1673,7 @@ static void order_layers(u32 layer_flags, u32 vcnt)
 
     for(lnum = 3; lnum >= 0; lnum--)
     {
-      if(((layer_flags >> lnum) & 1) &&
-         ((read_ioreg(REG_BGxCNT(lnum)) & 0x03) == priority))
+      if(((layer_flags >> lnum) & 1) && bg_priority[lnum] == priority)
       {
         layer_order[layer_count++] = lnum;
       }

@@ -165,14 +165,26 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
 ## Game Boy Advance CPU, pacing, and memory regression
 
 1. Build with `pio run -e tab5`. Confirm the generated `compile_commands.json`
-   passes `GBA_P4_THUMB_DYNAREC=0` to `cpu.cpp`; both the source default and the
-   gpSP component definition keep the retired JIT out unless an experiment opts
-   in explicitly. Launch a GBA ROM from `/sd/gba` and confirm the shell announces
-   a reboot. The next serial boot must say `Starting GBA minimal mode` and must
-   not log shell WiFi, telnet, FTP, or canvas initialization.
-2. Inspect the `[gba] memory` line. It must report `IWRAM=L2`, `MAP=L2`,
-   `VRAM=L2`, `IO=L2`, `PRE=64K`, and `JIT=0K`. The Escape menu must likewise
-   show `V:L2`; a PSRAM marker fails the hot-memory placement test.
+   passes `GBA_P4_THUMB_DYNAREC=0`, `GBA_RUNTIME_HOT_STATS=0`, and
+   `GBA_SOUND_DIAGNOSTICS=0`, and `GBA_RFU_ENABLED=0` to the gpSP sources. The
+   first keeps the retired JIT out unless an experiment opts in; the next two
+   remove release-only counter writes from decoded blocks and audio samples.
+   RFU is disabled because this frontend always launches with
+   `SERIAL_MODE_DISABLED`; enabling wireless-adapter emulation requires restoring
+   both the compile definition and a transport. Launch a GBA ROM from `/sd/gba`
+   and confirm the shell announces a reboot. The next serial boot must say
+   `Starting GBA minimal mode` and must not log shell WiFi, telnet, FTP, or canvas
+   initialization.
+2. Inspect the EWRAM decision and `[gba] memory` lines. The former must show the
+   256 KB request, current internal free/largest blocks, the 128 KB reserve, and
+   the selected `L2` or `PSRAM` placement. The latter must report `IWRAM=L2/32K`, `MAP=L2`,
+   `VRAM=L2`, `IO=L2`, `PRE=64K`, and `JIT=0K`. `EWRAM=L2` is preferred when the
+   physical 256 KB image fits while preserving the 128 KB host reserve;
+   `EWRAM=PSRAM` is the safe fallback. The Escape menu must likewise show
+   `V:L2`; a PSRAM marker for IWRAM, MAP, VRAM, or IO fails the hot-memory
+   placement test. Record the following `post-allocation internal-free` and
+   `largest` figures with performance results so heap placement changes are not
+   mistaken for CPU-engine changes.
 3. Confirm startup prints `requested=5 active=5 jit=0 batch=1 fast=1` and the
    performance line reports `cpumode=5`. Batch+fast is the release default;
    retired JIT mode numbers map back to it rather than reserving an executable
@@ -182,7 +194,7 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    Escape, select `CPU engine`, and record three consecutive 300-frame
    `[gba perf]` windows for each engine:
 
-   - `Safe` / mode 0: stock interpreter baseline.
+   - `Safe` / mode 0: stock interpreter baseline, including the ARM path.
    - `Batch` / mode 1: Thumb batching and asynchronous predecode only.
    - `Fast` / mode 4: isolated hand-written fast dispatch only.
    - `Batch+fast` / mode 5: both accelerators, the release default.
@@ -190,7 +202,14 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    Reload the benchmark state before each engine and discard the first window
    after the reload. Compare median `core`, `corepart=cpu`, and `emu`; do not use
    `drawn` as a CPU score because panel presentation is independently capped.
-5. Interpret every counter as a per-window delta. `upd=arm/thumb/halt` counts
+   The exclusive `corepart=cpu/event/video/sound` values may be added to
+   reconstruct core time apart from small bridge overhead.
+5. In the release build, `batch=ops/runs`, `fast=hits/misses`, and the first
+   three `pre=hit/miss/ops` values remain zero because
+   `GBA_RUNTIME_HOT_STATS=0` removes their writes from the interpreter. Build a
+   coverage-only diagnostic firmware with `GBA_RUNTIME_HOT_STATS=1` before
+   interpreting those fields; do not compare its FPS directly with release.
+   `upd=arm/thumb/halt` counts
    event-update boundaries entered from each CPU state, not guest instructions.
    `batch=ops/runs` measures batched Thumb work, `fast=hits/misses` measures the
    isolated single-op fast fallback, and
@@ -232,7 +251,10 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
 9. Confirm `[gb audio] ready, primed 1280 frames`, an `ES8388 readback ... OK`
    line, and an amp report ending in `pin driving`. During three performance
    windows, audio must remain continuous and correctly pitched through drawn
-   bursts and after opening or resuming the menu.
+   bursts and after opening or resuming the menu. A release build leaves the
+   per-sample peak/jump and Direct Sound flow counters at zero. Rebuild with
+   `GBA_SOUND_DIAGNOSTICS=1` only when investigating audio contents; underrun,
+   queue-depth, and returned-sample accounting remains active in release.
 10. Choose Quit ROM. Confirm the battery save is written, the device reboots once,
    and the ordinary Doll-OS shell returns with display history, WiFi, and telnet
    initialized normally. Launch a different ROM, then return to the first ROM;
@@ -257,6 +279,27 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
     `[display] restart fence: panel reset held low` before reset. The ST7123 must
     light without removing USB power; a dark panel that recovers only after a
     cold boot fails this test even when emulator performance logs continue.
+
+## Static and lazy allocation regression
+
+1. After a release build, run `riscv32-esp-elf-size -A
+   .pio/build/tab5/firmware.elf`. The 2026-08-13 allocation baseline is 27,121
+   bytes of `.dram0.data`, 35,464 bytes of `.dram0.bss`, and 47,552 bytes of
+   `.dram1.bss`. The immediately preceding build used 40,888 and 53,992 BSS
+   bytes respectively, so losing the 11,864-byte fixed-RAM reduction needs an
+   explicit explanation.
+2. Inspect the sorted ELF symbols. `radioDirectory` and `xAudioStack` must each
+   be four-byte pointers, not the former 5,424-byte directory and 3,500-byte
+   task-stack arrays. `rfu_buf`, `rfu_host`, `rfu_client`, and `rfu_peer_bcst`
+   must be absent from a release ELF.
+3. Boot normally, run `radio list`, select a station by number and by name, then
+   start and stop playback twice. The list must remain intact in PSRAM, decoder
+   startup must not report an internal-stack allocation failure, and releasing
+   the radio must permit a later playback to recreate its task cleanly.
+4. Keep the USB keyboard attached throughout the radio and GBA tests. Its host
+   object and two 8 KB runtime task stacks intentionally remain internal until
+   measured high-water marks justify a smaller stack; enumeration stability is
+   more valuable than an unverified reduction.
 
 If the boot log says `dapp canvas shadow: ... unavailable`, treat the display
 test as failed even if no corruption appears: the firmware has lost its

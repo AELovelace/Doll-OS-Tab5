@@ -22,6 +22,7 @@ extern timer_type timer[4];
 
 namespace {
 uint16_t currentButtons = 0;
+constexpr size_t kEwramInternalReserve = 128 * 1024;
 #if DOLL_GBA_VERBOSE_DIAGNOSTICS
 uint16_t previousDebugButtons = 0;
 uint32_t transitionDebugFrames = 0;
@@ -38,7 +39,8 @@ uint32_t hashDebugMemory(const uint8_t* data, size_t size) {
 
 void logTransitionStep(uint16_t buttons) {
   const uint32_t ewramHash = hashDebugMemory(ewram, GBA_EWRAM_SIZE);
-  const uint32_t iwramHash = hashDebugMemory(iwram, GBA_IWRAM_SIZE);
+  const uint32_t iwramHash = hashDebugMemory(
+      iwram + GBA_IWRAM_DATA_OFFSET, GBA_IWRAM_DATA_SIZE);
   printf(
       "[gba-step] "
       "n=%lu frame=%lu key=%03x p1=%04x pc=%08lx lr=%08lx sp=%08lx cpsr=%08lx "
@@ -74,6 +76,22 @@ void* allocRegion(size_t size, bool preferInternal) {
   }
   return result;
 }
+
+void* allocEwram() {
+  const uint32_t internalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  const size_t freeInternal = heap_caps_get_free_size(internalCaps);
+  const size_t largestInternal = heap_caps_get_largest_free_block(internalCaps);
+  const bool internalHasRoom = largestInternal >=
+      GBA_EWRAM_SIZE + kEwramInternalReserve;
+  ESP_LOGI("gba",
+           "EWRAM request=%luK internal-free=%luK largest=%luK reserve=%luK -> %s",
+           static_cast<unsigned long>(GBA_EWRAM_SIZE / 1024),
+           static_cast<unsigned long>(freeInternal / 1024),
+           static_cast<unsigned long>(largestInternal / 1024),
+           static_cast<unsigned long>(kEwramInternalReserve / 1024),
+           internalHasRoom ? "L2" : "PSRAM");
+  return allocRegion(GBA_EWRAM_SIZE, internalHasRoom);
+}  // Uses internal EWRAM only when a 128 KB peripheral/task reserve survives.
 
 int16_t inputCallback(unsigned, unsigned, unsigned, unsigned id) {
   (void)id;
@@ -231,8 +249,9 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
   gbsp_memory->p_vram = static_cast<u8*>(allocRegion(GBA_VRAM_SIZE, true));
   (void)gba_thumb_predecode_init();
 
-  // The large EWRAM and ROM backing stores remain the right PSRAM residents.
-  gbsp_memory->p_ewram = static_cast<u8*>(allocRegion(GBA_EWRAM_SIZE, false));
+  // The no-dynarec build needs only the physical 256 KB EWRAM image. Prefer L2
+  // when it fits without consuming the reserve needed by audio and host tasks.
+  gbsp_memory->p_ewram = static_cast<u8*>(allocEwram());
   gbsp_memory->p_bios_rom = static_cast<u8*>(allocRegion(GBA_BIOS_ROM_SIZE, false));
   gbsp_memory->p_gamepak_backup = static_cast<u8*>(allocRegion(GBA_GAMEPAK_BACKUP_SIZE, false));
   if (!gbsp_memory->p_iwram || !gbsp_memory->p_memory_map_read ||
@@ -249,13 +268,20 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
     return false;
   }
 
-  ESP_LOGI("gba", "memory IWRAM=%s MAP=%s VRAM=%s IO=%s PRE=%luK JIT=%luK",
+  ESP_LOGI("gba", "memory IWRAM=%s/%luK EWRAM=%s MAP=%s VRAM=%s IO=%s PRE=%luK JIT=%luK",
            esp_ptr_internal(gbsp_memory->p_iwram) ? "L2" : "PSRAM",
+           static_cast<unsigned long>(GBA_IWRAM_SIZE / 1024),
+           esp_ptr_internal(gbsp_memory->p_ewram) ? "L2" : "PSRAM",
            esp_ptr_internal(gbsp_memory->p_memory_map_read) ? "L2" : "PSRAM",
            esp_ptr_internal(gbsp_memory->p_vram) ? "L2" : "PSRAM",
            esp_ptr_internal(gbsp_memory->p_io_registers) ? "L2" : "PSRAM",
            static_cast<unsigned long>(gba_thumb_predecode_bytes / 1024),
            static_cast<unsigned long>(gba_thumb_jit_bytes / 1024));
+  ESP_LOGI("gba", "post-allocation internal-free=%luK largest=%luK",
+           static_cast<unsigned long>(heap_caps_get_free_size(
+               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+           static_cast<unsigned long>(heap_caps_get_largest_free_block(
+               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024));
 
   gba_screen_pixels = framebuffer;
   libretro_supports_bitmasks = true;

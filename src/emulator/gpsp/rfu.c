@@ -19,6 +19,36 @@
 
 #include "common.h"
 
+#ifndef GBA_RFU_ENABLED
+#define GBA_RFU_ENABLED 1
+#endif
+
+#if !GBA_RFU_ENABLED
+
+//Doll-OS always requests SERIAL_MODE_DISABLED, so compiling gpSP's complete
+//wireless-adapter simulator would reserve several kilobytes that no game can use.
+void rfu_reset(void) {}
+
+bool rfu_update(unsigned cycles) {
+  (void)cycles;
+  return false;
+}
+
+u32 rfu_transfer(u32 value) {
+  (void)value;
+  return 0;
+}
+
+void rfu_frame_update(void) {}
+
+void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
+  (void)buf;
+  (void)len;
+  (void)client_id;
+}
+
+#else
+
 // Debug print logic:
 #ifdef RFU_DEBUG
   #define RFU_DEBUG_LOG(...) printf(__VA_ARGS__)
@@ -933,4 +963,6 @@ bool rfu_update(unsigned cycles) {
 
   return false;
 }
+
+#endif // GBA_RFU_ENABLED
 
