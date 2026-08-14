@@ -406,8 +406,8 @@ static inline void gba_block_cache_touch_thumb(u32 pc, u8 *pc_address_block)
 #endif
 
 #if GBA_P4_ASYNC_PREDECODE
-#define GBA_THUMB_PREDECODE_SETS       1024U
-#define GBA_THUMB_PREDECODE_WAYS       2U
+#define GBA_THUMB_PREDECODE_SETS       512U
+#define GBA_THUMB_PREDECODE_WAYS       4U
 #define GBA_THUMB_PREDECODE_OPS        8U
 #define GBA_THUMB_PREDECODE_QUEUE      32U
 #define GBA_THUMB_PREDECODE_HOT_SLOTS  2048U
@@ -415,6 +415,15 @@ static inline void gba_block_cache_touch_thumb(u32 pc, u8 *pc_address_block)
 #define GBA_THUMB_PREDECODE_STATE_MASK 0x03U
 #define GBA_THUMB_PREDECODE_REFERENCED 0x04U
 #define GBA_THUMB_PREDECODE_COUNT_SHIFT 8U
+
+static_assert((GBA_THUMB_PREDECODE_SETS &
+    (GBA_THUMB_PREDECODE_SETS - 1U)) == 0,
+    "Thumb predecode set count must remain a power of two");
+static_assert((GBA_THUMB_PREDECODE_WAYS &
+    (GBA_THUMB_PREDECODE_WAYS - 1U)) == 0,
+    "Thumb predecode way count must remain a power of two");
+static_assert(GBA_THUMB_PREDECODE_SETS * GBA_THUMB_PREDECODE_WAYS == 2048U,
+    "Thumb predecode geometry must preserve the 64 KB cache budget");
 
 enum gba_thumb_predecode_state
 {
@@ -7291,13 +7300,14 @@ extern "C" u32 gba_thumb_predecode_install(u32 max_completed)
 
     if(!target)
     {
-      // Two-way CLOCK gives recently executed blocks one second chance. If both
-      // ways were referenced, clear both bits and evict from the rotating hand.
-      const u32 first_way = gba_thumb_predecode_clock_hand[set] & 1U;
+      // Set-local CLOCK gives recently executed blocks one second chance. When
+      // every way was referenced, clear the set and evict from the rotating hand.
+      const u32 way_mask = GBA_THUMB_PREDECODE_WAYS - 1U;
+      const u32 first_way = gba_thumb_predecode_clock_hand[set] & way_mask;
       u32 victim_way = first_way;
       for(u32 scan = 0; scan < GBA_THUMB_PREDECODE_WAYS; scan++)
       {
-        const u32 way = (first_way + scan) & 1U;
+        const u32 way = (first_way + scan) & way_mask;
         gba_thumb_predecode_entry_t *candidate =
             &gba_thumb_predecode_cache[
                 set * GBA_THUMB_PREDECODE_WAYS + way];
@@ -7331,7 +7341,8 @@ extern "C" u32 gba_thumb_predecode_install(u32 max_completed)
         hot->queued = 0;
         hot->count = GBA_THUMB_PREDECODE_HOT_COUNT / 2U;
       }
-      gba_thumb_predecode_clock_hand[set] = (u8)(victim_way ^ 1U);
+      gba_thumb_predecode_clock_hand[set] =
+          (u8)((victim_way + 1U) & way_mask);
       gba_thumb_predecode_evictions++;
       replacing = true;
     }

@@ -194,8 +194,9 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    `pre=hit/miss/ops/build/req/drop` exposes predecode coverage and worker
    pressure. `predrop=q/set/dup` separates a full request queue, the retired
    frozen-cache set-full path, and a completion whose block was already
-   resident. With frame-boundary CLOCK replacement enabled, `set` must remain
-   zero. `prechurn=evict/stall` reports replacements and moments when core 0
+   resident. The current 64 KB experiment uses 512 four-way sets with
+   frame-boundary CLOCK replacement; `set` must remain zero.
+   `prechurn=evict/stall` reports replacements and moments when core 0
    found its completion queue full; occasional evictions are expected after the
    working set fills, but sustained stalls indicate the eight-entry install
    budget is too small. `preocc=now/cap/high` reports absolute resident entries,
