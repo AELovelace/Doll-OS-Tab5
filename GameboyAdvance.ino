@@ -622,6 +622,7 @@ static bool gbaPickRom(String& romLogical) {
 enum GbaMenuItem : uint8_t {
     GBA_MENU_DISPLAY,
     GBA_MENU_FRAME_SKIP,
+    GBA_MENU_CPU_ENGINE,
     GBA_MENU_VOLUME,
     GBA_MENU_SAVE_STATE,
     GBA_MENU_LOAD_STATE,
@@ -634,12 +635,46 @@ static String gbaStatePath() {
     return gbSiblingPath(gbaRomVfs, ".gstate");
 }
 
+static String gbaCpuEngineName(uint32_t mode) {
+    switch (mode) {
+        case DOLL_GBA_CPU_SAFE: return "Safe";
+        case DOLL_GBA_CPU_BATCH: return "Batch";
+        case DOLL_GBA_CPU_FAST_ISOLATED: return "Fast";
+        case DOLL_GBA_CPU_BATCH_FAST: return "Batch+fast";
+        default: return "Mapped";
+    }
+}  // Names only the four engines that remain executable in this build.
+
+static uint32_t gbaStepCpuEngine(bool backwards) {
+    constexpr uint32_t modes[] = {
+        DOLL_GBA_CPU_SAFE,
+        DOLL_GBA_CPU_BATCH,
+        DOLL_GBA_CPU_FAST_ISOLATED,
+        DOLL_GBA_CPU_BATCH_FAST,
+    };
+    const uint32_t active = doll_gba_core_get_cpu_mode();
+    size_t index = 0;
+    while (index < (sizeof(modes) / sizeof(modes[0])) && modes[index] != active) {
+        ++index;
+    }
+    if (index == (sizeof(modes) / sizeof(modes[0]))) index = 0;
+    index = backwards
+        ? (index + (sizeof(modes) / sizeof(modes[0])) - 1) %
+              (sizeof(modes) / sizeof(modes[0]))
+        : (index + 1) % (sizeof(modes) / sizeof(modes[0]));
+    doll_gba_core_set_cpu_mode(modes[index]);
+    return doll_gba_core_get_cpu_mode();
+}  // Cycles the live core through comparable interpreter combinations.
+
 static String gbaMenuValue(int item) {
     if (item == GBA_MENU_DISPLAY) return String(gbaScale) + "x";
     if (item == GBA_MENU_FRAME_SKIP) {
         if (gbaFrameSkip < 0) return "Auto";
         return String(gbaFrameSkip) + " (render 1/" +
                String(gbaFrameSkip + 1) + ")";
+    }
+    if (item == GBA_MENU_CPU_ENGINE) {
+        return gbaCpuEngineName(doll_gba_core_get_cpu_mode());
     }
     if (item == GBA_MENU_VOLUME) {
         return String(radioGetVolume()) + "/" + String(RADIO_VOLUME_MAX);
@@ -668,6 +703,7 @@ static void gbaDrawMenuTo(lgfx::LGFXBase& surface, int selected, const String& n
         switch (item) {
             case GBA_MENU_DISPLAY: label = "Display"; break;
             case GBA_MENU_FRAME_SKIP: label = "Frame skip"; break;
+            case GBA_MENU_CPU_ENGINE: label = "CPU engine"; break;
             case GBA_MENU_VOLUME: label = "Volume"; break;
             case GBA_MENU_SAVE_STATE: label = "Save state"; break;
             case GBA_MENU_LOAD_STATE: label = "Load state"; break;
@@ -782,6 +818,12 @@ static bool gbaRunMenu(uint8_t& legacyButtons, uint16_t& touchButtons) {
                     ? "automatic deadline-based skipping"
                     : "render 1 of every " + String(gbaFrameSkip + 1) +
                       " emulated frames; panel remains capped at 66ms";
+                break;
+            }
+            case GBA_MENU_CPU_ENGINE: {
+                const uint32_t mode = gbaStepCpuEngine(left);
+                note = gbaCpuEngineName(mode) +
+                    ": benchmark the same scene for three perf windows";
                 break;
             }
             case GBA_MENU_VOLUME:
@@ -914,7 +956,10 @@ static void gbaRunBootSession() {
     uint8_t legacyButtons = 0;
     uint16_t touchButtons = 0;
     constexpr uint32_t frameUs = 16743;  // 280896 GBA cycles at 16.777216 MHz
-    uint32_t nextFrame = micros() + frameUs;
+    // `nextFrame` is the previous pacing boundary. Each completed guest frame
+    // advances it once, so seeding it at now avoids granting two intervals to
+    // the first frame while still sleeping whenever that frame finishes early.
+    uint32_t nextFrame = micros();
     uint32_t nextBlitUs = micros();
     const uint32_t startedMs = millis();
     uint32_t framesRun = 0;
@@ -928,6 +973,7 @@ static void gbaRunBootSession() {
     uint64_t touchTimeUs = 0;
     uint64_t saveTimeUs = 0;
     uint64_t pacingTimeUs = 0;
+    uint32_t pacingResyncs = 0;
     uint32_t perfStartedUs = micros();
     uint32_t perfFrames = 0;
     uint32_t perfDraws = 0;
@@ -955,6 +1001,7 @@ static void gbaRunBootSession() {
         touchTimeUs = 0;
         saveTimeUs = 0;
         pacingTimeUs = 0;
+        pacingResyncs = 0;
         perfFrames = 0;
         perfDraws = 0;
         perfSkips = 0;
@@ -983,7 +1030,9 @@ static void gbaRunBootSession() {
             if (gbaRunMenu(legacyButtons, touchButtons)) break;
             gbaClearPanel();
             gbaHost.queueInputPoll();
-            nextFrame = micros() + frameUs;
+            // Resume from a fresh pacing boundary; the completed frame below
+            // advances it by exactly one native GBA interval before sleeping.
+            nextFrame = micros();
             nextBlitUs = micros();
             skipped = gbaFrameSkip < 0 ? GBA_MAX_FRAME_SKIP : gbaFrameSkip;
             resetPerfWindow();
@@ -1058,6 +1107,13 @@ static void gbaRunBootSession() {
             const uint32_t jitAttempts = coreStats.jit_attempts - modeStart.jit_attempts;
             const uint32_t jitCompiles = coreStats.jit_compiles - modeStart.jit_compiles;
             const uint32_t jitOps = coreStats.jit_ops - modeStart.jit_ops;
+            const uint32_t fastHits = coreStats.thumb_fast_hits - modeStart.thumb_fast_hits;
+            const uint32_t fastMisses = coreStats.thumb_fast_misses - modeStart.thumb_fast_misses;
+            const uint32_t predecodeRequests = coreStats.thumb_predecode_requests -
+                modeStart.thumb_predecode_requests;
+            const uint32_t romPageLoads = coreStats.rom_page_loads - modeStart.rom_page_loads;
+            const uint32_t romPagePrefetches = coreStats.rom_page_prefetches -
+                modeStart.rom_page_prefetches;
             // Blitting runs concurrently on core 0, so it is reported but must
             // not be subtracted from the core-1 foreground accounting.
             const uint64_t accountedTimeUs = coreTimeUs + audioTimeUs +
@@ -1065,7 +1121,7 @@ static void gbaRunBootSession() {
             const uint64_t otherTimeUs = elapsedUs > accountedTimeUs
                 ? static_cast<uint64_t>(elapsedUs) - accountedTimeUs : 0;
 #if DOLL_GBA_VERBOSE_DIAGNOSTICS
-            Serial.printf("[gba perf] mode=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus audio=%lluus blit=%lluus arm/thumb/halt=%lu/%lu/%lu pc=%08lx cpsr=%08lx jit=%lu/%luK hit/miss/try=%lu/%lu/%lu ops=%lu build=%lu full=%lu reuse=%lu wait/reject/probe=%lu/%lu/%lu break=%02lx:%lu batch=%lu/%lu fast=%lu/%lu vram=%s rom=%lu+%lu cpu=%luMHz\n",
+            Serial.printf("[gba perf] mode=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus audio=%lluus blit=%lluus arm/thumb/halt=%lu/%lu/%lu pc=%08lx cpsr=%08lx jit=%lu/%luK hit/miss/try=%lu/%lu/%lu ops=%lu build=%lu full=%lu reuse=%lu wait/reject/probe=%lu/%lu/%lu break=%02lx:%lu batch=%lu/%lu fast=%lu/%lu vram=%s rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
                           gbaScale,
                           gbaFrameSkip,
                           static_cast<unsigned long>(emuFps10 / 10),
@@ -1098,11 +1154,12 @@ static void gbaRunBootSession() {
                            static_cast<unsigned long>(coreStats.jit_top_break_count),
                            static_cast<unsigned long>(coreStats.thumb_batch_ops - modeStart.thumb_batch_ops),
                            static_cast<unsigned long>(coreStats.thumb_batch_runs - modeStart.thumb_batch_runs),
-                           static_cast<unsigned long>(coreStats.thumb_fast_hits - modeStart.thumb_fast_hits),
-                           static_cast<unsigned long>(coreStats.thumb_fast_misses - modeStart.thumb_fast_misses),
+                           static_cast<unsigned long>(fastHits),
+                           static_cast<unsigned long>(fastMisses),
                            coreStats.vram_internal ? "L2" : "PSRAM",
-                           static_cast<unsigned long>(coreStats.rom_page_loads),
-                           static_cast<unsigned long>(coreStats.rom_page_prefetches),
+                           static_cast<unsigned long>(romPageLoads),
+                           static_cast<unsigned long>(romPagePrefetches),
+                           static_cast<unsigned long>(pacingResyncs),
                            static_cast<unsigned long>(getCpuFrequencyMhz()));
             Serial.printf("[gba jitdbg] engine=%lu reset=%lu badpc=%lu guard=%lu last=%08lx->%08lx ret=%08lx sig=%08lx\n",
                           static_cast<unsigned long>(coreStats.cpu_mode),
@@ -1208,7 +1265,7 @@ static void gbaRunBootSession() {
             const uint64_t avgUpdateUs = perfFrames ? updateUs / perfFrames : 0;
             const uint64_t avgCpuUs = perfFrames && coreTimeUs > updateUs
                 ? (coreTimeUs - updateUs) / perfFrames : 0;
-            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/update/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu batch=%lu/%lu pre=%lu/%lu/%lu/%lu/%lu rom=%lu+%lu cpu=%luMHz\n",
+            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/update/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu upd=arm/thumb/halt:%lu/%lu/%lu fast=%lu/%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu batch=%lu/%lu pre=hit/miss/ops/build/req/drop:%lu/%lu/%lu/%lu/%lu/%lu rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
                           gbaScale,
                           gbaFrameSkip,
                           static_cast<unsigned long>(emuFps10 / 10),
@@ -1228,9 +1285,14 @@ static void gbaRunBootSession() {
                           saveTimeUs / perfFrames,
                           pacingTimeUs / perfFrames,
                           otherTimeUs / perfFrames,
-                          touchTimeUs / perfFrames,
-                          static_cast<unsigned long>(coreStats.cpu_mode),
-                          static_cast<unsigned long>(coreStats.jit_used_bytes / 1024),
+                           touchTimeUs / perfFrames,
+                           static_cast<unsigned long>(coreStats.cpu_mode),
+                           static_cast<unsigned long>(armUpdates),
+                           static_cast<unsigned long>(thumbUpdates),
+                           static_cast<unsigned long>(haltUpdates),
+                           static_cast<unsigned long>(fastHits),
+                           static_cast<unsigned long>(fastMisses),
+                           static_cast<unsigned long>(coreStats.jit_used_bytes / 1024),
                           static_cast<unsigned long>(coreStats.jit_bytes / 1024),
                           static_cast<unsigned long>(jitHits),
                           static_cast<unsigned long>(jitMisses),
@@ -1241,10 +1303,12 @@ static void gbaRunBootSession() {
                            static_cast<unsigned long>(coreStats.thumb_predecode_misses - modeStart.thumb_predecode_misses),
                            static_cast<unsigned long>(coreStats.thumb_predecode_ops - modeStart.thumb_predecode_ops),
                            static_cast<unsigned long>(coreStats.thumb_predecode_builds - modeStart.thumb_predecode_builds),
+                           static_cast<unsigned long>(predecodeRequests),
                            static_cast<unsigned long>(coreStats.thumb_predecode_drops - modeStart.thumb_predecode_drops),
-                           static_cast<unsigned long>(coreStats.rom_page_loads),
-                          static_cast<unsigned long>(coreStats.rom_page_prefetches),
-                          static_cast<unsigned long>(getCpuFrequencyMhz()));
+                           static_cast<unsigned long>(romPageLoads),
+                           static_cast<unsigned long>(romPagePrefetches),
+                           static_cast<unsigned long>(pacingResyncs),
+                           static_cast<unsigned long>(getCpuFrequencyMhz()));
 #endif
             resetPerfWindow();
         }
@@ -1256,7 +1320,11 @@ static void gbaRunBootSession() {
             delay(remaining / 1000);
             pacingTimeUs += static_cast<uint32_t>(micros() - pacingStartedUs);
         } else if (remaining < -static_cast<int32_t>(GBA_MAX_FRAME_SKIP * frameUs)) {
-            nextFrame = micros() + frameUs;
+            // Drop accumulated lateness without granting an extra future frame.
+            // The following iteration adds one interval before pacing, so using
+            // `now + frameUs` here periodically slept even when emulation was slow.
+            nextFrame = micros();
+            ++pacingResyncs;
         }
     }
 

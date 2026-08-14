@@ -162,100 +162,75 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    change and confirm the serial log reports `ES8388 codec up`, never attempts
    ES8311, and switches cleanly between radio and Game Boy audio.
 
-## Game Boy Advance JIT and memory regression
+## Game Boy Advance CPU, pacing, and memory regression
 
-1. Build with `pio run -e tab5`. In the generated firmware map, confirm
-   `gba_p4_thumb_jit_compile` and `gba_p4_thumb_jit_validate_and_commit` are in
-   `.text.unlikely` rather than folded into the JIT lookup hot path.
-2. Launch a GBA ROM from `/sd/gba`. Confirm the shell announces a reboot, then
-   the next serial boot says `Starting GBA minimal mode` and never logs
-   `initDisplay`, LittleFS, WiFi, telnet, FTP, or shell startup. Inspect the
-   `[gba] memory` line: it must report `MAP=L2` and `VRAM=L2`. The Escape menu
-   must likewise show `V:L2`; a PSRAM marker fails the hot-memory placement test.
-   Record the JIT capacity selected after those allocations—192, 160, 128, 96,
-   or a smaller safe fallback—alongside every benchmark result.
-3. Confirm the CPU engine initially reads `Turbo: all enhancements` and `[gba
-   jitdbg]` reports engine 3. This experimental mode combines the bounded
-   16-operation Thumb batch loop that reached gameplay at 52.9 FPS, standalone
-   fast dispatch, and the guarded JIT. The `[gba perf]` lines should show JIT
-   operations/builds plus advancing `batch=ops/runs` and `fast=hits/misses`.
-   Compare gameplay FPS with the batch-only result. If the title restarts,
-   preserve the input line and the first performance/reset reports after it so
-   the JIT flight recorder or reset telemetry can identify the failed path.
+1. Build with `pio run -e tab5`. Launch a GBA ROM from `/sd/gba` and confirm the
+   shell announces a reboot. The next serial boot must say `Starting GBA minimal
+   mode` and must not log shell WiFi, telnet, FTP, or canvas initialization.
+2. Inspect the `[gba] memory` line. It must report `IWRAM=L2`, `MAP=L2`,
+   `VRAM=L2`, `IO=L2`, `PRE=64K`, and `JIT=0K`. The Escape menu must likewise
+   show `V:L2`; a PSRAM marker fails the hot-memory placement test.
+3. Confirm startup prints `requested=5 active=5 jit=0 batch=1 fast=1` and the
+   performance line reports `cpumode=5`. Batch+fast is the release default;
+   retired JIT mode numbers map back to it rather than reserving an executable
+   arena.
+4. Create a repeatable benchmark position with a save state. Keep display scale,
+   frame skip, volume, and player input unchanged for the full comparison. Open
+   Escape, select `CPU engine`, and record three consecutive 300-frame
+   `[gba perf]` windows for each engine:
 
-   In the separately selectable isolated-JIT mode, every new JIT block is
-   validated eight times against the stock
-   interpreter before trust, and a mismatch must quarantine only that block while
-   engine 2 continues. Run a
-   Thumb-heavy game for at least five minutes, then open the Escape menu twice
-   and confirm emulated FPS, core time, and JIT hit/miss counts continue moving.
-   In each idle 300-frame report, `jit=used/capacity`, `ops`, `build`, `full`, `reuse`,
-   and `wait/reject/probe` must remain internally consistent; gameplay must not
-   freeze when `full` changes to one or adaptive `reuse` begins advancing. The
-   paired `[gba jitdbg]` line must retain engine 2 with zero resets and bad PCs.
-   JIT counters must advance while `batch=0/0`; guard trips may rise only when
-   the matching block is rejected and stock-interpreter execution continues.
-4. Save and reload a state, then resume for another two minutes. This flushes
-   the executable cache; graphics, controls, timers, and audio must remain
-   deterministic while the blocks pass their eight validation runs again.
-5. At the Pokémon title screen, wait at least ten seconds before pressing A,
-   then enter and leave the in-game Start menu repeatedly. No input-dependent
-   branch may invoke SoftReset, replay the intro, freeze, or corrupt the save.
-   A touchscreen edge must first produce `[gba touch]` with `buttons=010`, then
-   `[gba-input]`. A contact with `pressed=1` and `buttons=000` missed the hitbox.
-   Use Start for the diagnostic title transition: the first Start edge emits
-   `[gba-step] start=080` and arms one 600-frame capture while leaving CPU mode
-   at 3. Normal A presses never arm or extend the expensive trace, so gameplay
-   returns to representative performance logging when the capture completes.
-   If it does, preserve the first `[gba-jit] guard` line and all following
-   `[gba-jit] trace` lines before relaunching. Reason `53575253` is SoftReset,
-   `42414441` is a bad ARM fetch, `42414454` is a bad Thumb fetch, and a
-   `4A0000xx` reason is a generated-state or straight-line-PC mismatch.
-   A `4A0000xx` mismatch must reject only that generated block, continue with
-   engine 2, and leave the title/game state intact. SoftReset and bad-fetch guards may fall
-   back to engine 0 because they indicate a wider CPU-state failure.
-6. From the Escape menu, activate `CPU engine` and confirm it remains `Turbo:
-   all enhancements` with an experimental-mode note. Treat this as a diagnostic
-   run; batch-only remains the last configuration proven through gameplay.
-   Stack writes and WRAM reads are enabled only with the byte-overlay validator.
-   The reference pass must place PUSH and SP-relative stores in its shadow
-   transaction, then compare generated RAM with that expected result. General
-   The `STRB` failure at `08001008` was an IWRAM-arm register-cache bug: the
-   store source must be loaded before generated control flow splits into EWRAM
-   and IWRAM paths. On any mismatch the validator restores original bytes before
-   stock gpSP retries.
-7. Confirm `[gb audio] ready, primed 1280 frames`, an `ES8388 readback ... OK`
+   - `Safe` / mode 0: stock interpreter baseline.
+   - `Batch` / mode 1: Thumb batching and asynchronous predecode only.
+   - `Fast` / mode 4: isolated hand-written fast dispatch only.
+   - `Batch+fast` / mode 5: both accelerators, the release default.
+
+   Reload the benchmark state before each engine and discard the first window
+   after the reload. Compare median `core`, `corepart=cpu`, and `emu`; do not use
+   `drawn` as a CPU score because panel presentation is independently capped.
+5. Interpret every counter as a per-window delta. `upd=arm/thumb/halt` counts
+   event-update boundaries entered from each CPU state, not guest instructions.
+   `batch=ops/runs` measures batched Thumb work, `fast=hits/misses` measures the
+   isolated single-op fast fallback, and
+   `pre=hit/miss/ops/build/req/drop` exposes predecode coverage and worker
+   pressure. `rom=loads+prefetches` must remain zero for a warmed ROM that fits
+   in the 8 MB cache.
+6. Check pacing in both a slow and a lightweight scene. When `core` remains over
+   16743 us, `front=...pace...` should be near zero even if `pace_resync` rises;
+   resynchronization drops stale lateness and must not grant an extra sleep
+   interval. When `core` is below budget, pacing must hold emulation near the
+   native 59.7 FPS instead of allowing the game and audio pitch to run fast.
+7. At 3x, confirm `blit` remains near 4 ms and `drawn` remains near 15.1 FPS.
+   Presentation runs on core 0 and the 66000 us panel interval intentionally
+   caps it, so blit time must not be subtracted from core-1 CPU accounting.
+8. Save and reload a state, then resume for another two minutes. Graphics,
+   controls, timers, audio, and CPU engine selection must remain deterministic.
+   Enter and leave the in-game Start menu repeatedly; no input-dependent branch
+   may replay the intro, freeze, invoke SoftReset, or corrupt the save.
+9. Confirm `[gb audio] ready, primed 1280 frames`, an `ES8388 readback ... OK`
    line, and an amp report ending in `pin driving`. During three performance
-   windows, `[gba i2s]` pushed frames must keep advancing without drops and
-   `[gba audio]` must report nonzero samples. If it stays zero, preserve the paired
-   `[gba mixer]` and `[gba mixflow]` lines so SOUNDCNT, cumulative nonzero FIFO
-   writes, and timer consumption can be distinguished. Listen for continuous, correctly pitched sound through
-   drawn-frame bursts and after opening/resuming the menu.
-8. Choose Quit ROM. Confirm the battery save is written, the device reboots once,
+   windows, audio must remain continuous and correctly pitched through drawn
+   bursts and after opening or resuming the menu.
+10. Choose Quit ROM. Confirm the battery save is written, the device reboots once,
    and the ordinary Doll-OS shell returns with display history, WiFi, and telnet
    initialized normally. Launch a different ROM, then return to the first ROM;
-   no compiled block or rejection state may leak between rebooted sessions.
-9. Repeat with a ROM larger than the 8 MB cache. Confirm `rom=loads+prefetches`
-   advances without crashes and compare average core time against an 8 MB-or-
-   smaller ROM so SD paging is not mistaken for a JIT regression.
-10. Record at least three consecutive 120-frame `[gba perf]` lines for the same
-   gameplay segment before and after a JIT or memory-placement change. Compare
-   core time and emulated FPS separately from audio and blit time; use the
-   per-window hit/miss/try and `ops` deltas rather than lifetime totals. Record
-   `break=group:count` so unsupported-opcode work is not confused with cache churn.
-11. While a ROM is running, press the hardware reset once. The following boot must
+   no predecode cache state may leak between rebooted sessions.
+11. Repeat with a ROM larger than the 8 MB cache. Confirm the per-window
+   `rom=loads+prefetches` values advance without crashes and compare core time
+   against an 8 MB-or-smaller ROM so SD paging is not mistaken for a CPU-engine
+   regression.
+12. While a ROM is running, press the hardware reset once. The following boot must
    log that the previous game-mode boot did not exit cleanly, clear the ticket,
    fully reset/wake the ST7123 panel, and enter Doll-OS instead of relaunching the
    ROM. Reset again to confirm the display lights on both software-reset boots,
    normal boots remain normal, and no crash loop is possible.
-12. Remove the SD card after scheduling a launch, or test with an unreadable ROM.
+13. Remove the SD card after scheduling a launch, or test with an unreadable ROM.
    Minimal mode must show a bounded launch failure, clear its ticket, and reboot
    to Doll-OS. Reinserting the card must not unexpectedly relaunch that ROM.
-13. Compare free PSRAM/internal heap from the old in-shell launch and minimal
+14. Compare free PSRAM/internal heap from the old in-shell launch and minimal
     launch logs. Minimal mode must omit allocation of the ~1.8 MB `frameSprite`
     and ~1.8 MB `displayShadow`; the bare-panel Escape menu and touch controls
     must still redraw completely at 1x, 2x, and 3x.
-14. For every shell-to-GBA and GBA-to-shell transition, confirm serial prints
+15. For every shell-to-GBA and GBA-to-shell transition, confirm serial prints
     `[display] restart fence: panel reset held low` before reset. The ST7123 must
     light without removing USB power; a dark panel that recovers only after a
     cold boot fails this test even when emulator performance logs continue.
