@@ -50,12 +50,8 @@ extern "C" {
 #endif
 
 #ifndef GBA_P4_THUMB_DYNAREC
-#if defined(CONFIG_IDF_TARGET_ESP32P4)
-#define GBA_P4_THUMB_DYNAREC 1
-#else
 #define GBA_P4_THUMB_DYNAREC 0
-#endif
-#endif
+#endif // Keeps retired generated-code state out unless an experiment opts in.
 
 #ifndef GBA_THUMB_PROFILE
 #define GBA_THUMB_PROFILE 0
@@ -63,6 +59,9 @@ extern "C" {
 #ifndef GBA_THUMB_MIX_PROFILE
 #define GBA_THUMB_MIX_PROFILE 0
 #endif
+#ifndef GBA_THUMB_PREDECODE_PROBE_PROFILE
+#define GBA_THUMB_PREDECODE_PROBE_PROFILE 0
+#endif // Enables expensive per-way lookup counters only in diagnostic builds.
 #ifndef GBA_SWI_HLE
 #define GBA_SWI_HLE 0
 #endif
@@ -7183,12 +7182,15 @@ static inline const gba_thumb_predecode_entry_t *gba_thumb_predecode_lookup(
     // CLOCK without introducing a cross-core write into the execution path.
     if(count && !(state & GBA_THUMB_PREDECODE_REFERENCED))
       entry->state = state | GBA_THUMB_PREDECODE_REFERENCED;
-    // Record the successful probe depth before adding a predictor. Keeping this
-    // stage policy-neutral gives the following firmware a trustworthy baseline.
+#if GBA_THUMB_PREDECODE_PROBE_PROFILE
+    // Record physical probe depth only in an explicitly instrumented build.
     gba_thumb_predecode_probe_depth[way]++;
+#endif
     return entry;
   }
+#if GBA_THUMB_PREDECODE_PROBE_PROFILE
   gba_thumb_predecode_probe_full_misses++;
+#endif
   return NULL;
 }
 
@@ -7432,11 +7434,15 @@ extern "C" u32 gba_thumb_predecode_worker_run(u32 max_requests)
       completed->count++;
     }
 
-    // Publish the completed immutable entry before releasing its source slot.
-    // Each queue has one producer and one consumer, keeping the handoff cheap.
-    completed_head++;
-    __atomic_store_n(&gba_thumb_predecode_completed_head, completed_head,
-        __ATOMIC_RELEASE);
+    // Keep unsupported block starts in the hot-table negative latch instead of
+    // publishing a zero-op entry that consumes a cache way and inflates hits.
+    if(completed->count)
+    {
+      // Publish the immutable entry before releasing its source request slot.
+      completed_head++;
+      __atomic_store_n(&gba_thumb_predecode_completed_head, completed_head,
+          __ATOMIC_RELEASE);
+    }
     request_tail++;
     processed++;
     __atomic_store_n(&gba_thumb_predecode_tail, request_tail, __ATOMIC_RELEASE);

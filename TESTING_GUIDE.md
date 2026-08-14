@@ -164,9 +164,12 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
 
 ## Game Boy Advance CPU, pacing, and memory regression
 
-1. Build with `pio run -e tab5`. Launch a GBA ROM from `/sd/gba` and confirm the
-   shell announces a reboot. The next serial boot must say `Starting GBA minimal
-   mode` and must not log shell WiFi, telnet, FTP, or canvas initialization.
+1. Build with `pio run -e tab5`. Confirm the generated `compile_commands.json`
+   passes `GBA_P4_THUMB_DYNAREC=0` to `cpu.cpp`; both the source default and the
+   gpSP component definition keep the retired JIT out unless an experiment opts
+   in explicitly. Launch a GBA ROM from `/sd/gba` and confirm the shell announces
+   a reboot. The next serial boot must say `Starting GBA minimal mode` and must
+   not log shell WiFi, telnet, FTP, or canvas initialization.
 2. Inspect the `[gba] memory` line. It must report `IWRAM=L2`, `MAP=L2`,
    `VRAM=L2`, `IO=L2`, `PRE=64K`, and `JIT=0K`. The Escape menu must likewise
    show `V:L2`; a PSRAM marker fails the hot-memory placement test.
@@ -199,14 +202,19 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    `prechurn=evict/stall` reports replacements and moments when core 0
    found its completion queue full; occasional evictions are expected after the
    working set fills, but sustained stalls indicate the eight-entry install
-   budget is too small. In the policy-neutral lookup baseline,
-   `preprobe=1/2/3/4/m` counts hits at each physical probe depth and complete
+   budget is too small. A diagnostic build with
+   `GBA_THUMB_PREDECODE_PROBE_PROFILE=1` reports
+   `preprobe=1/2/3/4/m`, which counts hits at each physical probe depth and complete
    four-way misses. The first four values must sum to `pre=hit`; use their
    distribution to judge whether last-way prediction can remove meaningful
-   lookup work. `preocc=now/cap/high` reports absolute resident entries,
+   lookup work. Release builds leave all five values at zero so lookup does not
+   perform an extra internal-SRAM counter update. `preocc=now/cap/high` reports
+   absolute resident entries,
    allocated capacity, and the lifetime high-water mark. Compare hit rate,
    eviction rate, `corepart=cpu`, and `emu` against the captured counter-only
-   frozen-cache baseline in both overworld and battle gameplay.
+   frozen-cache baseline in both overworld and battle gameplay. Unsupported
+   zero-op classifications remain latched only in the admission table; they must
+   not increase cache residency, builds, or hits.
    `rom=loads+prefetches` must remain zero for a warmed ROM that fits in the
    8 MB cache.
 6. Check pacing in both a slow and a lightweight scene. When `core` remains over

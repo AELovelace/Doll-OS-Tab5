@@ -9,65 +9,32 @@ See `COPYING`, `README.md`, and `original_readme.txt` in this directory.
 
 Doll-OS does not use the fork's Retro-Go board frontend. `GameBoyAdvanceHost`
 provides the platform boundary for the Tab5 display, ES8388 audio, input, SD
-paths, saves, and lifecycle. The RISC-V Thumb dynarec is enabled after the
-interpreter-only hardware milestone measured at roughly quarter-to-half speed.
+paths, saves, and lifecycle. Batch+fast and asynchronous Thumb preclassification
+are the active accelerators; the experimental RISC-V Thumb dynarec is retired.
 
 Build policy:
 
 - `RETRO_GO=1` selects the fork's dynamically allocated GBA memory layout.
 - `ROM_BUFFER_SIZE=8` caps the PSRAM ROM cache; larger ROMs page from SD.
-- `GBA_P4_THUMB_DYNAREC=1` enables the fork's validated ESP32-P4 Thumb JIT.
-- Minimal game mode protects IWRAM, the read map, and VRAM in internal L2 before
-  requesting one 192 KB executable bank. Arena fallbacks include 160, 128, 96,
-  and smaller sizes so the JIT uses the best remaining contiguous block.
-- Straight-line Thumb instructions execute in batches of up to 16. The JIT is
-  therefore probed at stable branch targets and batch boundaries instead of at
-  every interior instruction, eliminating the dominant false-miss pattern.
-- The 4096-entry JIT lookup is four-way set associative. Four hot blocks with a
-  colliding hash can coexist, with empty-first and round-robin replacement.
-- A 24-op block ceiling and eight-hit admission threshold favor persistent loops
-  while allowing frequently revisited Pokémon code to warm promptly.
-- Once full, the arena samples one uncached candidate in 64 and may reuse the
-  colliding block's executable slot. This lets long-running scenes replace stale
-  code while ordinary misses avoid the PSRAM lookup and compilation path.
-- JIT lookup metadata is allocated lazily in PSRAM, and both it and the
-  executable bank disappear when quitting the ROM restarts into the full OS.
-- ROM blocks retain eight interpreted validation passes. Trusted blocks
-  then match by PC without rereading up to 24 immutable ROM opcodes from PSRAM;
-  compilation and validation remain in cold code paths.
-- Conditional/unconditional branches, calls, returns, and explicit PC writes stay
-  in the batched interpreter. The JIT ends immediately before them, preventing an
-  idle input-loop outcome from becoming trusted before its pressed path is seen.
-- The in-game CPU engine selector separates `Safe`, `Batch`, isolated JIT, and
-  `Turbo`, plus a dedicated fast-dispatch isolation mode. A fast-only capture
-  measured 30-37 emulated FPS despite 7-8.6 million fast-path hits and zero
-  misses per report, proving that dispatcher alone did not produce full speed.
-  Batch-only passed the title transition, reached gameplay, and measured 52.9
-  emulated FPS after the expensive memory-hash capture ended. The current
-  next diagnostic mode is experimental Turbo: that proven batch loop plus
-  standalone fast dispatch and the guarded JIT, allowing the aggregate ceiling
-  to be measured. Serial performance reports retain fast-path hit/miss counts so
-  accelerator coverage stays visible, and JIT mismatches still quarantine their
-  individual generated blocks.
-  Isolated JIT remains available in the core: each generated ROM block is compared
-  with the stock interpreter eight times before direct trusted execution. A
-  failed validation quarantines only that ROM block, leaving safe per-opcode
-  fallback without discarding acceleration everywhere else. The reference model
-  now routes WRAM, PUSH, and SP-relative writes through a 1 KB byte overlay. Reads
-  observe prior shadow writes, generated execution performs the sole live write,
-  and mismatches restore original bytes before stock gpSP retries the block. This
-  corrects the live-stack mutation proven by the `082dfa78` failure.
-  A shadow comparison caught `STRB` at `08001008` using stale data on the IWRAM
-  arm. Store emitters now load the source before the EWRAM/IWRAM branch so both
-  generated paths operate on an initialized host register.
-  Batch and the broad fast dispatcher remain compiled only for later diagnostics.
-- A 128-entry JIT flight recorder captures each compiled block's start/end PC,
-  SP, LR, return word, and first/last opcode signature. A model mismatch disables
-  JIT for that block and falls back locally; SoftReset or a bad fetch disables
-  both accelerators.
-  Every fault emits `[gba-jit] guard` plus ordered `[gba-jit] trace` lines to serial.
-- The 32 KB read-memory page map and 96 KB VRAM are reserved in internal L2 before
-  the JIT, with fallbacks reported in the launch log and `V:L2`/`V:P` in the menu.
+- `GBA_P4_THUMB_DYNAREC=0` is both the source default and an explicit gpSP
+  component definition. Experimental builds must opt in deliberately; release
+  ELFs contain only the no-op compatibility stubs and allocate no JIT arena,
+  validation transactions, front cache, or flight recorder.
+- Straight-line Thumb instructions execute through the shared fast handlers in
+  batches of up to 16. The release CPU selector exposes `Safe`, `Batch`, `Fast`,
+  and `Batch+fast`; retired JIT mode numbers map to `Batch+fast`.
+- Core 1 admits hot ROM PCs into a 64 KB, 512-set, four-way preclassification
+  cache. Entries retain eight raw opcodes plus their handler kinds, while core 0
+  classifies immutable request snapshots through paired SPSC queues.
+- Core 1 installs completed entries only between guest frames and owns cache
+  lookup, CLOCK reference bits, replacement, and eviction. This prevents the
+  worker from mutating live cache state during emulation.
+- Per-way probe-depth counters are disabled in release builds after the baseline
+  capture showed ways three and four serving nearly half of late cache hits.
+  Diagnostic builds can opt in with `GBA_THUMB_PREDECODE_PROBE_PROFILE=1`.
+- The 32 KB read-memory page map, 96 KB VRAM, IWRAM, and I/O storage are reserved
+  in internal L2 before the preclassification cache. Allocation placement and
+  fallbacks are reported in the launch log and as `V:L2`/`V:P` in the menu.
 - `GBA_SOUND_FREQUENCY=32768` matches Doll-OS `AudioOut`. The sink primes five
   DMA descriptors with silence before enabling the amp and pads the core's short
   startup read, preserving the queue cushion through panel-update bursts.
