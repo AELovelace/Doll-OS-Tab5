@@ -13,6 +13,7 @@
 #include "esp_attr.h"
 #include "esp_memory_utils.h"
 #include "esp_system.h"
+#include "driver/ppa.h"
 #include "esp32-hal-cpu.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -175,7 +176,20 @@ void gbaAbortBootMode(const char* reason) {
     gbaRestartDevice();
 }  // Shows a bounded failure message, disarms game boot, and restores the OS.
 
-static void gbaFreeDisplay() {}
+// The P4's PPA hardware performs the exact scale+rotate this blit needs as a
+// single DMA operation, replacing ~691K CPU stores per presented frame that
+// were competing with the emulation core for PSRAM bandwidth. Registration is
+// lazy and any driver rejection permanently falls back to the software loop.
+static ppa_client_handle_t gbaPpaSrm = nullptr;
+static bool gbaPpaUnavailable = false;
+
+static void gbaFreeDisplay() {
+    if (gbaPpaSrm) {
+        ppa_unregister_client(gbaPpaSrm);
+        gbaPpaSrm = nullptr;
+    }
+    gbaPpaUnavailable = false;
+}
 
 static bool gbaSetupDisplay() {
     gbaOutW = GBA_W * gbaScale;
@@ -267,6 +281,50 @@ static void gbaClearPanel() {
     }
 }  // Clears and presents without touching unallocated shell display state.
 
+static bool gbaBlitFrameWithPpa(const uint16_t* source, uint16_t* panelFrame) {
+    if (gbaPpaUnavailable) return false;
+    if (!gbaPpaSrm) {
+        ppa_client_config_t config = {};
+        config.oper_type = PPA_OPERATION_SRM;
+        if (ppa_register_client(&config, &gbaPpaSrm) != ESP_OK) {
+            gbaPpaUnavailable = true;
+            Serial.println("[gba] PPA unavailable -- software blit");
+            return false;
+        }
+    }
+
+    // Physical framebuffer is 720x1280 portrait; logical (x,y) maps to
+    // physical (y, 1279-x), which is a 90-degree rotation of the scaled game
+    // rectangle landing at column gbaOutY, row 1280-gbaOutX-gbaOutW.
+    ppa_srm_oper_config_t oper = {};
+    oper.in.buffer = const_cast<uint16_t*>(source);
+    oper.in.pic_w = GBA_W;
+    oper.in.pic_h = GBA_H;
+    oper.in.block_w = GBA_W;
+    oper.in.block_h = GBA_H;
+    oper.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+    oper.out.buffer = panelFrame;
+    oper.out.buffer_size = static_cast<size_t>(DISPLAY_WIDTH) * DISPLAY_HEIGHT
+        * sizeof(uint16_t);
+    oper.out.pic_w = DISPLAY_HEIGHT;  // physical width: 720 pixels
+    oper.out.pic_h = DISPLAY_WIDTH;   // physical height: 1280 rows
+    oper.out.block_offset_x = gbaOutY;
+    oper.out.block_offset_y = DISPLAY_WIDTH - gbaOutX - gbaOutW;
+    oper.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+    oper.rotation_angle = PPA_SRM_ROTATION_ANGLE_90;
+    oper.scale_x = static_cast<float>(gbaScale);
+    oper.scale_y = static_cast<float>(gbaScale);
+    oper.mode = PPA_TRANS_MODE_BLOCKING;
+    const esp_err_t result = ppa_do_scale_rotate_mirror(gbaPpaSrm, &oper);
+    if (result != ESP_OK) {
+        gbaPpaUnavailable = true;
+        Serial.printf("[gba] PPA blit rejected (%d) -- software blit\n",
+                      static_cast<int>(result));
+        return false;
+    }
+    return true;
+}
+
 static void gbaBlitFrame(const uint16_t* source) {
     if (!source) return;
 
@@ -275,34 +333,43 @@ static void gbaBlitFrame(const uint16_t* source) {
     // per-pixel rotation path. At 3x that measured 63 ms, and the old path also
     // copied every game frame through frameSprite. Write the already-rotated
     // game rectangle directly into the panel framebuffer instead: logical
-    // (x,y) maps to physical (y, 1279-x). display() then performs the required
-    // cache writeback for just this rectangle.
+    // (x,y) maps to physical (y, 1279-x).
     auto* panel = static_cast<lgfx::Panel_DSI*>(tft.getPanel());
     uint16_t* panelFrame = panel
         ? static_cast<uint16_t*>(panel->config_detail().buffer) : nullptr;
     if (!panelFrame) return;
 
+    if (gbaBlitFrameWithPpa(source, panelFrame)) {
+        // The PPA wrote physical memory and the driver already synchronized
+        // the cache, so the tft.display() writeback pass is unnecessary.
+        if (!gbaStandaloneMode) displayInvalidateShadow();
+        return;
+    }
+
+    // Software fallback. The gbaScale duplicate physical rows of one source
+    // column are identical, so build the scaled column once and memcpy it
+    // instead of recomputing every pixel. Static because the presenter runs on
+    // the 4 KB core-0 worker stack.
+    static uint16_t columnPixels[GBA_H * 3];
     constexpr int panelStride = DISPLAY_HEIGHT;  // physical width: 720 pixels
     for (int sourceX = 0; sourceX < GBA_W; ++sourceX) {
-        uint16_t* outputRows[3] = {};
-        for (int duplicateX = 0; duplicateX < gbaScale; ++duplicateX) {
-            const int logicalX = gbaOutX + sourceX * gbaScale + duplicateX;
-            const int physicalY = DISPLAY_WIDTH - 1 - logicalX;
-            outputRows[duplicateX] = panelFrame +
-                static_cast<size_t>(physicalY) * panelStride + gbaOutY;
-        }
+        uint16_t* scaled = columnPixels;
         for (int sourceY = 0; sourceY < GBA_H; ++sourceY) {
             const uint16_t color =
                 source[static_cast<size_t>(sourceY) * GBA_W + sourceX];
-            const int outputY = sourceY * gbaScale;
-            for (int duplicateX = 0; duplicateX < gbaScale; ++duplicateX) {
-                uint16_t* output = outputRows[duplicateX] + outputY;
-                for (int duplicateY = 0; duplicateY < gbaScale; ++duplicateY) {
-                    output[duplicateY] = color;
-                }
+            for (int duplicate = 0; duplicate < gbaScale; ++duplicate) {
+                *scaled++ = color;
             }
         }
+        const int logicalX = gbaOutX + sourceX * gbaScale;
+        for (int duplicateX = 0; duplicateX < gbaScale; ++duplicateX) {
+            const int physicalY = DISPLAY_WIDTH - 1 - (logicalX + duplicateX);
+            memcpy(panelFrame + static_cast<size_t>(physicalY) * panelStride +
+                       gbaOutY,
+                   columnPixels, static_cast<size_t>(gbaOutH) * sizeof(uint16_t));
+        }
     }
+    // display() performs the required cache writeback for just this rectangle.
     tft.display(gbaOutX, gbaOutY, gbaOutW, gbaOutH);
     if (!gbaStandaloneMode) displayInvalidateShadow();
 }
