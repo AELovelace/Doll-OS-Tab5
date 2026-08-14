@@ -50,6 +50,7 @@ typedef struct {
   uint32_t jit_top_break_count;
   uint32_t jit_word_specialized;
   uint32_t jit_word_store_specialized;
+  uint32_t jit_byte_store_specialized;
   uint32_t jit_region_guard_bails;
   uint32_t thumb_batch_runs;
   uint32_t thumb_batch_ops;

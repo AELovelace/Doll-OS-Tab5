@@ -1049,6 +1049,9 @@ static void gbaRunBootSession() {
             const uint32_t jitWordStoreSpecialized =
                 coreStats.jit_word_store_specialized -
                 modeStart.jit_word_store_specialized;
+            const uint32_t jitByteStoreSpecialized =
+                coreStats.jit_byte_store_specialized -
+                modeStart.jit_byte_store_specialized;
             const uint32_t jitRegionGuardBails = coreStats.jit_region_guard_bails -
                 modeStart.jit_region_guard_bails;
             const uint32_t fastHits = coreStats.thumb_fast_hits - modeStart.thumb_fast_hits;
@@ -1254,7 +1257,7 @@ static void gbaRunBootSession() {
             const uint64_t avgEventUs = perfFrames ? eventUs / perfFrames : 0;
             const uint64_t avgCpuUs = perfFrames && coreTimeUs > updateUs
                 ? (coreTimeUs - updateUs) / perfFrames : 0;
-            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/event/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu upd=arm/thumb/halt:%lu/%lu/%lu fast=%lu/%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu jitwork=try/build/probe/reuse/wait/reject/guard:%lu/%lu/%lu/%lu/%lu/%lu/%lu jitshape=short/top/count:%lu/%02lx/%lu jitspec=load/store/bail:%lu/%lu/%lu batch=%lu/%lu pre=hit/miss/ops/build/req/drop:%lu/%lu/%lu/%lu/%lu/%lu predrop=q/set/dup:%lu/%lu/%lu prechurn=evict/stall:%lu/%lu preprobe=1/2/3/4/m:%lu/%lu/%lu/%lu/%lu preocc=now/cap/high:%lu/%lu/%lu rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
+            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/event/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu upd=arm/thumb/halt:%lu/%lu/%lu fast=%lu/%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu jitwork=try/build/probe/reuse/wait/reject/guard:%lu/%lu/%lu/%lu/%lu/%lu/%lu jitshape=short/top/count:%lu/%02lx/%lu jitspec=load/store/byte/bail:%lu/%lu/%lu/%lu batch=%lu/%lu pre=hit/miss/ops/build/req/drop:%lu/%lu/%lu/%lu/%lu/%lu predrop=q/set/dup:%lu/%lu/%lu prechurn=evict/stall:%lu/%lu preprobe=1/2/3/4/m:%lu/%lu/%lu/%lu/%lu preocc=now/cap/high:%lu/%lu/%lu rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
                           gbaScale,
                           gbaFrameSkip,
                           static_cast<unsigned long>(emuFps10 / 10),
@@ -1299,6 +1302,7 @@ static void gbaRunBootSession() {
                            static_cast<unsigned long>(coreStats.jit_top_break_count),
                            static_cast<unsigned long>(jitWordSpecialized),
                            static_cast<unsigned long>(jitWordStoreSpecialized),
+                           static_cast<unsigned long>(jitByteStoreSpecialized),
                            static_cast<unsigned long>(jitRegionGuardBails),
                            static_cast<unsigned long>(coreStats.thumb_batch_ops - modeStart.thumb_batch_ops),
                            static_cast<unsigned long>(coreStats.thumb_batch_runs - modeStart.thumb_batch_runs),
