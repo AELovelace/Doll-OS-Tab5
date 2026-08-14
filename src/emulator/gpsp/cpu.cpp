@@ -135,6 +135,8 @@ u32 gba_thumb_predecode_capacity = 0;
 u32 gba_thumb_predecode_highwater = 0;
 u32 gba_thumb_predecode_evictions = 0;
 u32 gba_thumb_predecode_completion_stalls = 0;
+u32 gba_thumb_predecode_probe_depth[4] = {0, 0, 0, 0};
+u32 gba_thumb_predecode_probe_full_misses = 0;
 u32 gba_thumb_fast_hits = 0;
 u32 gba_thumb_fast_misses = 0;
 // The hand-written ARM and Thumb fast paths ran unconditionally, so "Safe" was
@@ -589,6 +591,9 @@ extern "C" void gba_thumb_predecode_reset(void)
   gba_thumb_predecode_highwater = 0;
   gba_thumb_predecode_evictions = 0;
   gba_thumb_predecode_completion_stalls = 0;
+  memset(gba_thumb_predecode_probe_depth, 0,
+      sizeof(gba_thumb_predecode_probe_depth));
+  gba_thumb_predecode_probe_full_misses = 0;
 }
 
 extern "C" void gba_thumb_predecode_shutdown(void)
@@ -7178,8 +7183,12 @@ static inline const gba_thumb_predecode_entry_t *gba_thumb_predecode_lookup(
     // CLOCK without introducing a cross-core write into the execution path.
     if(count && !(state & GBA_THUMB_PREDECODE_REFERENCED))
       entry->state = state | GBA_THUMB_PREDECODE_REFERENCED;
+    // Record the successful probe depth before adding a predictor. Keeping this
+    // stage policy-neutral gives the following firmware a trustworthy baseline.
+    gba_thumb_predecode_probe_depth[way]++;
     return entry;
   }
+  gba_thumb_predecode_probe_full_misses++;
   return NULL;
 }
 

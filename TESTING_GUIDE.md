@@ -199,7 +199,11 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    `prechurn=evict/stall` reports replacements and moments when core 0
    found its completion queue full; occasional evictions are expected after the
    working set fills, but sustained stalls indicate the eight-entry install
-   budget is too small. `preocc=now/cap/high` reports absolute resident entries,
+   budget is too small. In the policy-neutral lookup baseline,
+   `preprobe=1/2/3/4/m` counts hits at each physical probe depth and complete
+   four-way misses. The first four values must sum to `pre=hit`; use their
+   distribution to judge whether last-way prediction can remove meaningful
+   lookup work. `preocc=now/cap/high` reports absolute resident entries,
    allocated capacity, and the lifetime high-water mark. Compare hit rate,
    eviction rate, `corepart=cpu`, and `emu` against the captured counter-only
    frozen-cache baseline in both overworld and battle gameplay.

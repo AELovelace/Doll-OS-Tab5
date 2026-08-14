@@ -164,6 +164,8 @@ extern u32 gba_thumb_predecode_capacity;
 extern u32 gba_thumb_predecode_highwater;
 extern u32 gba_thumb_predecode_evictions;
 extern u32 gba_thumb_predecode_completion_stalls;
+extern u32 gba_thumb_predecode_probe_depth[4];
+extern u32 gba_thumb_predecode_probe_full_misses;
 extern u32 gba_thumb_fast_hits;
 extern u32 gba_thumb_fast_misses;
 extern u32 gba_interp_fast_enabled;
@@ -465,6 +467,12 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
   stats->thumb_predecode_evictions = gba_thumb_predecode_evictions;
   stats->thumb_predecode_completion_stalls =
       gba_thumb_predecode_completion_stalls;
+  stats->thumb_predecode_probe_depth_1 = gba_thumb_predecode_probe_depth[0];
+  stats->thumb_predecode_probe_depth_2 = gba_thumb_predecode_probe_depth[1];
+  stats->thumb_predecode_probe_depth_3 = gba_thumb_predecode_probe_depth[2];
+  stats->thumb_predecode_probe_depth_4 = gba_thumb_predecode_probe_depth[3];
+  stats->thumb_predecode_probe_full_misses =
+      gba_thumb_predecode_probe_full_misses;
   stats->thumb_fast_hits = gba_thumb_fast_hits;
   stats->thumb_fast_misses = gba_thumb_fast_misses;
   stats->vram_internal = gbsp_memory && esp_ptr_internal(gbsp_memory->p_vram);
