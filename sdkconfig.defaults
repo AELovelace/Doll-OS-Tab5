@@ -17,6 +17,9 @@ CONFIG_FREERTOS_HZ=1000
 # Keep boot/runtime output small enough to retain emulator crash traces. Explicit
 # Serial diagnostics and panic/backtrace output remain available.
 CONFIG_BOOTLOADER_LOG_LEVEL_ERROR=y
+# Treat either application as provisional until its setup path explicitly
+# confirms that display, shared storage, and launch-state recovery are healthy.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_LOG_DEFAULT_LEVEL_ERROR=y
 # Keep info statements compiled for third-party library compatibility while
 # suppressing them at runtime unless a tag is explicitly raised.

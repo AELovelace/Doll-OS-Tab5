@@ -281,33 +281,16 @@ I2S ownership surfaces rather than creating parallel ones.
 
 ## Known constraints worth flagging
 
-- **Flash/RAM headroom**: `esp32:esp32:esp32s3` ships stock partition schemes
-  (`huge_app`, `app3M_fat9M_16MB`, etc.) sized for 4MB flash regardless of
-  which `FlashSize` you pick -- selecting `16M` doesn't make `huge_app` any
-  bigger, it just leaves the other 12MB of this board's flash completely
-  unpartitioned and unreachable. `sketch.yaml` instead sets
-  `PartitionScheme=custom`, which makes the esp32 core pick up the sketch's own
-  `partitions.csv` (repo root, next to `DS.ino`) -- a single ~6.25MB app slot
-  (`ota_0` subtype, so `boot_app0.bin`'s slot-select still applies even without
-  an `app1`/OTA in use) plus a ~9.66MB `spiffs`-labeled partition for LittleFS
-  and a small `coredump` partition for crash postmortems, sized to use the
-  entire 16MB. With that table, the full build (display mirror included) is
-  ~8% flash / ~36% static RAM -- effectively all the growth room this board
-  has. PSRAM is `opi` (octal) -- confirmed by `esptool`'s own chip ID readout
-  (`Embedded PSRAM 8MB (AP_3v3)`), which matches an ESP32-S3-WROOM-1 N16R8
-  module's octal PSRAM part. Earlier in bring-up, `PSRAM=opi` appeared to hang
-  boot before `setup()` ever ran, and `PSRAM=disabled` was used as a
-  workaround; that turned out to be the wrong diagnosis -- `disabled` let the
-  board boot, but broke the TFT SPI bus outright (backlight lit, but the panel
-  never rendered anything, confirmed by bypassing this sketch entirely and
-  testing Freenove's own unmodified rainbow example under both settings).
-  `opi` is the correct setting for this hardware; the original hang had a
-  different, still-unidentified cause that stopped reproducing once other
-  bring-up issues (LittleFS partition mismatch, stale flash content) were
-  fixed. The full-screen `TFT_eSprite` frame buffer (`DISPLAY_WIDTH x
-  DISPLAY_HEIGHT x 2` bytes) is allocated at runtime from PSRAM automatically
-  (TFT_eSPI prefers it for large sprite allocations when available), not
-  counted in that static RAM figure.
+- **Flash/RAM headroom**: the Tab5's custom 16MB `partitions.csv` assigns
+  6.25MB to Doll-OS plus OG Game Boy (`ota_0`), 3MB to the GBA-only image (`ota_1`),
+  6.625MB to the `spiffs`-labeled LittleFS volume, and 64KB to coredumps. Both
+  applications share NVS and the SD card. PlatformIO's `emulator` environment
+  corrects its upload address to the `ota_1` offset after the common partition
+  table is parsed. The old single-image table placed LittleFS where `ota_1` now
+  lives, so internal files must be backed up before the first dual-image flash.
+  Large display surfaces, ROM caches, and cold emulator data allocate from the
+  Tab5's external PSRAM at runtime; latency-sensitive emulator maps and DMA/task
+  storage remain internal only when their capability requirements demand it.
 - **Single session, same as DOLL-OS's single keyboard.** Only one telnet client
   can be connected at a time; a second connection attempt is rejected with a
   message, matching DOLL-OS's single-keyboard assumption throughout the shared

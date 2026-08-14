@@ -5,6 +5,15 @@ import re
 Import("env")
 
 
+def environment_library_file(relative_path: str) -> Path:
+    """Resolves a dependency inside only the active PlatformIO environment."""
+    libdeps_dir = Path(env.subst("$PROJECT_LIBDEPS_DIR"))
+    source_path = libdeps_dir / env.subst("$PIOENV") / relative_path
+    if not source_path.is_file():
+        raise RuntimeError(f"Required library source is missing: {source_path}")
+    return source_path
+
+
 def configure_windows_archiver_response_file() -> None:
     """Uses a response file for large ESP-IDF component archives on Windows."""
     if os.name != "nt":
@@ -35,12 +44,7 @@ def configure_p4_tinyusb_headers() -> None:
 
 def patch_m5gfx(*_args, **_kwargs) -> None:
     """Fixes ST7123 fallback detection while preserving M5GFX's native DSI timings."""
-    libdeps_dir = Path(env.subst("$PROJECT_LIBDEPS_DIR"))
-    candidates = list(libdeps_dir.glob("*/M5GFX/src/M5GFX.cpp"))
-    if not candidates:
-        raise RuntimeError(f"M5GFX source was not installed beneath {libdeps_dir}")
-
-    source_path = candidates[0]
+    source_path = environment_library_file("M5GFX/src/M5GFX.cpp")
     source = source_path.read_text(encoding="utf-8")
     original = source
 
@@ -94,12 +98,7 @@ def patch_m5gfx(*_args, **_kwargs) -> None:
 
 def patch_esp_usb_host() -> None:
     """Keeps EspUsbHost compatible with the UserDemo-matched ESP-IDF 5.4 API."""
-    libdeps_dir = Path(env.subst("$PROJECT_LIBDEPS_DIR"))
-    candidates = list(libdeps_dir.glob("*/EspUsbHost/src/EspUsbHost.cpp"))
-    if not candidates:
-        raise RuntimeError(f"EspUsbHost source was not installed beneath {libdeps_dir}")
-
-    source_path = candidates[0]
+    source_path = environment_library_file("EspUsbHost/src/EspUsbHost.cpp")
     source = source_path.read_text(encoding="utf-8")
     original = source
     idf_55_assignment = """#if defined(CONFIG_IDF_TARGET_ESP32P4)
@@ -127,12 +126,7 @@ def patch_esp_usb_host() -> None:
 
 def patch_esp32_audio_i2s() -> None:
     """Uses Tab5's native MCLK and allocates the decoder task stack lazily."""
-    libdeps_dir = Path(env.subst("$PROJECT_LIBDEPS_DIR"))
-    candidates = list(libdeps_dir.glob("*/ESP32-audioI2S/src/Audio.cpp"))
-    if not candidates:
-        raise RuntimeError(f"ESP32-audioI2S source was not installed beneath {libdeps_dir}")
-
-    source_path = candidates[0]
+    source_path = environment_library_file("ESP32-audioI2S/src/Audio.cpp")
     source = source_path.read_text(encoding="utf-8")
     original = source
     upstream_clock = "m_i2s_std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;"
@@ -218,6 +212,9 @@ def verify_tab5_sdkconfig(source, target, env) -> None:
         #needs at runtime. The 128-byte line is what keeps scanout refills wide.
         "#define CONFIG_CACHE_L2_CACHE_128KB 1",
         "#define CONFIG_CACHE_L2_CACHE_LINE_128B 1",
+        # Both application slots validate themselves after their required
+        # hardware is ready, leaving the other slot as a boot-loop escape hatch.
+        "#define CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE 1",
         # Arduino links these symbols even with runtime initialization disabled.
         "#define CONFIG_ESP_TASK_WDT_EN 1",
     )
@@ -240,12 +237,13 @@ def verify_tab5_sdkconfig(source, target, env) -> None:
     if enabled:
         raise RuntimeError(f"Unsafe Tab5 runtime configuration in {config_path}: {enabled}")
 
-    print("[pio] Verified ESP32-P4 v1.x / 360 MHz CPU, display bandwidth, GBA executable heap, internal WiFi/Hosted memory, and inactive task watchdog")
+    print("[pio] Verified ESP32-P4 CPU, display bandwidth, OTA rollback, GBA executable heap, internal WiFi/Hosted memory, and inactive task watchdog")
 
 
 configure_windows_archiver_response_file()
 configure_p4_tinyusb_headers()
 patch_m5gfx()
 patch_esp_usb_host()
-patch_esp32_audio_i2s()
+if env.subst("$PIOENV") != "emulator":
+    patch_esp32_audio_i2s()
 env.AddPostAction("$PROGPATH", verify_tab5_sdkconfig)  # Prevents flashing a silent low-bandwidth fallback.

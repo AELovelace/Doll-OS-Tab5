@@ -526,6 +526,10 @@ static gba_thumb_predecode_completed_t
 static volatile u32 gba_thumb_predecode_completed_head;
 static volatile u32 gba_thumb_predecode_completed_tail;
 static u8 gba_thumb_predecode_clock_hand[GBA_THUMB_PREDECODE_SETS];
+// Each set remembers its most recently successful way. Tight guest loops then
+// reach the common block with one internal-L2 probe while retaining four-way
+// associativity for phase changes and collision-heavy code.
+static u8 gba_thumb_predecode_last_way[GBA_THUMB_PREDECODE_SETS];
 // This admission filter is touched only by the emulation core. The worker sees
 // only the bounded SPSC request queue, so counting a hot PC needs no atomics.
 static gba_thumb_predecode_hot_t
@@ -584,6 +588,8 @@ extern "C" void gba_thumb_predecode_reset(void)
   memset(gba_thumb_predecode_hot, 0, sizeof(gba_thumb_predecode_hot));
   memset(gba_thumb_predecode_clock_hand, 0,
       sizeof(gba_thumb_predecode_clock_hand));
+  memset(gba_thumb_predecode_last_way, 0,
+      sizeof(gba_thumb_predecode_last_way));
   __atomic_store_n(&gba_thumb_predecode_head, 0, __ATOMIC_RELEASE);
   __atomic_store_n(&gba_thumb_predecode_tail, 0, __ATOMIC_RELEASE);
   __atomic_store_n(&gba_thumb_predecode_completed_head, 0, __ATOMIC_RELEASE);
@@ -7198,8 +7204,11 @@ static inline const gba_thumb_predecode_entry_t *gba_thumb_predecode_lookup(
     return NULL;
 
   const u32 set = gba_thumb_predecode_set(pc);
-  for(u32 way = 0; way < GBA_THUMB_PREDECODE_WAYS; way++)
+  const u32 way_mask = GBA_THUMB_PREDECODE_WAYS - 1U;
+  const u32 predicted_way = gba_thumb_predecode_last_way[set] & way_mask;
+  for(u32 probe = 0; probe < GBA_THUMB_PREDECODE_WAYS; probe++)
   {
+    const u32 way = (predicted_way + probe) & way_mask;
     gba_thumb_predecode_entry_t *entry = &gba_thumb_predecode_cache[
         set * GBA_THUMB_PREDECODE_WAYS + way];
     const u32 state = entry->state;
@@ -7211,9 +7220,10 @@ static inline const gba_thumb_predecode_entry_t *gba_thumb_predecode_lookup(
     // CLOCK without introducing a cross-core write into the execution path.
     if(count && !(state & GBA_THUMB_PREDECODE_REFERENCED))
       entry->state = state | GBA_THUMB_PREDECODE_REFERENCED;
+    gba_thumb_predecode_last_way[set] = (u8)way;
 #if GBA_THUMB_PREDECODE_PROBE_PROFILE
-    // Record physical probe depth only in an explicitly instrumented build.
-    gba_thumb_predecode_probe_depth[way]++;
+    // Diagnostic builds report predictor depth without taxing release lookup.
+    gba_thumb_predecode_probe_depth[probe]++;
 #endif
     return entry;
   }

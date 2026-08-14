@@ -5,5 +5,7 @@ dapper/dist/
 .pio-preprocess/
 .pio-generated/
 sdkconfig.tab5
+sdkconfig.emulator
 /*.piobuildtab5firmware.map
+/*.piobuildemulatorfirmware.map
 managed_components/

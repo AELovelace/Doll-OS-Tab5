@@ -7,6 +7,7 @@
 
 #include "src/GameBoyAdvanceHost.h"
 #include "src/AudioOut.h"
+#include "src/EmulatorBoot.h"
 #include "src/emulator/gpsp/doll_gba_bridge.h"
 
 #include "esp_heap_caps.h"
@@ -28,32 +29,7 @@ static constexpr int GBA_H = GameBoyAdvanceHost::kHeight;
 static constexpr int GBA_MAX_FRAME_SKIP = 5;
 static constexpr uint32_t GBA_PANEL_INTERVAL_US = 66000;
 static constexpr int GBA_ROM_MENU_MAX = 128;
-static constexpr size_t GBA_BOOT_PATH_MAX = 384;
-static constexpr uint32_t GBA_BOOT_MAGIC = 0x47424144;  // "DABG" tags a Doll-OS GBA boot ticket.
-static constexpr uint16_t GBA_BOOT_VERSION = 1;
 static const char* GBA_ROM_DIR = "/sd/gba";
-
-enum GbaBootPhase : uint8_t {
-    GBA_BOOT_EMPTY = 0,
-    GBA_BOOT_PENDING = 1,
-    GBA_BOOT_RUNNING = 2,
-};
-
-struct GbaBootTicket {
-    uint32_t magic;
-    uint16_t version;
-    uint8_t phase;
-    uint8_t scale;
-    int8_t frameSkip;
-    uint8_t reserved[3];
-    char romPath[GBA_BOOT_PATH_MAX];
-    uint32_t checksum;
-};
-
-// RTC no-init memory survives esp_restart(), unlike the normal heap. A checksum and
-// version make random cold-boot contents harmless, while the phase doubles as the
-// crash-loop fuse: a second boot that sees RUNNING abandons game mode and starts OS.
-RTC_NOINIT_ATTR static GbaBootTicket gbaBootTicket;
 
 static int gbaScale = 3;
 static int gbaOutW = GBA_W * 3;
@@ -73,79 +49,26 @@ static uint32_t gbaLastSkipCoreUs = 0;
 static uint32_t gbaLastAudioUs = 0;
 static uint32_t gbaLastBlitUs = 0;
 
-static uint32_t gbaBootChecksum() {
-    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&gbaBootTicket);
-    uint32_t hash = 2166136261u;
-    for (size_t i = 0; i < offsetof(GbaBootTicket, checksum); ++i) {
-        hash = (hash ^ bytes[i]) * 16777619u;
-    }
-    return hash;
-}  // Seals every launch field with a compact FNV-1a integrity check.
-
-static void gbaSealBootTicket() {
-    gbaBootTicket.checksum = gbaBootChecksum();
-}  // Refreshes integrity after changing the ticket's lifecycle phase.
-
-static void gbaClearBootTicket() {
-    std::memset(&gbaBootTicket, 0, sizeof(gbaBootTicket));
-}  // Prevents a completed or failed game session from relaunching after reboot.
-
-static bool gbaBootTicketValid() {
-    return gbaBootTicket.magic == GBA_BOOT_MAGIC &&
-           gbaBootTicket.version == GBA_BOOT_VERSION &&
-           (gbaBootTicket.phase == GBA_BOOT_PENDING ||
-            gbaBootTicket.phase == GBA_BOOT_RUNNING) &&
-           gbaBootTicket.scale >= 1 && gbaBootTicket.scale <= 3 &&
-           gbaBootTicket.frameSkip >= -1 &&
-           gbaBootTicket.frameSkip <= GBA_MAX_FRAME_SKIP &&
-           gbaBootTicket.romPath[0] != '\0' &&
-           gbaBootTicket.romPath[GBA_BOOT_PATH_MAX - 1] == '\0' &&
-           std::strncmp(gbaBootTicket.romPath, "/sdcard/", 8) == 0 &&
-           gbaBootTicket.checksum == gbaBootChecksum();
-}  // Rejects corrupt, stale, unsupported, and non-SD launch requests before boot.
-
-bool gbaClaimBootMode() {
-    if (gbaBootTicket.magic != GBA_BOOT_MAGIC) return false;
-    if (!gbaBootTicketValid()) {
-        Serial.println("[gba boot] discarded invalid RTC launch ticket");
-        gbaClearBootTicket();
-        return false;
-    }
-    if (gbaBootTicket.phase == GBA_BOOT_RUNNING) {
-        Serial.println("[gba boot] previous game-mode boot did not exit cleanly; recovering to Doll-OS");
-        gbaClearBootTicket();
-        return false;
-    }
-    gbaBootTicket.phase = GBA_BOOT_RUNNING;
-    gbaSealBootTicket();
-    gbaStandaloneMode = true;
-    Serial.printf("[gba boot] claimed %s at %ux, frame skip %d\n",
-                  gbaBootTicket.romPath, gbaBootTicket.scale,
-                  gbaBootTicket.frameSkip);
-    return true;
-}  // Consumes PENDING once and arms automatic normal-OS recovery on any reset.
-
 static bool gbaScheduleBoot(const String& romVfs, int scale, int frameSkip) {
-    if (!romVfs.startsWith("/sdcard/")) return false;
-    if (romVfs.length() >= GBA_BOOT_PATH_MAX) return false;
-    std::memset(&gbaBootTicket, 0, sizeof(gbaBootTicket));
-    gbaBootTicket.magic = GBA_BOOT_MAGIC;
-    gbaBootTicket.version = GBA_BOOT_VERSION;
-    gbaBootTicket.phase = GBA_BOOT_PENDING;
-    gbaBootTicket.scale = static_cast<uint8_t>(constrain(scale, 1, 3));
-    gbaBootTicket.frameSkip = static_cast<int8_t>(
-        constrain(frameSkip, -1, GBA_MAX_FRAME_SKIP));
-    std::memcpy(gbaBootTicket.romPath, romVfs.c_str(), romVfs.length() + 1);
-    gbaSealBootTicket();
-    return true;
-}  // Writes the ROM and runtime choices into reset-persistent memory.
+    return doll::emulator::schedule(
+        doll::emulator::Kind::GameBoyAdvance, romVfs,
+        static_cast<uint8_t>(constrain(scale, 1, 3)),
+        static_cast<int8_t>(constrain(frameSkip, -1, GBA_MAX_FRAME_SKIP)),
+        static_cast<uint8_t>(radioGetVolume()));
+}  // Writes the cross-image launch record into NVS before selecting ota_1.
 
-static void gbaRestartDevice() {
+static bool gbaRestartDeviceTo(const char* partitionLabel) {
+    String error;
+    if (!doll::emulator::selectPartition(partitionLabel, &error)) {
+        Serial.printf("[emulator boot] %s\n", error.c_str());
+        return false;
+    }
     displayPrepareForRestart();
     Serial.flush();
     delay(50);
     esp_restart();
-}  // Restarts only after fencing the independently powered Tab5 DSI panel.
+    return true;
+}  // Fences the independently powered panel before changing firmware images.
 
 void gbaInitMinimalDisplay() {
     tft.setRotation(TAB5_DISPLAY_ROTATION);
@@ -171,9 +94,11 @@ void gbaAbortBootMode(const char* reason) {
                    DISPLAY_HEIGHT / 2 + 16);
     tft.setTextDatum(TL_DATUM);
     tft.display();
-    gbaClearBootTicket();
+    doll::emulator::clear();
     delay(1500);
-    gbaRestartDevice();
+    if (!gbaRestartDeviceTo(doll::emulator::kOsPartitionLabel)) {
+        Serial.println("[emulator boot] recovery partition selection failed");
+    }
 }  // Shows a bounded failure message, disarms game boot, and restores the OS.
 
 // The P4's PPA hardware performs the exact scale+rotate this blit needs as a
@@ -1395,22 +1320,20 @@ static void gbaRunBootSession() {
                       framesRun * 1000.0f / ranMs,
                       framesDrawn * 1000.0f / ranMs);
     }
-    gbaClearBootTicket();
+    doll::emulator::clear();
     Serial.println("[gba boot] quit requested; rebooting into Doll-OS");
-    gbaRestartDevice();
+    if (!gbaRestartDeviceTo(doll::emulator::kOsPartitionLabel)) {
+        Serial.println("[gba boot] could not select Doll-OS partition");
+    }
 }  // Owns the minimal-mode emulator lifetime, including save flush and OS reboot.
 
-void gbaRunBootMode() {
-    if (!gbaStandaloneMode || !gbaBootTicketValid() ||
-        gbaBootTicket.phase != GBA_BOOT_RUNNING) {
-        gbaAbortBootMode("launch ticket disappeared");
-        return;
-    }
-    gbaScale = gbaBootTicket.scale;
-    gbaFrameSkip = gbaBootTicket.frameSkip;
-    gbaRomVfs = gbaBootTicket.romPath;
+void gbaRunBootMode(const doll::emulator::LaunchRecord& launch) {
+    gbaStandaloneMode = true;
+    gbaScale = launch.scale;
+    gbaFrameSkip = launch.frameSkip;
+    gbaRomVfs = launch.romPath;
     gbaRunBootSession();
-}  // Applies the claimed RTC launch ticket after only minimal hardware is initialized.
+}  // Applies the claimed NVS record inside the dedicated emulator firmware.
 
 void handleGbaCommand(const String parts[], int partCount) {
     String romLogical;
@@ -1445,5 +1368,9 @@ void handleGbaCommand(const String parts[], int partCount) {
             C_GREEN);
     drawDisplayFrame();
     Serial.printf("[gba boot] scheduled %s\n", gbaRomVfs.c_str());
-    gbaRestartDevice();
+    if (!gbaRestartDeviceTo(doll::emulator::kEmulatorPartitionLabel)) {
+        doll::emulator::clear();
+        outLine("gba: emulator image is missing or invalid", C_RED);
+        drawDisplayFrame();
+    }
 }  // Converts the shell launch into a reset-persistent minimal-mode boot request.

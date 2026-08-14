@@ -54,8 +54,9 @@ usable with no network.
 - **Radio** — inherited MP3 playback UI using the Tab5 ES8388 audio backend
 - **Music library** — full-screen local MP3 player with recursive `/sd/music`
   scanning, ID3 metadata, search, and PSRAM-backed catalog storage
-- **Game Boy emulator** — `gb`, gnuboy port; Tab5 and USB keyboards share
-  held-button controls, with F12 available as a manual game-mode toggle
+- **Game Boy / Game Boy Advance emulators** — `gb` runs inside Doll-OS while
+  `gba` reboots into a lean second image; Tab5 and USB keyboards share
+  held-button controls
 - **ASUKA** — local LLM chat with tool calling (search / weather / URL fetch / time)
 - **Input hub** — the official Tab5 Keyboard and USB HID keyboards are active
   producers for the same event queue; BLE HID remains planned
@@ -118,23 +119,32 @@ component with M5Stack's working UserDemo cache baseline:
 
 - performance optimization;
 - 200MHz HEX PSRAM with PSRAM XIP;
-- 256KB L2 cache with 128-byte cache lines;
-- the project ST7123 detection and 50MHz DPI / 800Mbps DSI timing patch.
+- 128KB L2 cache with 128-byte cache lines;
+- the project ST7123 detection and native 80MHz DPI / 1040Mbps DSI timings.
 
 PlatformIO Core 6.1.19 and Arduino CLI are required. Arduino CLI is used only
 to generate the combined `.ino` source and prototypes; PlatformIO/ESP-IDF
 performs the actual firmware build. Keep the `tab5` profile and its pinned
-Arduino libraries installed, then run:
+Arduino libraries installed. On Windows, build, flash, and verify both images
+with one command:
 
 ```powershell
 copy config.h.example config.h
-pio run -e tab5
-pio run -e tab5 -t upload
+.\ps\Flash-DualImages.ps1
 ```
 
-The checked-in environment targets `COM38`; override it with
-`--upload-port COMx` if Windows assigns another port. Do not open a serial
-monitor until upload is complete because opening the port resets the board.
+The script installs Doll-OS (including OG Game Boy) in `ota_0`, installs the
+GBA-only runtime in `ota_1` at `0x650000`, and verifies both slots. A normal
+`pio run -e tab5 -t
+upload` updates only Doll-OS; it does not install the second image. Pass `-Port
+COMx` if Windows assigns another port, or `-SkipBuild` to reinstall already
+built artifacts. Moving from the former single-image table relocates LittleFS
+from `0x650000` to `0x950000`. Back up internal `/apps` and configuration files
+before the first dual-image flash because they cannot be preserved in place;
+SD-card ROMs and saves are unaffected.
+
+The checked-in environments target `COM38`. Do not open a serial monitor until
+upload is complete because opening the port resets the board.
 
 On Windows, pioarduino 54.03.21's esptool 5.0.0 requires Click 8.1.8. If image
 generation reports `ParamType.get_metavar`, repair the PlatformIO environment
@@ -144,15 +154,18 @@ once with:
 & "$env:USERPROFILE\.platformio\penv\Scripts\python.exe" -m pip install "click==8.1.8"
 ```
 
-After building, verify that `sdkconfig.tab5` contains
-`CONFIG_SPIRAM_SPEED_200M=y`, not `CONFIG_SPIRAM_SPEED_20M=y`. The complete
-display regression procedure is in [TESTING_GUIDE.md](TESTING_GUIDE.md).
+After building, verify that both `sdkconfig.tab5` and `sdkconfig.emulator`
+contain `CONFIG_SPIRAM_SPEED_200M=y`, not `CONFIG_SPIRAM_SPEED_20M=y`. The
+complete dual-image and display regression procedure is in
+[TESTING_GUIDE.md](TESTING_GUIDE.md).
 
 ## Legacy Arduino IDE build
 
 The Arduino-only build remains available for comparison and sketch development,
 but its precompiled ESP-IDF libraries use the smaller cache baseline and are not
-the release path for the cyan-flash fix.
+the release path for the cyan-flash fix. It produces only the `ota_0` OS image;
+`gb` and `gba` require the `emulator` image built and installed through
+PlatformIO.
 
 1. Install Arduino IDE 2 and Espressif's `esp32` board package version 3.3.5.
    Do not use 3.3.6 or newer for this Tab5 build yet: Arduino-ESP32 issue

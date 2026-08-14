@@ -1207,6 +1207,11 @@ void handleGbCommand(const String parts[], int partCount) {
                   gbFitMode ? "fit" : "1x");
     Serial.flush();
 
+    // Reassert the Tab5's logical landscape mapping before any Game Boy draw;
+    // this corrects the portrait-native DSI panel by 90 degrees counterclockwise.
+    tft.setRotation(TAB5_DISPLAY_ROTATION);
+    Serial.printf("[gb] display rotation=%d logical=%dx%d\n",
+                  TAB5_DISPLAY_ROTATION, tft.width(), tft.height());
     Serial.println("[GBDBG launch 07] host begin call");
     Serial.flush();
     if (!gbHost.begin()) {

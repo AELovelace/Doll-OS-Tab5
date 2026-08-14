@@ -15,7 +15,9 @@ are the active accelerators; the experimental RISC-V Thumb dynarec is retired.
 Build policy:
 
 - `RETRO_GO=1` selects the fork's dynamically allocated GBA memory layout.
-- `ROM_BUFFER_SIZE=8` caps the PSRAM ROM cache; larger ROMs page from SD.
+- `ROM_BUFFER_SIZE=16` caps the PSRAM ROM cache; larger ROMs page from SD. The
+  measured save-state peak remains about 20.3 MiB, leaving roughly 11.7 MiB of
+  the Tab5's 32 MiB PSRAM for allocator and runtime overhead.
 - `GBA_P4_THUMB_DYNAREC=0` is both the source default and an explicit gpSP
   component definition. Experimental builds must opt in deliberately; release
   ELFs contain only the no-op compatibility stubs and allocate no JIT arena,
@@ -59,17 +61,21 @@ Build policy:
 
 Runtime lifecycle:
 
-- The shell resolves an SD ROM, writes a versioned/checksummed launch ticket to
-  RTC no-init memory, and calls `esp_restart()`.
-- Early setup claims that ticket before large allocations. Game mode initializes
-  only the panel/touch, board I2C, LED, SD, keyboard/USB, audio, and gpSP; it does
-  not initialize the shell framebuffer/shadow, history, LittleFS settings, WiFi,
-  telnet, FTP, or command runtime.
-- The ticket changes from `PENDING` to `RUNNING` before hardware initialization.
-  A reset that sees `RUNNING` clears it and boots normal Doll-OS, preventing a
-  crashing ROM or peripheral failure from creating a reboot loop.
-- Quit flushes the battery save, shuts down gpSP/audio, clears the ticket, and
-  restarts into Doll-OS. GBA ROM launches are intentionally SD-only in this mode.
+- The shell resolves an SD ROM, writes a versioned/checksummed launch record to
+  shared NVS, selects the `emulator` (`ota_1`) partition, and calls
+  `esp_restart()`.
+- The dedicated image claims that record before hardware or large allocations.
+  It initializes only the panel/touch, board I2C, SD, keyboard/USB, audio, and
+  gpSP; the OG Game Boy core stays in Doll-OS. Shell canvas/history, LittleFS,
+  WiFi, telnet, FTP, radio, and
+  the command runtime remain linked only into Doll-OS (`ota_0`).
+- The record changes from `PENDING` to `RUNNING` before hardware initialization.
+  A reset that sees `RUNNING` clears it and selects Doll-OS. ESP-IDF OTA rollback
+  independently returns to the last validated image if setup fails before the
+  NVS recovery path is usable.
+- Quit flushes the battery save, shuts down gpSP/audio, clears the record,
+  selects `app0`, and restarts into Doll-OS. GBA launches are SD-only
+  because both images mount the card at `/sdcard`.
 - Touch contact changes print raw coordinates and their mapped button mask. The
   first Start edge arms one 600-frame trace without changing CPU engine,
   so the input-dependent path is tested under the selected accelerator. Idle performance logs use a

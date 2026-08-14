@@ -1,13 +1,11 @@
-# Custom 16MB partition table -- huge_app.csv's layout (app0/spiffs/coredump) is
-# fixed at a 4MB total regardless of which FlashSize is selected, so with a 16MB
-# board it silently leaves 12MB of flash completely unused. This just scales the
-# same shape (ota_0-subtype app so boot_app0.bin's slot-select still applies even
-# though there's no app1/OTA in use, spiffs for LittleFS's small config files,
-# coredump for crash postmortems) up to the full 16MB.
+# Custom 16MB dual-image table. Doll-OS retains its original 6.25MB ota_0 slot,
+# while a lean combined GB/GBA runtime occupies ota_1. Both images share NVS,
+# the SD card, and LittleFS; coredumps stay at the top of flash.
 #
 # Name,     Type, SubType,  Offset,    Size,      Flags
 nvs,        data, nvs,      0x9000,    0x5000,
 otadata,    data, ota,      0xe000,    0x2000,
 app0,       app,  ota_0,    0x10000,   0x640000,
-spiffs,     data, spiffs,   0x650000,  0x9A0000,
+emulator,   app,  ota_1,    0x650000,  0x300000,
+spiffs,     data, spiffs,   0x950000,  0x6A0000,
 coredump,   data, coredump, 0xFF0000,  0x10000,

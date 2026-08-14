@@ -7,6 +7,7 @@ idf_component_register(
         "${DOLL_OS_ROOT}/tinyexpr.c"
         "${DOLL_OS_ROOT}/src/AudioOut.cpp"
         "${DOLL_OS_ROOT}/src/DollInput/DollInput.cpp"
+        "${DOLL_OS_ROOT}/src/EmulatorBoot.cpp"
         "${DOLL_OS_ROOT}/src/GameBoyAdvanceHost.cpp"
         "${DOLL_OS_ROOT}/src/GameBoyHost.cpp"
         "${DOLL_OS_ROOT}/src/emulator/gpsp/cheats.c"
@@ -58,6 +59,6 @@ set(GPSP_SOURCES
     "${DOLL_OS_ROOT}/src/emulator/gpsp/video.cpp"
 )
 set_source_files_properties(${GPSP_SOURCES} PROPERTIES
-    COMPILE_DEFINITIONS "RETRO_GO=1;ROM_BUFFER_SIZE=8;GBA_SOUND_FREQUENCY=32768;OVERCLOCK_60FPS=1;GBA_SWI_HLE=0;GBA_P4_THUMB_DYNAREC=0;GBA_XTENSA_DYNAREC=0;GBA_RUNTIME_HOT_STATS=0;GBA_SOUND_DIAGNOSTICS=0;GBA_RFU_ENABLED=0"
+    COMPILE_DEFINITIONS "RETRO_GO=1;ROM_BUFFER_SIZE=16;GBA_SOUND_FREQUENCY=32768;OVERCLOCK_60FPS=1;GBA_SWI_HLE=0;GBA_P4_THUMB_DYNAREC=0;GBA_XTENSA_DYNAREC=0;GBA_RUNTIME_HOT_STATS=0;GBA_SOUND_DIAGNOSTICS=0;GBA_RFU_ENABLED=0"
     COMPILE_OPTIONS "-O3;-fomit-frame-pointer;-ffast-math"
 )

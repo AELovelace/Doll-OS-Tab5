@@ -4,17 +4,29 @@
 > is not initialized, AppRunner checkpoints do not reset it or sleep, and AppRunner canvas
 > glyphs use text size 1.
 
-Use the PlatformIO `tab5` environment for release hardware checks. It pins
-pioarduino 54.03.21, Arduino-ESP32 3.2.1, and ESP-IDF 5.4.2 to match M5Stack's
-working UserDemo generation. Keep a 115200-baud serial monitor open only after
-upload completes so opening the port does not reset the board mid-flash.
+Use both PlatformIO environments for release hardware checks. `tab5` builds the
+ordinary OS and OG Game Boy core in `ota_0`; `emulator` builds the lean GBA-only runtime in
+`ota_1`. Both pin pioarduino 54.03.21, Arduino-ESP32 3.2.1, and ESP-IDF 5.4.2.
+Keep a 115200-baud serial monitor open only after upload completes so opening
+the port does not reset the board mid-flash.
 
-Build and upload with:
+Build, upload, and verify both application slots with:
 
 ```powershell
-pio run -e tab5
-pio run -e tab5 -t upload
+.\ps\Flash-DualImages.ps1
 ```
+
+The script writes Doll-OS at `0x10000`, writes the emulator at `0x650000`, and
+then verifies both images. A standard upload of only the default `tab5`
+environment does not install the emulator image. Use `-Port COMx` when the board
+is assigned a different serial port, or `-SkipBuild` to reuse current artifacts.
+Never flash the emulator `firmware.bin` at the default `0x10000` address.
+
+The first move from the old single-image table is a storage migration. LittleFS
+moves from `0x650000` to `0x950000`, and the emulator overwrites part of its old
+region. Back up internal `/apps`, settings, and credentials before flashing;
+restore them afterward or allow `initStorage()` to seed a fresh filesystem. SD
+ROMs, saves, and music are not relocated.
 
 The Arduino `tab5` sketch profile remains available for comparison and pins
 Arduino-ESP32 3.3.5; it does not contain the custom ESP-IDF cache configuration
@@ -43,30 +55,35 @@ CONFIG_CACHE_L2_CACHE_SIZE`), so the former 256KB setting spent 128KB of the poo
 that hosted WiFi, mbedTLS and the USB host need. If a DSI underrun reappears
 *only* after this change, the 256KB cache is the first thing to restore.
 
-`sdkconfig.tab5` is generated and gitignored, and it *overrides* `sdkconfig.defaults`.
-After editing `sdkconfig.defaults`, delete `sdkconfig.tab5` or the new values are
-silently ignored. Changing a cache or memory option additionally needs the stale
-linker intermediates cleared, otherwise the firmware links against the previous
-memory map with no warning:
+`sdkconfig.tab5` and `sdkconfig.emulator` are generated and gitignored, and each
+*overrides* `sdkconfig.defaults`. After editing `sdkconfig.defaults`, delete both
+or the new values are silently ignored. Changing a cache or memory option also
+needs stale linker intermediates cleared, otherwise an image can link against
+the previous memory map with no warning:
 
 ```powershell
-Remove-Item sdkconfig.tab5, .pio\build\tab5\memory.ld, .pio\build\tab5\sections.ld, `
+Remove-Item sdkconfig.tab5, sdkconfig.emulator, `
+  .pio\build\tab5\memory.ld, .pio\build\tab5\sections.ld, `
   .pio\build\tab5\esp-idf\esp_system\ld\memory.ld.in, `
-  .pio\build\tab5\esp-idf\esp_system\ld\sections.ld.in -ErrorAction SilentlyContinue
+  .pio\build\tab5\esp-idf\esp_system\ld\sections.ld.in, `
+  .pio\build\emulator\memory.ld, .pio\build\emulator\sections.ld, `
+  .pio\build\emulator\esp-idf\esp_system\ld\memory.ld.in, `
+  .pio\build\emulator\esp-idf\esp_system\ld\sections.ld.in -ErrorAction SilentlyContinue
 ```
 
 Then confirm the regenerated `.pio\build\tab5\memory.ld` reads
 `sram_high (RW) : org = 0x4FF40000, len = 0x80000 - 0x20000`. A `- 0x40000` there
 means the 256KB-cache memory map is still in force.
 
-Before flashing a display-regression build, verify the generated configuration:
+Before flashing a display-regression build, verify both generated configurations:
 
 ```powershell
-rg "CONFIG_(COMPILER_OPTIMIZATION_PERF|SPIRAM_SPEED_200M|SPIRAM_XIP_FROM_PSRAM|CACHE_L2_CACHE_128KB|CACHE_L2_CACHE_LINE_128B|SPIRAM_TRY_ALLOCATE_WIFI_LWIP|ESP_HOSTED_MEMPOOL_PREFER_SPIRAM)" sdkconfig.tab5
+rg "CONFIG_(BOOTLOADER_APP_ROLLBACK_ENABLE|COMPILER_OPTIMIZATION_PERF|SPIRAM_SPEED_200M|SPIRAM_XIP_FROM_PSRAM|CACHE_L2_CACHE_128KB|CACHE_L2_CACHE_LINE_128B|SPIRAM_TRY_ALLOCATE_WIFI_LWIP|ESP_HOSTED_MEMPOOL_PREFER_SPIRAM)" sdkconfig.tab5 sdkconfig.emulator
 ```
 
-All seven settings must be enabled. `CONFIG_SPIRAM_SPEED_20M=y` is a hard test
-failure; it means `CONFIG_IDF_EXPERIMENTAL_FEATURES=y` did not take effect.
+The positive settings must be enabled and the three placement-preference
+settings must remain unset in both images. `CONFIG_SPIRAM_SPEED_20M=y` is a hard
+test failure; it means `CONFIG_IDF_EXPERIMENTAL_FEATURES=y` did not take effect.
 
 Every display strip completes its own M5GFX transaction. Do not wrap multiple
 separated strips in one outer `startWrite()`/`endWrite()` pair:
@@ -142,9 +159,13 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    default. Confirm the log says `WiFi skipped: no saved credentials`, reaches
    the shell with `Telnet dormant`, and never reports `Brownout detector was
    triggered` or an `Invalid mbox` assertion.
-2. Launch the Tetris ROM in `fit` mode and play continuously for at least five
-   minutes. Tab5 `fit` is a centered, integer-scaled 480x432 image; confirm
-   falling pieces update without a black screen, cyan flashes, or partial frames.
+2. Launch the Tetris ROM in `fit` mode. It must start in-process without a reboot
+   or application-partition change. Play continuously for at least five minutes.
+   Tab5 `fit` is a centered, integer-scaled 480x432
+   image. Confirm the log reports `[gb] display rotation=3 logical=1280x720` and
+   the game is upright in landscape rather than 90 degrees clockwise; the
+   GB launch reapplies Doll-OS's counterclockwise panel correction defensively.
+   Confirm falling pieces update without a black screen, cyan flashes, or partial frames.
    The launch log should say `Tab5 safe-video mode: audio deferred`; video and
    USB controls must be proven stable before codec ownership is restored.
 3. Open and close the Escape settings menu several times. Confirm both the menu
@@ -164,7 +185,7 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
 
 ## Game Boy Advance CPU, pacing, and memory regression
 
-1. Build with `pio run -e tab5`. Confirm the generated `compile_commands.json`
+1. Build with `pio run -e emulator`. Confirm its generated `compile_commands.json`
    passes `GBA_P4_THUMB_DYNAREC=0`, `GBA_RUNTIME_HOT_STATS=0`, and
    `GBA_SOUND_DIAGNOSTICS=0`, and `GBA_RFU_ENABLED=0` to the gpSP sources. The
    first keeps the retired JIT out unless an experiment opts in; the next two
@@ -172,9 +193,9 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    RFU is disabled because this frontend always launches with
    `SERIAL_MODE_DISABLED`; enabling wireless-adapter emulation requires restoring
    both the compile definition and a transport. Launch a GBA ROM from `/sd/gba`
-   and confirm the shell announces a reboot. The next serial boot must say
-   `Starting GBA minimal mode` and must not log shell WiFi, telnet, FTP, or canvas
-   initialization.
+   and confirm the shell announces a reboot. The next serial boot must claim a
+   Game Boy Advance record and must not log shell WiFi, telnet, FTP, radio,
+   LittleFS, or shell-canvas initialization.
 2. Inspect the EWRAM decision and `[gba] memory` lines. The former must show the
    256 KB request, current internal free/largest blocks, the 128 KB reserve, and
    the selected `L2` or `PSRAM` placement. The latter must report `IWRAM=L2/32K`, `MAP=L2`,
@@ -223,10 +244,10 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    working set fills, but sustained stalls indicate the eight-entry install
    budget is too small. A diagnostic build with
    `GBA_THUMB_PREDECODE_PROBE_PROFILE=1` reports
-   `preprobe=1/2/3/4/m`, which counts hits at each physical probe depth and complete
-   four-way misses. The first four values must sum to `pre=hit`; use their
-   distribution to judge whether last-way prediction can remove meaningful
-   lookup work. Release builds leave all five values at zero so lookup does not
+   `preprobe=1/2/3/4/m`, which counts hits at each last-way-predicted probe depth
+   and complete four-way misses. The first four values must sum to `pre=hit`;
+   the first value is the predictor's one-probe success count. Release builds
+   leave all five values at zero so lookup does not
    perform an extra internal-SRAM counter update. `preocc=now/cap/high` reports
    absolute resident entries,
    allocated capacity, and the lifetime high-water mark. Compare hit rate,
@@ -259,22 +280,24 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
    and the ordinary Doll-OS shell returns with display history, WiFi, and telnet
    initialized normally. Launch a different ROM, then return to the first ROM;
    no predecode cache state may leak between rebooted sessions.
-11. Repeat with a ROM larger than the 8 MB cache. Confirm the per-window
-   `rom=loads+prefetches` values advance without crashes and compare core time
-   against an 8 MB-or-smaller ROM so SD paging is not mistaken for a CPU-engine
-   regression.
-12. While a ROM is running, press the hardware reset once. The following boot must
-   log that the previous game-mode boot did not exit cleanly, clear the ticket,
-   fully reset/wake the ST7123 panel, and enter Doll-OS instead of relaunching the
-   ROM. Reset again to confirm the display lights on both software-reset boots,
-   normal boots remain normal, and no crash loop is possible.
+11. Repeat with a ROM larger than the 16 MB cache. Confirm the per-window
+    `rom=loads+prefetches` values advance without crashes and compare core time
+    against a 16 MB-or-smaller ROM so SD paging is not mistaken for a CPU-engine
+    regression.
+12. While a ROM is running, press the hardware reset once. The emulator image
+   must see the `RUNNING` launch record, clear it, select `app0`, and enter
+   Doll-OS instead of relaunching the ROM. Also force one reset before emulator
+   setup validation and confirm bootloader rollback selects the last healthy OS.
+   Reset again to confirm the display lights on every software-reset boot and no
+   crash loop is possible.
 13. Remove the SD card after scheduling a launch, or test with an unreadable ROM.
-   Minimal mode must show a bounded launch failure, clear its ticket, and reboot
+   The emulator image must show a bounded launch failure, clear its record, and reboot
    to Doll-OS. Reinserting the card must not unexpectedly relaunch that ROM.
-14. Compare free PSRAM/internal heap from the old in-shell launch and minimal
-    launch logs. Minimal mode must omit allocation of the ~1.8 MB `frameSprite`
-    and ~1.8 MB `displayShadow`; the bare-panel Escape menu and touch controls
-    must still redraw completely at 1x, 2x, and 3x.
+14. Compare free PSRAM/internal heap from the old in-shell launch and dedicated
+    image logs. GBA must omit the ~1.8 MB `frameSprite` and ~1.8 MB
+    `displayShadow`; the bare-panel Escape menu and touch controls must still
+    redraw completely at 1x, 2x, and 3x. GB uses one frame sprite but must not
+    allocate Doll-OS's second display shadow.
 15. For every shell-to-GBA and GBA-to-shell transition, confirm serial prints
     `[display] restart fence: panel reset held low` before reset. The ST7123 must
     light without removing USB power; a dark panel that recovers only after a
@@ -282,13 +305,21 @@ Run these checks with the local Tab5 keyboard; touch must remain inert throughou
 
 ## Static and lazy allocation regression
 
-1. After a release build, run `riscv32-esp-elf-size -A
-   .pio/build/tab5/firmware.elf`. The 2026-08-13 allocation baseline is 27,121
-   bytes of `.dram0.data`, 35,464 bytes of `.dram0.bss`, and 47,552 bytes of
-   `.dram1.bss`. The immediately preceding build used 40,888 and 53,992 BSS
-   bytes respectively, so losing the 11,864-byte fixed-RAM reduction needs an
-   explicit explanation.
-2. Inspect the sorted ELF symbols. `radioDirectory` and `xAudioStack` must each
+1. After both release builds, run `riscv32-esp-elf-size -A` on the two ELFs.
+   The 2026-08-13 dual-image baselines are:
+
+   - Doll-OS: 26,737 bytes `.dram0.data`, 42,116 bytes `.dram0.bss`, and
+     16,984 bytes `.dram1.bss` (85,837 fixed internal bytes total).
+   - Emulator: 15,441 bytes `.dram0.data`, 56,972 bytes `.dram0.bss`, and
+     8,424 bytes `.dram1.bss` (80,837 fixed internal bytes total).
+
+   The last combined OS/emulator image totaled 110,137 fixed internal bytes, so
+   the normal OS now retains 24,300 additional bytes. Losing that separation
+   needs an explicit explanation.
+2. Inspect both sorted ELF symbol tables. `gnuboy_init` must be present only in
+   Doll-OS. `gbaRunBootMode`, `gba_thumb_predecode_hot`, and `execute_arm` must
+   be absent from Doll-OS and present in the GBA image. In the OS,
+   `radioDirectory` and `xAudioStack` must each
    be four-byte pointers, not the former 5,424-byte directory and 3,500-byte
    task-stack arrays. `rfu_buf`, `rfu_host`, `rfu_client`, and `rfu_peer_bcst`
    must be absent from a release ELF.

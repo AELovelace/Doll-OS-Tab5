@@ -19,4 +19,4 @@ profiles:
       - esp32ARP (0.1.3)
       - PubSubClient (2.8.0)
       - LibSSH-ESP32 (5.8.0)
-      - dir: "C:/Users/Edith/OneDrive - eternalhotels.com/Documents/Arduino/libraries/ESP32Ping"
+      - dir: ".pio/libdeps/tab5/ESP32Ping"

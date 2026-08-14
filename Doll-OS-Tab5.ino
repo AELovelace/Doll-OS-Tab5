@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <FS.h>
 #include <driver/gpio.h>
+#include <esp_ota_ops.h>
 #include <esp_sleep.h>
 #if CONFIG_IDF_TARGET_ESP32P4
 #include <hal/axi_icm_ll.h>
@@ -51,11 +52,8 @@ void setup() {
         delay(10);
     }
 
-    const bool gbaBootMode = gbaClaimBootMode();  // Claims a one-shot RTC launch before OS allocation begins.
     Serial.println();
-    Serial.printf("Starting %s on %s...\n",
-                  gbaBootMode ? "GBA minimal mode" : "DOLL-OS",
-                  DOLL_BOARD_NAME);
+    Serial.printf("Starting DOLL-OS on %s...\n", DOLL_BOARD_NAME);
     Serial.flush();   //force this out over UART now, in case something below hangs before the next line
 
     auto m5Config = M5.config();
@@ -89,20 +87,6 @@ void setup() {
     //WiFi, storage and every later malloc/new/String below spill into PSRAM instead of
     //internal SRAM wherever they can (see enablePsramHeap)
     enablePsramHeap();
-
-    if (gbaBootMode) {
-        // Game mode deliberately stops here: no frameSprite/display shadow, shell
-        // history, LittleFS settings, Wi-Fi/C6, telnet, FTP, or command runtime.
-        gbaInitMinimalDisplay();                  // Paints directly into the DSI framebuffer.
-        if (!initSdStorageOnly()) {
-            gbaAbortBootMode("SD card unavailable");
-            return;
-        }
-        initKeyboardSerial();                    // Keeps the official keyboard/game mappings.
-        slaveLinkBegin();                        // Leaves the shared input compatibility shim ready.
-        gbaRunBootMode();                        // Runs until quit, then saves and restarts into Doll-OS.
-        return;
-    }
 
     //bring the panel up first so boot progress is visible on it too -- it mirrors
     //the shell session (see Display.ino) but does not gate on a network client
@@ -169,6 +153,12 @@ void setup() {
     printPrompt();
     drawDisplayFrame();
     recordHeapCheckpoint("setup ready");
+
+    const esp_err_t otaValidation = esp_ota_mark_app_valid_cancel_rollback();
+    if (otaValidation != ESP_OK) {
+        Serial.printf("[boot] Could not validate Doll-OS OTA slot: %s\n",
+                      esp_err_to_name(otaValidation));
+    }  // Commits ota_0 only after display, storage, input, and shell setup succeed.
 }
 
 void loop() {

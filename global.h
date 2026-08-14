@@ -13,6 +13,7 @@
 #include <SD_MMC.h>
 #include <M5Unified.h>
 #include <ArduinoJson.h>
+#include "src/EmulatorBoot.h"
 //   Pulled in here (not just in Radio.ino) so the ESP32-audioI2S `Audio` class is
 //   declared before the Arduino sketch builder's auto-generated function
 //   prototypes. radioAudioInfo(Audio::msg_t) (Radio.ino) gets a synthetic

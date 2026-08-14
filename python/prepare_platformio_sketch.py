@@ -31,7 +31,6 @@ def generate_sketch_source() -> None:
     preprocess_dir = project_dir / ".pio-preprocess"
     generated_source = generated_dir / "Doll-OS-Tab5.ino.cpp"
     sketch_sources = list(project_dir.glob("*.ino"))
-
     newest_input = max(path.stat().st_mtime for path in sketch_sources)
     if generated_source.is_file() and generated_source.stat().st_mtime >= newest_input:
         print("[pio] Arduino sketch source is current")
@@ -59,5 +58,7 @@ def generate_sketch_source() -> None:
     print(f"[pio] Generated {generated_source.relative_to(project_dir)}")
 
 
-generate_sketch_source()
-
+if env.subst("$PIOENV") == "emulator":
+    print("[pio] Dedicated emulator image uses its hand-scoped entrypoint")
+else:
+    generate_sketch_source()
