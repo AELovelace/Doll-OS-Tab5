@@ -398,7 +398,7 @@ static inline void gba_block_cache_touch_thumb(u32 pc, u8 *pc_address_block)
 #endif
 
 #if GBA_P4_ASYNC_PREDECODE
-#define GBA_THUMB_PREDECODE_SETS       2048U
+#define GBA_THUMB_PREDECODE_SETS       1024U
 #define GBA_THUMB_PREDECODE_WAYS       2U
 #define GBA_THUMB_PREDECODE_OPS        8U
 #define GBA_THUMB_PREDECODE_QUEUE      32U
@@ -451,9 +451,9 @@ typedef struct
   u8 kind[GBA_THUMB_PREDECODE_OPS];
 } gba_thumb_predecode_entry_t;
 
-// 4096 compact eight-op entries occupy 128 KB. Keep two-way lookup while using
-// the L2 recovered from the disabled executable arena for broader immutable
-// block coverage and fewer set collisions during long ROM sessions.
+// 2048 compact eight-op entries occupy 64 KB. Batch+fast no longer reserves a
+// 120 KB executable arena, so this spends only part of that recovered L2 on
+// broader immutable block coverage and leaves the rest available to the core.
 static_assert(sizeof(gba_thumb_predecode_entry_t) == 32,
     "Thumb predecode entry must stay compact");
 
