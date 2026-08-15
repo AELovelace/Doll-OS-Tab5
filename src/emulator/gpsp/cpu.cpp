@@ -119,6 +119,9 @@ u32 gba_thumb_jit_reuses = 0;
 u32 gba_thumb_jit_adapt_probes = 0;
 u32 gba_thumb_jit_top_break = 0;
 u32 gba_thumb_jit_top_break_count = 0;
+u32 gba_thumb_jit_top_fail = 0;
+u32 gba_thumb_jit_top_fail_count = 0;
+u32 gba_thumb_jit_chain_runs = 0;
 u32 gba_thumb_jit_word_specialized = 0;
 u32 gba_thumb_jit_word_store_specialized = 0;
 u32 gba_thumb_jit_byte_store_specialized = 0;
@@ -769,6 +772,27 @@ extern "C" void gba_thumb_predecode_shutdown(void) {}
 #define GBA_P4_THUMB_JIT_RET_EXTRA_SHIFT 16
 #define GBA_P4_THUMB_JIT_RET_EXTRA_MASK 0xFFU
 #define GBA_P4_THUMB_JIT_RET_ARM_SWITCH (1U << 24)
+
+// Upper bound on guest ops retired by one chained run. Keeps the returned op
+// count inside RET_OPS_MASK and bounds how long the interpreter goes without
+// re-checking its own loop conditions.
+#ifndef GBA_P4_THUMB_JIT_CHAIN_MAX_OPS
+#define GBA_P4_THUMB_JIT_CHAIN_MAX_OPS 64U
+#endif
+
+// Bit positions match the flags[] indices the generated code stores through A1,
+// so a mask bit and gba_p4_thumb_jit_emit_store_flag()'s index are the same
+// number.
+enum
+{
+  GBA_JIT_FLAG_N   = 1U << 0,
+  GBA_JIT_FLAG_Z   = 1U << 1,
+  GBA_JIT_FLAG_C   = 1U << 2,
+  GBA_JIT_FLAG_V   = 1U << 3,
+  GBA_JIT_FLAG_NZ  = GBA_JIT_FLAG_N | GBA_JIT_FLAG_Z,
+  GBA_JIT_FLAG_NZC = GBA_JIT_FLAG_NZ | GBA_JIT_FLAG_C,
+  GBA_JIT_FLAG_ALL = GBA_JIT_FLAG_NZC | GBA_JIT_FLAG_V,
+};
 
 typedef u32 (*gba_p4_thumb_jit_fn)(u32 *regs, u32 *flags);
 
@@ -1659,6 +1683,126 @@ static inline bool gba_p4_thumb_jit_supported_opcode(u32 opcode)
   return false;
 }
 
+// Flags each opcode stores and loads. `writes` must never claim more than the
+// emitter actually stores: over-stating it would let an earlier write that is
+// still needed be dropped. `reads` must never claim less than the emitter
+// loads. Unrecognised opcodes therefore fall through to writes=0/reads=ALL,
+// which disables elimination across them instead of risking a stale flag.
+static void gba_p4_thumb_jit_flag_effects(u32 opcode, u32 live_out,
+    u32 *writes, u32 *reads, bool *barrier)
+{
+  u32 top = (opcode >> 8) & 0xFF;
+
+  *writes = 0;
+  *reads = 0;
+  // A block that bails parks PC on the offending instruction and reports the
+  // ops retired so far, so every flag must already be correct at that point.
+  *barrier = gba_p4_thumb_jit_wram_load_opcode(opcode) ||
+             gba_p4_thumb_jit_wram_store_opcode(opcode);
+  if(*barrier)
+    return;
+
+  if(top <= 0x07)
+  {
+    /* LSL Rd, Rs, #imm. A zero shift distance leaves C untouched. */
+    *writes = ((opcode >> 6) & 0x1F) ? GBA_JIT_FLAG_NZC : GBA_JIT_FLAG_NZ;
+    return;
+  }
+
+  if(top <= 0x17)
+  {
+    /* LSR/ASR Rd, Rs, #imm: #0 means #32 and still writes C. */
+    *writes = GBA_JIT_FLAG_NZC;
+    return;
+  }
+
+  if(top <= 0x1F)
+  {
+    /* ADD/SUB Rd, Rs, Rn|#imm3 */
+    *writes = GBA_JIT_FLAG_ALL;
+    return;
+  }
+
+  if(top <= 0x3F)
+  {
+    /* MOV writes N/Z only; CMP/ADD/SUB write all four. */
+    *writes = ((top >> 3) == 0x04) ? GBA_JIT_FLAG_NZ : GBA_JIT_FLAG_ALL;
+    return;
+  }
+
+  if(top == 0x40)
+  {
+    u32 subop = (opcode >> 6) & 0x03;
+    if(subop <= 0x01)
+    {
+      /* AND/EOR */
+      *writes = GBA_JIT_FLAG_NZ;
+      return;
+    }
+
+    /* LSL/LSR Rd, Rs. The carry sequence preserves the old C when the shift
+       distance is zero, so it reads C - but only when it is emitted at all. */
+    *writes = GBA_JIT_FLAG_NZC;
+    *reads = (live_out & GBA_JIT_FLAG_C) ? GBA_JIT_FLAG_C : 0;
+    return;
+  }
+
+  if(top == 0x42)
+  {
+    /* TST writes N/Z; NEG/CMP/CMN write all four. */
+    *writes = (((opcode >> 6) & 0x03) == 0x00) ?
+        GBA_JIT_FLAG_NZ : GBA_JIT_FLAG_ALL;
+    return;
+  }
+
+  if(top == 0x43)
+  {
+    /* ORR/MUL/BIC/MVN */
+    *writes = GBA_JIT_FLAG_NZ;
+    return;
+  }
+
+  if(top == 0x44 || top == 0x46 ||
+     (top >= 0x48 && top <= 0x4F) ||
+     (top >= 0x90 && top <= 0x9F) ||
+     (top >= 0xA0 && top <= 0xB3) ||
+     top == 0xB4 || top == 0xB5 || top == 0xBC)
+  {
+    /* Hi-register ADD/MOV, PC-relative and stack traffic: no flag writes. */
+    return;
+  }
+
+  if(top == 0x45)
+  {
+    /* CMP Rd, Rs with high registers */
+    *writes = GBA_JIT_FLAG_ALL;
+    return;
+  }
+
+  *reads = GBA_JIT_FLAG_ALL;
+}
+
+// Blocks stop at the first control-flow opcode, so nothing inside one consumes
+// a flag except the register-shift carry. Every flag must be architecturally
+// correct on exit, but an intermediate write that a later op overwrites first
+// is dead and never has to be emitted.
+static void gba_p4_thumb_jit_flag_liveness(const u16 *opcodes, u32 op_count,
+    u8 *live_out)
+{
+  u32 live = GBA_JIT_FLAG_ALL;
+
+  for(u32 i = op_count; i-- > 0; )
+  {
+    u32 writes = 0;
+    u32 reads = 0;
+    bool barrier = false;
+
+    live_out[i] = (u8)live;
+    gba_p4_thumb_jit_flag_effects(opcodes[i], live, &writes, &reads, &barrier);
+    live = barrier ? GBA_JIT_FLAG_ALL : ((live & ~writes) | reads);
+  }
+}
+
 static u32 gba_p4_thumb_jit_find_break_group(u32 pc, u8 *pc_address_block)
 {
   u32 offset = pc & 0x7FFF;
@@ -2515,8 +2659,15 @@ static inline bool gba_p4_thumb_jit_record_fail(gba_p4_thumb_jit_entry_t *entry,
   {
     gba_thumb_jit_fail_opcode =
         (index < entry->op_count) ? entry->opcodes[index] : entry->opcodes[0];
-    for(u32 i = 0; i < entry->op_count; i++)
-      gba_thumb_jit_fail_histogram[(entry->opcodes[i] >> 8) & 0xFF]++;
+    // Only the opcode that actually failed is counted. Tallying every opcode in
+    // the block buried the culprit under whatever common ALU ops surrounded it.
+    u32 group = (gba_thumb_jit_fail_opcode >> 8) & 0xFF;
+    u32 count = ++gba_thumb_jit_fail_histogram[group];
+    if(count > gba_thumb_jit_top_fail_count)
+    {
+      gba_thumb_jit_top_fail = group;
+      gba_thumb_jit_top_fail_count = count;
+    }
   }
   gba_thumb_jit_fail_index = index;
   gba_thumb_jit_fail_expected = expected;
@@ -2726,10 +2877,12 @@ static __attribute__((noinline, cold)) bool gba_p4_thumb_jit_validate_and_commit
   return true;
 }
 
-static bool gba_p4_thumb_jit_execute_committed(gba_p4_thumb_jit_entry_t *entry,
-    u32 &n_flag, u32 &z_flag, u32 &c_flag, u32 &v_flag, u32 *jit_ret)
+// Runs one committed block against a caller-owned flag array. Chained execution
+// keeps that array live across every block in the run, so the four stores and
+// four masked reloads that used to bracket each call are paid once per chain.
+static bool gba_p4_thumb_jit_run_committed(gba_p4_thumb_jit_entry_t *entry,
+    u32 *flags, u32 *jit_ret)
 {
-  u32 flags[4] = {n_flag, z_flag, c_flag, v_flag};
   u32 executed = entry->fn(reg, flags);
   u32 executed_ops = executed & GBA_P4_THUMB_JIT_RET_OPS_MASK;
   u32 extra_cycles = (executed >> GBA_P4_THUMB_JIT_RET_EXTRA_SHIFT) &
@@ -2748,6 +2901,19 @@ static bool gba_p4_thumb_jit_execute_committed(gba_p4_thumb_jit_entry_t *entry,
     return gba_p4_thumb_jit_record_fail(entry, 7, 0, entry->extra_cycles,
         extra_cycles);
 
+  *jit_ret = executed;
+  return true;
+}
+
+static bool gba_p4_thumb_jit_execute_committed(gba_p4_thumb_jit_entry_t *entry,
+    u32 &n_flag, u32 &z_flag, u32 &c_flag, u32 &v_flag, u32 *jit_ret)
+{
+  u32 flags[4] = {n_flag, z_flag, c_flag, v_flag};
+  u32 executed = entry->op_count;
+
+  if(!gba_p4_thumb_jit_run_committed(entry, flags, &executed))
+    return false;
+
   n_flag = flags[0] & 1;
   z_flag = flags[1] & 1;
   c_flag = flags[2] & 1;
@@ -2763,35 +2929,73 @@ static bool gba_p4_thumb_jit_emit_store_flag(gba_p4_rv_emit_t *emit,
   return gba_p4_emit(emit, rv_sw(value_reg, RV_A1, flag_index * sizeof(u32)));
 }
 
-static bool gba_p4_thumb_jit_emit_nz(gba_p4_rv_emit_t *emit, u32 value_reg)
+static bool gba_p4_thumb_jit_emit_nz(gba_p4_rv_emit_t *emit, u32 value_reg,
+    u32 live)
 {
-  return gba_p4_emit(emit, rv_srli(RV_T3, value_reg, 31)) &&
-         gba_p4_thumb_jit_emit_store_flag(emit, 0, RV_T3) &&
-         gba_p4_emit(emit, rv_sltiu(RV_T3, value_reg, 1)) &&
-         gba_p4_thumb_jit_emit_store_flag(emit, 1, RV_T3);
+  if(live & GBA_JIT_FLAG_N)
+  {
+    if(!(gba_p4_emit(emit, rv_srli(RV_T3, value_reg, 31)) &&
+         gba_p4_thumb_jit_emit_store_flag(emit, 0, RV_T3)))
+      return false;
+  }
+
+  if(live & GBA_JIT_FLAG_Z)
+  {
+    if(!(gba_p4_emit(emit, rv_sltiu(RV_T3, value_reg, 1)) &&
+         gba_p4_thumb_jit_emit_store_flag(emit, 1, RV_T3)))
+      return false;
+  }
+
+  return true;
 }
 
-static bool gba_p4_thumb_jit_emit_add_flags(gba_p4_rv_emit_t *emit)
+// The operand and result registers are explicit so callers can compute straight
+// out of the block register cache instead of staging everything through
+// T0/T1/T2. Only T3/T4 are clobbered, which never collide with the cache's
+// A2-A7 or with the T0/T1/T2 scratch the emitters hand to src_reg().
+static bool gba_p4_thumb_jit_emit_add_flags(gba_p4_rv_emit_t *emit,
+    u32 lhs_reg, u32 rhs_reg, u32 res_reg, u32 live)
 {
-  return gba_p4_thumb_jit_emit_nz(emit, RV_T2) &&
-         gba_p4_emit(emit, rv_sltu(RV_T3, RV_T2, RV_T1)) &&
-         gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T3) &&
-         gba_p4_emit(emit, rv_xor(RV_T3, RV_T0, RV_T1)) &&
+  if(!gba_p4_thumb_jit_emit_nz(emit, res_reg, live))
+    return false;
+
+  if(live & GBA_JIT_FLAG_C)
+  {
+    if(!(gba_p4_emit(emit, rv_sltu(RV_T3, res_reg, rhs_reg)) &&
+         gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T3)))
+      return false;
+  }
+
+  if(!(live & GBA_JIT_FLAG_V))
+    return true;
+
+  return gba_p4_emit(emit, rv_xor(RV_T3, lhs_reg, rhs_reg)) &&
          gba_p4_emit(emit, rv_xori(RV_T3, RV_T3, -1)) &&
-         gba_p4_emit(emit, rv_xor(RV_T4, RV_T0, RV_T2)) &&
+         gba_p4_emit(emit, rv_xor(RV_T4, lhs_reg, res_reg)) &&
          gba_p4_emit(emit, rv_and(RV_T3, RV_T3, RV_T4)) &&
          gba_p4_emit(emit, rv_srli(RV_T3, RV_T3, 31)) &&
          gba_p4_thumb_jit_emit_store_flag(emit, 3, RV_T3);
 }
 
-static bool gba_p4_thumb_jit_emit_sub_flags(gba_p4_rv_emit_t *emit)
+static bool gba_p4_thumb_jit_emit_sub_flags(gba_p4_rv_emit_t *emit,
+    u32 lhs_reg, u32 rhs_reg, u32 res_reg, u32 live)
 {
-  return gba_p4_thumb_jit_emit_nz(emit, RV_T2) &&
-         gba_p4_emit(emit, rv_sltu(RV_T3, RV_T0, RV_T1)) &&
+  if(!gba_p4_thumb_jit_emit_nz(emit, res_reg, live))
+    return false;
+
+  if(live & GBA_JIT_FLAG_C)
+  {
+    if(!(gba_p4_emit(emit, rv_sltu(RV_T3, lhs_reg, rhs_reg)) &&
          gba_p4_emit(emit, rv_xori(RV_T3, RV_T3, 1)) &&
-         gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T3) &&
-         gba_p4_emit(emit, rv_xor(RV_T3, RV_T0, RV_T1)) &&
-         gba_p4_emit(emit, rv_xor(RV_T4, RV_T0, RV_T2)) &&
+         gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T3)))
+      return false;
+  }
+
+  if(!(live & GBA_JIT_FLAG_V))
+    return true;
+
+  return gba_p4_emit(emit, rv_xor(RV_T3, lhs_reg, rhs_reg)) &&
+         gba_p4_emit(emit, rv_xor(RV_T4, lhs_reg, res_reg)) &&
          gba_p4_emit(emit, rv_and(RV_T3, RV_T3, RV_T4)) &&
          gba_p4_emit(emit, rv_srli(RV_T3, RV_T3, 31)) &&
          gba_p4_thumb_jit_emit_store_flag(emit, 3, RV_T3);
@@ -2928,289 +3132,445 @@ static inline bool gba_p4_thumb_jit_store_reg(gba_p4_rv_emit_t *emit,
   return gba_p4_emit(emit, rv_sw(rv_reg, RV_A0, gba_reg * sizeof(u32)));
 }
 
-static bool gba_p4_thumb_jit_emit_low_op(gba_p4_rv_emit_t *emit, u32 opcode)
+// load_reg()/store_reg() always stage through a caller-chosen scratch, so every
+// cached operand costs an extra register-to-register copy in and another out.
+// The three helpers below hand the emitter the cache register itself and let the
+// arithmetic read and write it in place.
+
+// Resolves the register already holding `gba_reg`. Only an uncached or
+// non-cacheable register costs an instruction, and that one is the load the old
+// path emitted anyway.
+static inline bool gba_p4_thumb_jit_src_reg(gba_p4_rv_emit_t *emit,
+    u32 gba_reg, u32 scratch, u32 *out)
+{
+  if(gba_p4_thumb_jit_cacheable_reg(gba_reg))
+  {
+    int slot = gba_p4_thumb_jit_cache_alloc(emit, gba_reg, true);
+    if(slot < 0)
+      return false;
+    *out = gba_p4_thumb_jit_cache_rv_reg((u32)slot);
+    return true;
+  }
+
+  *out = scratch;
+  return gba_p4_emit(emit, rv_lw(scratch, RV_A0, gba_reg * sizeof(u32)));
+}
+
+// Picks where an op should compute its result. `*dest` is the register the value
+// has to end up in; `*result` is where it may be produced. They differ only when
+// writing the destination in place would clobber an operand that the flag or
+// carry code still has to read - name those in `keep_a`/`keep_b`, or pass
+// RV_ZERO when nothing needs preserving. Aliased cases fall back to the scratch
+// and pay one copy in dest_finish(), exactly what the old path always paid.
+static inline bool gba_p4_thumb_jit_dest_reg(gba_p4_rv_emit_t *emit,
+    u32 gba_reg, u32 scratch, u32 keep_a, u32 keep_b, u32 *dest, u32 *result)
+{
+  if(!gba_p4_thumb_jit_cacheable_reg(gba_reg))
+  {
+    *dest = scratch;
+    *result = scratch;
+    return true;
+  }
+
+  int slot = gba_p4_thumb_jit_cache_alloc(emit, gba_reg, false);
+  if(slot < 0)
+    return false;
+
+  emit->cache_dirty[slot] = 1;
+  *dest = gba_p4_thumb_jit_cache_rv_reg((u32)slot);
+  *result = (*dest == keep_a || *dest == keep_b) ? scratch : *dest;
+  return true;
+}
+
+// Must run after the flag emission that reads the operands, because the copy it
+// may emit is the one that overwrites an aliased operand register.
+static inline bool gba_p4_thumb_jit_dest_finish(gba_p4_rv_emit_t *emit,
+    u32 gba_reg, u32 dest, u32 result)
+{
+  if(!gba_p4_thumb_jit_cacheable_reg(gba_reg))
+    return gba_p4_emit(emit, rv_sw(result, RV_A0, gba_reg * sizeof(u32)));
+
+  return dest == result ||
+         gba_p4_emit(emit, rv_addi(dest, result, 0));
+}
+
+static bool gba_p4_thumb_jit_emit_low_op(gba_p4_rv_emit_t *emit, u32 opcode,
+    u32 live)
 {
   u32 top = (opcode >> 8) & 0xFF;
   u32 rd = opcode & 0x07;
   u32 rs = (opcode >> 3) & 0x07;
 
+  u32 src, lhs, rhs, dest, res;
+
   if(top < 0x18)
   {
     u32 offset = (opcode >> 6) & 0x1F;
     u32 shift_op = (opcode >> 11) & 0x03;
+    const bool want_c = (live & GBA_JIT_FLAG_C) != 0;
 
-    if(!gba_p4_thumb_jit_load_reg(emit, RV_T0, rs))
+    // Every carry sequence below reads the source before the result is written,
+    // so the result may share the source register unconditionally.
+    if(!(gba_p4_thumb_jit_src_reg(emit, rs, RV_T0, &src) &&
+         gba_p4_thumb_jit_dest_reg(emit, rd, RV_T2, RV_ZERO, RV_ZERO, &dest,
+             &res)))
       return false;
 
     switch(shift_op)
     {
       case 0x00:
-        if(!gba_p4_emit(emit, rv_slli(RV_T2, RV_T0, offset)))
-          return false;
-        if(offset)
+        if(offset && want_c)
         {
-          if(!(gba_p4_emit(emit, rv_srli(RV_T3, RV_T0, 32 - offset)) &&
+          if(!(gba_p4_emit(emit, rv_srli(RV_T3, src, 32 - offset)) &&
                gba_p4_emit(emit, rv_andi(RV_T3, RV_T3, 1)) &&
                gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T3)))
             return false;
         }
+        if(!gba_p4_emit(emit, rv_slli(res, src, offset)))
+          return false;
         break;
 
       case 0x01:
         if(offset == 0)
         {
-          if(!(gba_p4_emit(emit, rv_srli(RV_T3, RV_T0, 31)) &&
-               gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T3) &&
-               gba_p4_emit(emit, rv_addi(RV_T2, RV_ZERO, 0))))
+          /* LSR #0 means LSR #32: the result is zero and C is bit 31. */
+          if(want_c &&
+             !(gba_p4_emit(emit, rv_srli(RV_T3, src, 31)) &&
+               gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T3)))
+            return false;
+          if(!gba_p4_emit(emit, rv_addi(res, RV_ZERO, 0)))
             return false;
         }
-        else if(!(gba_p4_emit(emit, rv_srli(RV_T3, RV_T0, offset - 1)) &&
-                  gba_p4_emit(emit, rv_andi(RV_T3, RV_T3, 1)) &&
-                  gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T3) &&
-                  gba_p4_emit(emit, rv_srli(RV_T2, RV_T0, offset))))
-          return false;
+        else
+        {
+          if(want_c &&
+             !(gba_p4_emit(emit, rv_srli(RV_T3, src, offset - 1)) &&
+               gba_p4_emit(emit, rv_andi(RV_T3, RV_T3, 1)) &&
+               gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T3)))
+            return false;
+          if(!gba_p4_emit(emit, rv_srli(res, src, offset)))
+            return false;
+        }
         break;
 
       default:
         if(offset == 0)
         {
-          if(!(gba_p4_emit(emit, rv_srai(RV_T2, RV_T0, 31)) &&
-               gba_p4_emit(emit, rv_andi(RV_T3, RV_T2, 1)) &&
+          /* ASR #0 means ASR #32: every result bit is the sign bit, so C can
+             come from the result rather than a second read of the source. */
+          if(!gba_p4_emit(emit, rv_srai(res, src, 31)))
+            return false;
+          if(want_c &&
+             !(gba_p4_emit(emit, rv_andi(RV_T3, res, 1)) &&
                gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T3)))
             return false;
         }
-        else if(!(gba_p4_emit(emit, rv_srli(RV_T3, RV_T0, offset - 1)) &&
-                  gba_p4_emit(emit, rv_andi(RV_T3, RV_T3, 1)) &&
-                  gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T3) &&
-                  gba_p4_emit(emit, rv_srai(RV_T2, RV_T0, offset))))
-          return false;
+        else
+        {
+          if(want_c &&
+             !(gba_p4_emit(emit, rv_srli(RV_T3, src, offset - 1)) &&
+               gba_p4_emit(emit, rv_andi(RV_T3, RV_T3, 1)) &&
+               gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T3)))
+            return false;
+          if(!gba_p4_emit(emit, rv_srai(res, src, offset)))
+            return false;
+        }
         break;
     }
 
-    return gba_p4_thumb_jit_store_reg(emit, rd, RV_T2) &&
-           gba_p4_thumb_jit_emit_nz(emit, RV_T2);
+    return gba_p4_thumb_jit_emit_nz(emit, res, live) &&
+           gba_p4_thumb_jit_dest_finish(emit, rd, dest, res);
   }
 
   u32 rhs_field = (opcode >> 6) & 0x07;
   bool is_imm = (opcode & 0x0400) != 0;
   bool is_sub = (opcode & 0x0200) != 0;
 
-  if(!(gba_p4_thumb_jit_load_reg(emit, RV_T0, rs) &&
-       (is_imm ? gba_p4_emit(emit, rv_addi(RV_T1, RV_ZERO, rhs_field)) :
-                 gba_p4_thumb_jit_load_reg(emit, RV_T1, rhs_field))))
+  if(!gba_p4_thumb_jit_src_reg(emit, rs, RV_T0, &lhs))
+    return false;
+
+  if(is_imm)
+  {
+    rhs = RV_T1;
+    if(!gba_p4_emit(emit, rv_addi(RV_T1, RV_ZERO, rhs_field)))
+      return false;
+  }
+  else if(!gba_p4_thumb_jit_src_reg(emit, rhs_field, RV_T1, &rhs))
+    return false;
+
+  // The flag helpers re-read lhs and rhs only for C and V. With both dead all
+  // that survives is N/Z from the result, so the operands need not be kept.
+  const bool keep_operands = (live & (GBA_JIT_FLAG_C | GBA_JIT_FLAG_V)) != 0;
+  if(!gba_p4_thumb_jit_dest_reg(emit, rd, RV_T2,
+        keep_operands ? lhs : RV_ZERO, keep_operands ? rhs : RV_ZERO,
+        &dest, &res))
     return false;
 
   if(is_sub)
-    return gba_p4_emit(emit, rv_sub(RV_T2, RV_T0, RV_T1)) &&
-           gba_p4_thumb_jit_store_reg(emit, rd, RV_T2) &&
-           gba_p4_thumb_jit_emit_sub_flags(emit);
+    return gba_p4_emit(emit, rv_sub(res, lhs, rhs)) &&
+           gba_p4_thumb_jit_emit_sub_flags(emit, lhs, rhs, res, live) &&
+           gba_p4_thumb_jit_dest_finish(emit, rd, dest, res);
 
-  return gba_p4_emit(emit, rv_add(RV_T2, RV_T0, RV_T1)) &&
-         gba_p4_thumb_jit_store_reg(emit, rd, RV_T2) &&
-         gba_p4_thumb_jit_emit_add_flags(emit);
+  return gba_p4_emit(emit, rv_add(res, lhs, rhs)) &&
+         gba_p4_thumb_jit_emit_add_flags(emit, lhs, rhs, res, live) &&
+         gba_p4_thumb_jit_dest_finish(emit, rd, dest, res);
 }
 
-static bool gba_p4_thumb_jit_emit_imm_op(gba_p4_rv_emit_t *emit, u32 opcode)
+static bool gba_p4_thumb_jit_emit_imm_op(gba_p4_rv_emit_t *emit, u32 opcode,
+    u32 live)
 {
   u32 top = (opcode >> 8) & 0xFF;
   u32 rd = top & 0x07;
   u32 imm = opcode & 0xFF;
   u32 op = top >> 3;
 
+  u32 lhs, dest, res;
+
   if(op == 0x04)
   {
-    /* MOV r0..7, imm: writes N/Z only. */
-    int slot = gba_p4_thumb_jit_cache_alloc(emit, rd, false);
-    if(slot < 0)
+    /* MOV r0..7, imm: writes N/Z only, and both are constant here. */
+    if(!gba_p4_thumb_jit_dest_reg(emit, rd, RV_T2, RV_ZERO, RV_ZERO, &dest,
+          &res))
       return false;
 
-    u32 dst = gba_p4_thumb_jit_cache_rv_reg((u32)slot);
-    emit->cache_dirty[slot] = 1;
-    return gba_p4_emit(emit, rv_addi(dst, RV_ZERO, imm)) &&
-           gba_p4_emit(emit, rv_addi(RV_T3, RV_ZERO, 0)) &&
-           gba_p4_thumb_jit_emit_store_flag(emit, 0, RV_T3) &&
-           gba_p4_emit(emit, rv_addi(RV_T3, RV_ZERO, imm == 0)) &&
-           gba_p4_thumb_jit_emit_store_flag(emit, 1, RV_T3);
+    if(!gba_p4_emit(emit, rv_addi(res, RV_ZERO, imm)))
+      return false;
+
+    if((live & GBA_JIT_FLAG_N) &&
+       !(gba_p4_emit(emit, rv_addi(RV_T3, RV_ZERO, 0)) &&
+         gba_p4_thumb_jit_emit_store_flag(emit, 0, RV_T3)))
+      return false;
+
+    if((live & GBA_JIT_FLAG_Z) &&
+       !(gba_p4_emit(emit, rv_addi(RV_T3, RV_ZERO, imm == 0)) &&
+         gba_p4_thumb_jit_emit_store_flag(emit, 1, RV_T3)))
+      return false;
+
+    return gba_p4_thumb_jit_dest_finish(emit, rd, dest, res);
   }
 
-  if(!(gba_p4_thumb_jit_load_reg(emit, RV_T0, rd) &&
+  if(!(gba_p4_thumb_jit_src_reg(emit, rd, RV_T0, &lhs) &&
        gba_p4_emit(emit, rv_addi(RV_T1, RV_ZERO, imm))))
+    return false;
+
+  if(op == 0x05)
+  {
+    /* CMP r0..7, imm: flags only, no destination write. */
+    return gba_p4_emit(emit, rv_sub(RV_T2, lhs, RV_T1)) &&
+           gba_p4_thumb_jit_emit_sub_flags(emit, lhs, RV_T1, RV_T2, live);
+  }
+
+  const bool keep_operands = (live & (GBA_JIT_FLAG_C | GBA_JIT_FLAG_V)) != 0;
+  if(!gba_p4_thumb_jit_dest_reg(emit, rd, RV_T2,
+        keep_operands ? lhs : RV_ZERO, keep_operands ? RV_T1 : RV_ZERO,
+        &dest, &res))
     return false;
 
   if(op == 0x06)
   {
     /* ADD r0..7, imm */
-    if(!(gba_p4_emit(emit, rv_add(RV_T2, RV_T0, RV_T1)) &&
-         gba_p4_thumb_jit_store_reg(emit, rd, RV_T2) &&
-         gba_p4_thumb_jit_emit_add_flags(emit)))
-      return false;
-    return true;
+    return gba_p4_emit(emit, rv_add(res, lhs, RV_T1)) &&
+           gba_p4_thumb_jit_emit_add_flags(emit, lhs, RV_T1, res, live) &&
+           gba_p4_thumb_jit_dest_finish(emit, rd, dest, res);
   }
 
-  /* CMP/SUB r0..7, imm */
-  if(!(gba_p4_emit(emit, rv_sub(RV_T2, RV_T0, RV_T1)) &&
-       (op == 0x05 || gba_p4_thumb_jit_store_reg(emit, rd, RV_T2)) &&
-       gba_p4_thumb_jit_emit_sub_flags(emit)))
-    return false;
-
-  return true;
+  /* SUB r0..7, imm */
+  return gba_p4_emit(emit, rv_sub(res, lhs, RV_T1)) &&
+         gba_p4_thumb_jit_emit_sub_flags(emit, lhs, RV_T1, res, live) &&
+         gba_p4_thumb_jit_dest_finish(emit, rd, dest, res);
 }
 
-static bool gba_p4_thumb_jit_emit_alu42_op(gba_p4_rv_emit_t *emit, u32 opcode)
+static bool gba_p4_thumb_jit_emit_alu42_op(gba_p4_rv_emit_t *emit, u32 opcode,
+    u32 live)
 {
   u32 rd = opcode & 0x07;
   u32 rs = (opcode >> 3) & 0x07;
   u32 subop = (opcode >> 6) & 0x03;
+  u32 lhs, rhs, dest, res;
+  const bool keep_operands = (live & (GBA_JIT_FLAG_C | GBA_JIT_FLAG_V)) != 0;
 
-  if(!(gba_p4_thumb_jit_load_reg(emit, RV_T0, rd) &&
-       gba_p4_thumb_jit_load_reg(emit, RV_T1, rs)))
+  if(subop == 0x01)
+  {
+    /* NEG rd, rs: rd is written without being read, so x0 is the whole lhs. */
+    if(!(gba_p4_thumb_jit_src_reg(emit, rs, RV_T1, &rhs) &&
+         gba_p4_thumb_jit_dest_reg(emit, rd, RV_T2,
+             keep_operands ? rhs : RV_ZERO, RV_ZERO, &dest, &res)))
+      return false;
+
+    return gba_p4_emit(emit, rv_sub(res, RV_ZERO, rhs)) &&
+           gba_p4_thumb_jit_emit_sub_flags(emit, RV_ZERO, rhs, res, live) &&
+           gba_p4_thumb_jit_dest_finish(emit, rd, dest, res);
+  }
+
+  if(!(gba_p4_thumb_jit_src_reg(emit, rd, RV_T0, &lhs) &&
+       gba_p4_thumb_jit_src_reg(emit, rs, RV_T1, &rhs)))
     return false;
 
   switch(subop)
   {
     case 0x00:
       /* TST rd, rs */
-      return gba_p4_emit(emit, rv_and(RV_T2, RV_T0, RV_T1)) &&
-             gba_p4_thumb_jit_emit_nz(emit, RV_T2);
-
-    case 0x01:
-      /* NEG rd, rs */
-      return gba_p4_emit(emit, rv_addi(RV_T0, RV_ZERO, 0)) &&
-             gba_p4_emit(emit, rv_sub(RV_T2, RV_T0, RV_T1)) &&
-             gba_p4_thumb_jit_store_reg(emit, rd, RV_T2) &&
-             gba_p4_thumb_jit_emit_sub_flags(emit);
+      return gba_p4_emit(emit, rv_and(RV_T2, lhs, rhs)) &&
+             gba_p4_thumb_jit_emit_nz(emit, RV_T2, live);
 
     case 0x02:
       /* CMP rd, rs */
-      return gba_p4_emit(emit, rv_sub(RV_T2, RV_T0, RV_T1)) &&
-             gba_p4_thumb_jit_emit_sub_flags(emit);
+      return gba_p4_emit(emit, rv_sub(RV_T2, lhs, rhs)) &&
+             gba_p4_thumb_jit_emit_sub_flags(emit, lhs, rhs, RV_T2, live);
 
     default:
       /* CMN rd, rs */
-      return gba_p4_emit(emit, rv_add(RV_T2, RV_T0, RV_T1)) &&
-             gba_p4_thumb_jit_emit_add_flags(emit);
+      return gba_p4_emit(emit, rv_add(RV_T2, lhs, rhs)) &&
+             gba_p4_thumb_jit_emit_add_flags(emit, lhs, rhs, RV_T2, live);
   }
 }
 
-static bool gba_p4_thumb_jit_emit_alu40_logic_op(gba_p4_rv_emit_t *emit, u32 opcode)
+static bool gba_p4_thumb_jit_emit_alu40_logic_op(gba_p4_rv_emit_t *emit,
+    u32 opcode, u32 live)
 {
   u32 rd = opcode & 0x07;
   u32 rs = (opcode >> 3) & 0x07;
   u32 subop = (opcode >> 6) & 0x03;
+
+  u32 lhs, rhs, dest, res;
 
   if(subop > 0x01 && !GBA_P4_THUMB_JIT_ALU40_SHIFTS)
     return false;
 
-  if(!(gba_p4_thumb_jit_load_reg(emit, RV_T0, rd) &&
-       gba_p4_thumb_jit_load_reg(emit, RV_T1, rs)))
+  if(!(gba_p4_thumb_jit_src_reg(emit, rd, RV_T0, &lhs) &&
+       gba_p4_thumb_jit_src_reg(emit, rs, RV_T1, &rhs)))
     return false;
 
-  if(subop == 0x00)
+  if(subop < 0x02)
   {
-    if(!gba_p4_emit(emit, rv_and(RV_T2, RV_T0, RV_T1)))
-      return false;
-  }
-  else if(subop == 0x01)
-  {
-    if(!gba_p4_emit(emit, rv_xor(RV_T2, RV_T0, RV_T1)))
-      return false;
-  }
-
-  if(subop >= 0x02)
-  {
-    bool is_lsr = subop == 0x03;
-
-    /*
-     * Register shifts preserve C when shift count is zero. Emit branchless
-     * masks so the generated block remains safe for validation/reuse.
-     */
-    if(!(gba_p4_emit(emit, rv_sltu(RV_T3, RV_ZERO, RV_T1)) &&
-         gba_p4_emit(emit, rv_sub(RV_T3, RV_ZERO, RV_T3)) &&
-         gba_p4_emit(emit, rv_addi(RV_T4, RV_ZERO, 32)) &&
-         gba_p4_emit(emit, rv_sltu(RV_T4, RV_T1, RV_T4)) &&
-         gba_p4_emit(emit, rv_and(RV_T4, RV_T4, RV_T3)) &&
-         gba_p4_emit(emit, rv_sub(RV_T4, RV_ZERO, RV_T4)) &&
-         gba_p4_emit(emit, is_lsr ? rv_srl(RV_T2, RV_T0, RV_T1) :
-                                    rv_sll(RV_T2, RV_T0, RV_T1)) &&
-         gba_p4_emit(emit, rv_and(RV_T2, RV_T2, RV_T4)) &&
-         gba_p4_emit(emit, rv_xori(RV_T5, RV_T3, -1)) &&
-         gba_p4_emit(emit, rv_and(RV_T5, RV_T5, RV_T0)) &&
-         gba_p4_emit(emit, rv_or(RV_T2, RV_T2, RV_T5))))
+    // Only N/Z follow, and both read the result, so AND/EOR can land straight
+    // in the destination even when it is also an operand.
+    if(!gba_p4_thumb_jit_dest_reg(emit, rd, RV_T2, RV_ZERO, RV_ZERO, &dest,
+          &res))
       return false;
 
-    if(!gba_p4_thumb_jit_store_reg(emit, rd, RV_T2))
+    if(!gba_p4_emit(emit, subop == 0x00 ? rv_and(res, lhs, rhs) :
+                                          rv_xor(res, lhs, rhs)))
       return false;
 
-    if(is_lsr)
-    {
-      if(!(gba_p4_emit(emit, rv_addi(RV_T5, RV_T1, -1)) &&
-           gba_p4_emit(emit, rv_srl(RV_T5, RV_T0, RV_T5)) &&
-           gba_p4_emit(emit, rv_andi(RV_T5, RV_T5, 1)) &&
-           gba_p4_emit(emit, rv_and(RV_T5, RV_T5, RV_T4)) &&
-           gba_p4_emit(emit, rv_xori(RV_T6, RV_T1, 32)) &&
-           gba_p4_emit(emit, rv_sltiu(RV_T6, RV_T6, 1)) &&
-           gba_p4_emit(emit, rv_srli(RV_T4, RV_T0, 31)) &&
-           gba_p4_emit(emit, rv_and(RV_T6, RV_T6, RV_T4))))
-        return false;
-    }
-    else
-    {
-      if(!(gba_p4_emit(emit, rv_addi(RV_T5, RV_ZERO, 32)) &&
-           gba_p4_emit(emit, rv_sub(RV_T5, RV_T5, RV_T1)) &&
-           gba_p4_emit(emit, rv_srl(RV_T5, RV_T0, RV_T5)) &&
-           gba_p4_emit(emit, rv_andi(RV_T5, RV_T5, 1)) &&
-           gba_p4_emit(emit, rv_and(RV_T5, RV_T5, RV_T4)) &&
-           gba_p4_emit(emit, rv_xori(RV_T6, RV_T1, 32)) &&
-           gba_p4_emit(emit, rv_sltiu(RV_T6, RV_T6, 1)) &&
-           gba_p4_emit(emit, rv_andi(RV_T4, RV_T0, 1)) &&
-           gba_p4_emit(emit, rv_and(RV_T6, RV_T6, RV_T4))))
-        return false;
-    }
-
-    return gba_p4_emit(emit, rv_or(RV_T5, RV_T5, RV_T6)) &&
-           gba_p4_emit(emit, rv_lw(RV_T6, RV_A1, 2 * sizeof(u32))) &&
-           gba_p4_emit(emit, rv_xori(RV_T4, RV_T3, -1)) &&
-           gba_p4_emit(emit, rv_and(RV_T6, RV_T6, RV_T4)) &&
-           gba_p4_emit(emit, rv_and(RV_T5, RV_T5, RV_T3)) &&
-           gba_p4_emit(emit, rv_or(RV_T5, RV_T5, RV_T6)) &&
-           gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T5) &&
-           gba_p4_thumb_jit_emit_nz(emit, RV_T2);
+    return gba_p4_thumb_jit_emit_nz(emit, res, live) &&
+           gba_p4_thumb_jit_dest_finish(emit, rd, dest, res);
   }
 
-  return gba_p4_thumb_jit_store_reg(emit, rd, RV_T2) &&
-         gba_p4_thumb_jit_emit_nz(emit, RV_T2);
+  bool is_lsr = subop == 0x03;
+  const bool want_c = (live & GBA_JIT_FLAG_C) != 0;
+
+  // The masking that builds the result reads lhs after the result register is
+  // written, so lhs always has to survive. rhs only outlives the result inside
+  // the carry sequence, which a dead C skips entirely.
+  if(!gba_p4_thumb_jit_dest_reg(emit, rd, RV_T2, lhs,
+        want_c ? rhs : RV_ZERO, &dest, &res))
+    return false;
+
+  /*
+   * Register shifts preserve C when shift count is zero. Emit branchless
+   * masks so the generated block remains safe for validation/reuse.
+   */
+  if(!(gba_p4_emit(emit, rv_sltu(RV_T3, RV_ZERO, rhs)) &&
+       gba_p4_emit(emit, rv_sub(RV_T3, RV_ZERO, RV_T3)) &&
+       gba_p4_emit(emit, rv_addi(RV_T4, RV_ZERO, 32)) &&
+       gba_p4_emit(emit, rv_sltu(RV_T4, rhs, RV_T4)) &&
+       gba_p4_emit(emit, rv_and(RV_T4, RV_T4, RV_T3)) &&
+       gba_p4_emit(emit, rv_sub(RV_T4, RV_ZERO, RV_T4)) &&
+       gba_p4_emit(emit, is_lsr ? rv_srl(res, lhs, rhs) :
+                                  rv_sll(res, lhs, rhs)) &&
+       gba_p4_emit(emit, rv_and(res, res, RV_T4)) &&
+       gba_p4_emit(emit, rv_xori(RV_T5, RV_T3, -1)) &&
+       gba_p4_emit(emit, rv_and(RV_T5, RV_T5, lhs)) &&
+       gba_p4_emit(emit, rv_or(res, res, RV_T5))))
+    return false;
+
+  // A dead C skips the whole carry sequence, including the load of the old C
+  // that the zero-distance case would otherwise have to preserve.
+  if(!want_c)
+    return gba_p4_thumb_jit_emit_nz(emit, res, live) &&
+           gba_p4_thumb_jit_dest_finish(emit, rd, dest, res);
+
+  if(is_lsr)
+  {
+    if(!(gba_p4_emit(emit, rv_addi(RV_T5, rhs, -1)) &&
+         gba_p4_emit(emit, rv_srl(RV_T5, lhs, RV_T5)) &&
+         gba_p4_emit(emit, rv_andi(RV_T5, RV_T5, 1)) &&
+         gba_p4_emit(emit, rv_and(RV_T5, RV_T5, RV_T4)) &&
+         gba_p4_emit(emit, rv_xori(RV_T6, rhs, 32)) &&
+         gba_p4_emit(emit, rv_sltiu(RV_T6, RV_T6, 1)) &&
+         gba_p4_emit(emit, rv_srli(RV_T4, lhs, 31)) &&
+         gba_p4_emit(emit, rv_and(RV_T6, RV_T6, RV_T4))))
+      return false;
+  }
+  else
+  {
+    if(!(gba_p4_emit(emit, rv_addi(RV_T5, RV_ZERO, 32)) &&
+         gba_p4_emit(emit, rv_sub(RV_T5, RV_T5, rhs)) &&
+         gba_p4_emit(emit, rv_srl(RV_T5, lhs, RV_T5)) &&
+         gba_p4_emit(emit, rv_andi(RV_T5, RV_T5, 1)) &&
+         gba_p4_emit(emit, rv_and(RV_T5, RV_T5, RV_T4)) &&
+         gba_p4_emit(emit, rv_xori(RV_T6, rhs, 32)) &&
+         gba_p4_emit(emit, rv_sltiu(RV_T6, RV_T6, 1)) &&
+         gba_p4_emit(emit, rv_andi(RV_T4, lhs, 1)) &&
+         gba_p4_emit(emit, rv_and(RV_T6, RV_T6, RV_T4))))
+      return false;
+  }
+
+  return gba_p4_emit(emit, rv_or(RV_T5, RV_T5, RV_T6)) &&
+         gba_p4_emit(emit, rv_lw(RV_T6, RV_A1, 2 * sizeof(u32))) &&
+         gba_p4_emit(emit, rv_xori(RV_T4, RV_T3, -1)) &&
+         gba_p4_emit(emit, rv_and(RV_T6, RV_T6, RV_T4)) &&
+         gba_p4_emit(emit, rv_and(RV_T5, RV_T5, RV_T3)) &&
+         gba_p4_emit(emit, rv_or(RV_T5, RV_T5, RV_T6)) &&
+         gba_p4_thumb_jit_emit_store_flag(emit, 2, RV_T5) &&
+         gba_p4_thumb_jit_emit_nz(emit, res, live) &&
+         gba_p4_thumb_jit_dest_finish(emit, rd, dest, res);
 }
 
-static bool gba_p4_thumb_jit_emit_alu43_logic_op(gba_p4_rv_emit_t *emit, u32 opcode)
+static bool gba_p4_thumb_jit_emit_alu43_logic_op(gba_p4_rv_emit_t *emit,
+    u32 opcode, u32 live)
 {
   u32 rd = opcode & 0x07;
   u32 rs = (opcode >> 3) & 0x07;
   u32 subop = (opcode >> 6) & 0x03;
 
-  if(!(gba_p4_thumb_jit_load_reg(emit, RV_T0, rd) &&
-       gba_p4_thumb_jit_load_reg(emit, RV_T1, rs)))
+  u32 lhs = RV_ZERO, rhs, dest, res;
+
+  // MVN ignores rd's old value, so only the other three pay for reading it.
+  if(subop != 0x03 && !gba_p4_thumb_jit_src_reg(emit, rd, RV_T0, &lhs))
+    return false;
+
+  if(!gba_p4_thumb_jit_src_reg(emit, rs, RV_T1, &rhs))
+    return false;
+
+  // Every form here sets N/Z from the result alone, so the destination is free
+  // to be one of the operands.
+  if(!gba_p4_thumb_jit_dest_reg(emit, rd, RV_T2, RV_ZERO, RV_ZERO, &dest, &res))
     return false;
 
   switch(subop)
   {
     case 0x00:
-      if(!gba_p4_emit(emit, rv_or(RV_T2, RV_T0, RV_T1)))
+      if(!gba_p4_emit(emit, rv_or(res, lhs, rhs)))
         return false;
       break;
 
     case 0x01:
-      if(!gba_p4_emit(emit, rv_mul(RV_T2, RV_T0, RV_T1)))
+      if(!gba_p4_emit(emit, rv_mul(res, lhs, rhs)))
         return false;
       break;
 
     case 0x02:
-      if(!(gba_p4_emit(emit, rv_xori(RV_T1, RV_T1, -1)) &&
-           gba_p4_emit(emit, rv_and(RV_T2, RV_T0, RV_T1))))
+      // The inverted operand goes to a scratch: rhs may now be a live cache
+      // register rather than a private copy.
+      if(!(gba_p4_emit(emit, rv_xori(RV_T3, rhs, -1)) &&
+           gba_p4_emit(emit, rv_and(res, lhs, RV_T3))))
         return false;
       break;
 
     case 0x03:
-      if(!gba_p4_emit(emit, rv_xori(RV_T2, RV_T1, -1)))
+      if(!gba_p4_emit(emit, rv_xori(res, rhs, -1)))
         return false;
       break;
 
@@ -3218,8 +3578,8 @@ static bool gba_p4_thumb_jit_emit_alu43_logic_op(gba_p4_rv_emit_t *emit, u32 opc
       return false;
   }
 
-  return gba_p4_thumb_jit_store_reg(emit, rd, RV_T2) &&
-         gba_p4_thumb_jit_emit_nz(emit, RV_T2);
+  return gba_p4_thumb_jit_emit_nz(emit, res, live) &&
+         gba_p4_thumb_jit_dest_finish(emit, rd, dest, res);
 }
 
 static bool gba_p4_thumb_jit_load_hireg_value(gba_p4_rv_emit_t *emit,
@@ -3279,7 +3639,7 @@ static bool gba_p4_thumb_jit_emit_bx_op(gba_p4_rv_emit_t *emit,
 }
 
 static bool gba_p4_thumb_jit_emit_hireg_alu_op(gba_p4_rv_emit_t *emit,
-    u32 opcode, u32 pc)
+    u32 opcode, u32 pc, u32 live)
 {
   u32 top = (opcode >> 8) & 0xFF;
   u32 rs = (opcode >> 3) & 0x0F;
@@ -3299,7 +3659,7 @@ static bool gba_p4_thumb_jit_emit_hireg_alu_op(gba_p4_rv_emit_t *emit,
   }
 
   return gba_p4_emit(emit, rv_sub(RV_T2, RV_T0, RV_T1)) &&
-         gba_p4_thumb_jit_emit_sub_flags(emit);
+         gba_p4_thumb_jit_emit_sub_flags(emit, RV_T0, RV_T1, RV_T2, live);
 }
 
 static bool gba_p4_thumb_jit_emit_pcldr_op(gba_p4_rv_emit_t *emit,
@@ -3913,27 +4273,27 @@ static bool gba_p4_thumb_jit_emit_uncond_branch_op(gba_p4_rv_emit_t *emit,
 }
 
 static bool gba_p4_thumb_jit_emit_op(gba_p4_rv_emit_t *emit, u32 opcode,
-    u32 pc, u32 op_index, u32 specialized_region)
+    u32 pc, u32 op_index, u32 specialized_region, u32 live)
 {
   u32 top = (opcode >> 8) & 0xFF;
 
   if(top <= 0x1F)
-    return gba_p4_thumb_jit_emit_low_op(emit, opcode);
+    return gba_p4_thumb_jit_emit_low_op(emit, opcode, live);
 
   if(top >= 0x20 && top <= 0x3F)
-    return gba_p4_thumb_jit_emit_imm_op(emit, opcode);
+    return gba_p4_thumb_jit_emit_imm_op(emit, opcode, live);
 
   if(GBA_P4_THUMB_JIT_ALU40_LOGIC && top == 0x40)
-    return gba_p4_thumb_jit_emit_alu40_logic_op(emit, opcode);
+    return gba_p4_thumb_jit_emit_alu40_logic_op(emit, opcode, live);
 
   if(GBA_P4_THUMB_JIT_ALU42 && top == 0x42)
-    return gba_p4_thumb_jit_emit_alu42_op(emit, opcode);
+    return gba_p4_thumb_jit_emit_alu42_op(emit, opcode, live);
 
   if(GBA_P4_THUMB_JIT_ALU43_LOGIC && top == 0x43)
-    return gba_p4_thumb_jit_emit_alu43_logic_op(emit, opcode);
+    return gba_p4_thumb_jit_emit_alu43_logic_op(emit, opcode, live);
 
   if(GBA_P4_THUMB_JIT_HIREG_ALU && (top == 0x44 || top == 0x45))
-    return gba_p4_thumb_jit_emit_hireg_alu_op(emit, opcode, pc);
+    return gba_p4_thumb_jit_emit_hireg_alu_op(emit, opcode, pc, live);
 
   if(GBA_P4_THUMB_JIT_HIREG_MOV && top == 0x46)
     return gba_p4_thumb_jit_emit_hireg_mov_op(emit, opcode, pc);
@@ -3989,7 +4349,10 @@ static bool gba_p4_thumb_jit_emit_block(gba_p4_rv_emit_t *emit, u32 pc,
     const u16 *opcodes, u32 op_count, bool terminal, bool pc_write,
     const u8 *word_regions, bool *can_bail)
 {
+  u8 live_out[GBA_P4_THUMB_JIT_MAX_OPS];
+
   *can_bail = false;
+  gba_p4_thumb_jit_flag_liveness(opcodes, op_count, live_out);
   gba_p4_thumb_jit_cache_init(emit);
   for(u32 i = 0; i < op_count; i++)
   {
@@ -3998,7 +4361,7 @@ static bool gba_p4_thumb_jit_emit_block(gba_p4_rv_emit_t *emit, u32 pc,
       *can_bail = true;
 
     if(!gba_p4_thumb_jit_emit_op(emit, opcodes[i], pc + i * 2, i,
-          word_regions ? word_regions[i] : 0))
+          word_regions ? word_regions[i] : 0, live_out[i]))
       return false;
   }
 
@@ -4413,7 +4776,8 @@ static inline int gba_p4_thumb_jit_try_hot(u8 *pc_address_block,
     return 0;
 
   u32 pc = reg[REG_PC] & ~1U;
-  if(!gba_p4_thumb_jit_region_allowed(pc >> 24))
+  const u32 region = pc >> 24;
+  if(!gba_p4_thumb_jit_region_allowed(region))
     return 0;
 
   gba_p4_thumb_jit_entry_t *entry = gba_p4_thumb_jit_front_lookup(pc);
@@ -4424,37 +4788,94 @@ static inline int gba_p4_thumb_jit_try_hot(u8 *pc_address_block,
   // Trusted front-cache entries were validated against immutable Game Pak ROM
   // and point into the fixed executable arena. Execute them without routing
   // through the discovery, allocation, matching, and trust checks in try().
-  gba_thumb_jit_attempts++;
-  gba_thumb_jit_hits++;
-  if(gba_p4_thumb_jit_arena_exhausted)
+  //
+  // Blocks average around five guest ops, so returning to the interpreter after
+  // each one made the fixed dispatch cost - flag spill and reload, register
+  // cache reload, loop bookkeeping - comparable to the block body itself. Chain
+  // straight into the next block while it stays cheap and safe to do so.
+  u32 flags[4] = {n_flag, z_flag, c_flag, v_flag};
+  const u32 seq_cycles = ws_cyc_seq[region][0];
+  u32 total_ops = 0;
+  u32 total_extra = 0;
+
+  for(;;)
   {
-    gba_p4_thumb_jit_exhausted_hits++;
-    gba_p4_thumb_jit_probe_suspend = 0;
+    gba_thumb_jit_attempts++;
+    gba_thumb_jit_hits++;
+    if(gba_p4_thumb_jit_arena_exhausted)
+    {
+      gba_p4_thumb_jit_exhausted_hits++;
+      gba_p4_thumb_jit_probe_suspend = 0;
+    }
+
+    u32 block_pc = pc;
+    u32 jit_ret = entry->op_count;
+    bool ok = gba_p4_thumb_jit_run_committed(entry, flags, &jit_ret);
+    u32 executed_ops = jit_ret & GBA_P4_THUMB_JIT_RET_OPS_MASK;
+
+    if(ok && executed_ops < entry->op_count && executed_ops < 16 &&
+       (entry->region_guard_mask & (u16)(1U << executed_ops)))
+      gba_thumb_jit_region_guard_bails++;
+
+    u32 expected_pc = block_pc + executed_ops * 2;
+    if(ok && reg[REG_PC] != expected_pc)
+      ok = gba_p4_thumb_jit_record_fail(entry, 0x80, executed_ops,
+          expected_pc, reg[REG_PC]);
+
+    if(!ok)
+    {
+      memset(entry, 0, sizeof(*entry));
+      gba_p4_thumb_jit_mark_rejected(block_pc, pc_address_block);
+      gba_thumb_jit_validate_failures++;
+      // Blocks that already retired in this chain stay retired; only a failure
+      // on the very first one leaves the interpreter its original entry state.
+      if(total_ops == 0)
+        return 0;
+      break;
+    }
+
+    total_ops += executed_ops;
+    total_extra += (jit_ret >> GBA_P4_THUMB_JIT_RET_EXTRA_SHIFT) &
+        GBA_P4_THUMB_JIT_RET_EXTRA_MASK;
+    // Must not spill past its field and into the ARM-switch bit.
+    if(total_extra > GBA_P4_THUMB_JIT_RET_EXTRA_MASK)
+      total_extra = GBA_P4_THUMB_JIT_RET_EXTRA_MASK;
+
+    // A short block bailed out of a WRAM access; the interpreter owns the
+    // instruction it parked on.
+    if(executed_ops != entry->op_count)
+      break;
+
+    if(total_ops >= GBA_P4_THUMB_JIT_CHAIN_MAX_OPS)
+      break;
+
+    // Leave the slice with room to spare rather than overrunning it, and keep
+    // every chained block inside one region so the caller's single cycle
+    // expression stays exact.
+    if(cycles_remaining - (s32)(seq_cycles * total_ops) < 32)
+      break;
+
+    pc = reg[REG_PC] & ~1U;
+    if((pc >> 24) != region || pc == idle_loop_target_pc)
+      break;
+
+    entry = gba_p4_thumb_jit_front_lookup(pc);
+    if(!entry || entry->validated < GBA_P4_THUMB_JIT_TRUST_VALIDATIONS)
+      break;
   }
 
-  u32 jit_ret = entry->op_count;
-  bool ok = gba_p4_thumb_jit_execute_committed(entry, n_flag, z_flag, c_flag,
-      v_flag, &jit_ret);
-  u32 executed_ops = jit_ret & GBA_P4_THUMB_JIT_RET_OPS_MASK;
-  if(ok && executed_ops < entry->op_count && executed_ops < 16 &&
-     (entry->region_guard_mask & (u16)(1U << executed_ops)))
-    gba_thumb_jit_region_guard_bails++;
+  n_flag = flags[0] & 1;
+  z_flag = flags[1] & 1;
+  c_flag = flags[2] & 1;
+  v_flag = flags[3] & 1;
 
-  u32 expected_pc = pc + executed_ops * 2;
-  if(ok && reg[REG_PC] != expected_pc)
-    ok = gba_p4_thumb_jit_record_fail(entry, 0x80, executed_ops,
-        expected_pc, reg[REG_PC]);
-
-  if(!ok)
-  {
-    memset(entry, 0, sizeof(*entry));
-    gba_p4_thumb_jit_mark_rejected(pc, pc_address_block);
-    gba_thumb_jit_validate_failures++;
-    return 0;
-  }
-
-  gba_thumb_jit_ops += executed_ops;
-  return (int)jit_ret;
+  // Unconditional: one increment per chain, not per op. jit_ops/chain_runs is
+  // the average ops per interpreter round trip, and hits/chain_runs the average
+  // blocks per chain - the two numbers this change exists to move.
+  gba_thumb_jit_ops += total_ops;
+  gba_thumb_jit_chain_runs++;
+  return (int)(total_ops |
+      (total_extra << GBA_P4_THUMB_JIT_RET_EXTRA_SHIFT));
 }
 #else
 #define GBA_P4_THUMB_JIT_RET_OPS_MASK 0xFFFFU

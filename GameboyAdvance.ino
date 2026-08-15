@@ -1036,6 +1036,18 @@ static void gbaRunBootSession() {
             const uint32_t jitAttempts = coreStats.jit_attempts - modeStart.jit_attempts;
             const uint32_t jitCompiles = coreStats.jit_compiles - modeStart.jit_compiles;
             const uint32_t jitOps = coreStats.jit_ops - modeStart.jit_ops;
+            // Per-window compiles fall to zero once the arena is full, so the
+            // cumulative count and the arena bytes it produced are what make
+            // average block size comparable between builds.
+            const uint32_t jitChains = coreStats.jit_chain_runs -
+                modeStart.jit_chain_runs;
+            // Ops and blocks retired per interpreter round trip. Before block
+            // chaining both were fixed at one block's worth.
+            const uint32_t jitChainOps = jitChains ? jitOps / jitChains : 0;
+            const uint32_t jitChainBlocks = jitChains ? jitHits / jitChains : 0;
+            const uint32_t jitCompilesTotal = coreStats.jit_compiles;
+            const uint32_t jitBytesPerBlock = jitCompilesTotal
+                ? coreStats.jit_used_bytes / jitCompilesTotal : 0;
             const uint32_t jitProbes = coreStats.jit_adapt_probes -
                 modeStart.jit_adapt_probes;
             const uint32_t jitReuses = coreStats.jit_reuses - modeStart.jit_reuses;
@@ -1257,7 +1269,7 @@ static void gbaRunBootSession() {
             const uint64_t avgEventUs = perfFrames ? eventUs / perfFrames : 0;
             const uint64_t avgCpuUs = perfFrames && coreTimeUs > updateUs
                 ? (coreTimeUs - updateUs) / perfFrames : 0;
-            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/event/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu upd=arm/thumb/halt:%lu/%lu/%lu fast=%lu/%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu jitwork=try/build/probe/reuse/wait/reject/guard:%lu/%lu/%lu/%lu/%lu/%lu/%lu jitshape=short/top/count:%lu/%02lx/%lu jitspec=load/store/byte/bail:%lu/%lu/%lu/%lu batch=%lu/%lu pre=hit/miss/ops/build/req/drop:%lu/%lu/%lu/%lu/%lu/%lu predrop=q/set/dup:%lu/%lu/%lu prechurn=evict/stall:%lu/%lu preprobe=1/2/3/4/m:%lu/%lu/%lu/%lu/%lu preocc=now/cap/high:%lu/%lu/%lu rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
+            Serial.printf("[gba perf] scale=%dx skip=%d emu=%lu.%lu drawn=%lu.%lu core=%lluus drawcore=%lluus skipcore=%lluus corepart=cpu/event/video/sound:%llu/%llu/%llu/%lluus audio=%lluus blit=%lluus front=key/save/pace/other:%llu/%llu/%llu/%lluus worker=touch:%lluus cpumode=%lu upd=arm/thumb/halt:%lu/%lu/%lu fast=%lu/%lu jit=%lu/%luK hit/miss=%lu/%lu ops=%lu jitwork=try/build/probe/reuse/wait/reject/guard:%lu/%lu/%lu/%lu/%lu/%lu/%lu jitshape=short/top/count:%lu/%02lx/%lu jitsize=blocks/bytes:%lu/%lu jitchain=runs/ops/blk:%lu/%lu/%lu jitval=pass/fail:%lu/%lu jitfail=reason/op/idx/top:%02lx/%04lx/%lu/%02lx:%lu jitspec=load/store/byte/bail:%lu/%lu/%lu/%lu batch=%lu/%lu pre=hit/miss/ops/build/req/drop:%lu/%lu/%lu/%lu/%lu/%lu predrop=q/set/dup:%lu/%lu/%lu prechurn=evict/stall:%lu/%lu preprobe=1/2/3/4/m:%lu/%lu/%lu/%lu/%lu preocc=now/cap/high:%lu/%lu/%lu rom=%lu+%lu pace_resync=%lu cpu=%luMHz\n",
                           gbaScale,
                           gbaFrameSkip,
                           static_cast<unsigned long>(emuFps10 / 10),
@@ -1300,6 +1312,20 @@ static void gbaRunBootSession() {
                                modeStart.jit_short_blocks),
                            static_cast<unsigned long>(coreStats.jit_top_break),
                            static_cast<unsigned long>(coreStats.jit_top_break_count),
+                           static_cast<unsigned long>(jitCompilesTotal),
+                           static_cast<unsigned long>(jitBytesPerBlock),
+                           static_cast<unsigned long>(jitChains),
+                           static_cast<unsigned long>(jitChainOps),
+                           static_cast<unsigned long>(jitChainBlocks),
+                           static_cast<unsigned long>(coreStats.jit_validate_passes -
+                               modeStart.jit_validate_passes),
+                           static_cast<unsigned long>(coreStats.jit_validate_failures -
+                               modeStart.jit_validate_failures),
+                           static_cast<unsigned long>(coreStats.jit_fail_reason),
+                           static_cast<unsigned long>(coreStats.jit_fail_opcode),
+                           static_cast<unsigned long>(coreStats.jit_fail_index),
+                           static_cast<unsigned long>(coreStats.jit_top_fail),
+                           static_cast<unsigned long>(coreStats.jit_top_fail_count),
                            static_cast<unsigned long>(jitWordSpecialized),
                            static_cast<unsigned long>(jitWordStoreSpecialized),
                            static_cast<unsigned long>(jitByteStoreSpecialized),
