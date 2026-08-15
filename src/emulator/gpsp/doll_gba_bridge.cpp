@@ -22,7 +22,13 @@ extern timer_type timer[4];
 
 namespace {
 uint16_t currentButtons = 0;
-constexpr size_t kEwramInternalReserve = 128 * 1024;
+// Headroom left in internal L2 after EWRAM claims its 256 KB, for the JIT
+// arena, audio DMA, and host task stacks. EWRAM is now requested before the
+// other large regions, so this is the only thing bounding how much it takes.
+#ifndef GBA_EWRAM_INTERNAL_RESERVE_KB
+#define GBA_EWRAM_INTERNAL_RESERVE_KB 64
+#endif
+constexpr size_t kEwramInternalReserve = GBA_EWRAM_INTERNAL_RESERVE_KB * 1024;
 #if DOLL_GBA_VERBOSE_DIAGNOSTICS
 uint16_t previousDebugButtons = 0;
 uint32_t transitionDebugFrames = 0;
@@ -244,9 +250,16 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
     return false;
   }
 
-  // Keep the CPU's working RAM, page map, and emulated VRAM in L2. Drawn frames
-  // touch VRAM far more consistently than cold emulator data, so protect it
-  // before allocating the expanded batch predecode cache.
+  // EWRAM goes first. It is the largest single region and the only one needing
+  // 256 KB contiguous, so allocating it last left it choosing from a fragmented
+  // 81 KB and it always landed in PSRAM. Measured cost of that was roughly 276
+  // host cycles per guest instruction against 20-50 for a threaded interpreter,
+  // which dwarfs what the drawn-frame VRAM traffic below is worth. Anything that
+  // no longer fits internally falls back to PSRAM on its own.
+  gbsp_memory->p_ewram = static_cast<u8*>(allocEwram());
+
+  // Keep the CPU's working RAM, page map, and emulated VRAM in L2 with whatever
+  // EWRAM left behind.
   gbsp_memory->p_iwram = static_cast<u8*>(allocRegion(GBA_IWRAM_SIZE, true));
   // The 32 KB read map is consulted by instruction fetches and most emulated
   // loads. Reserve it before the JIT and VRAM so normal operation keeps this
@@ -262,9 +275,6 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
   (void)gba_thumb_predecode_init();
   gba_p4_thumb_jit_preinit();
 
-  // The no-dynarec build needs only the physical 256 KB EWRAM image. Prefer L2
-  // when it fits without consuming the reserve needed by audio and host tasks.
-  gbsp_memory->p_ewram = static_cast<u8*>(allocEwram());
   gbsp_memory->p_bios_rom = static_cast<u8*>(allocRegion(GBA_BIOS_ROM_SIZE, false));
   gbsp_memory->p_gamepak_backup = static_cast<u8*>(allocRegion(GBA_GAMEPAK_BACKUP_SIZE, false));
   if (!gbsp_memory->p_iwram || !gbsp_memory->p_memory_map_read ||
