@@ -1510,6 +1510,14 @@ static inline bool gba_p4_thumb_jit_terminal_opcode(u32 opcode)
          (top >= 0xF8 && top <= 0xFF);
 }
 
+// Branches a block may end on. BL pairs and BX are excluded: they write LR or
+// switch instruction set, and their emitters have never been exercised.
+static inline bool gba_p4_thumb_jit_chain_terminal_opcode(u32 opcode)
+{
+  u32 top = (opcode >> 8) & 0xFF;
+  return (top >= 0xD0 && top <= 0xDD) || (top >= 0xE0 && top <= 0xE7);
+}
+
 static inline bool gba_p4_thumb_jit_pc_write_opcode(u32 opcode)
 {
   u32 top = (opcode >> 8) & 0xFF;
@@ -1779,6 +1787,9 @@ static void gba_p4_thumb_jit_flag_effects(u32 opcode, u32 live_out,
     return;
   }
 
+  // A block's trailing branch writes no flags; the conditional forms read them.
+  // Claiming all four costs nothing, because this is always the last op and the
+  // block exit needs every flag correct regardless.
   *reads = GBA_JIT_FLAG_ALL;
 }
 
@@ -1856,7 +1867,16 @@ static u32 gba_p4_thumb_jit_collect(u32 pc, u8 *pc_address_block, u16 *opcodes)
   {
     u32 opcode = readaddress16(pc_address_block, offset);
     if(gba_p4_thumb_jit_control_flow_opcode(opcode))
+    {
+      // Absorb the branch instead of stopping in front of it. That lengthens
+      // the block, and more importantly leaves PC on the branch target - which
+      // is itself a block start - so a chained run can find the next entry in
+      // the front cache. Stopping short left PC on the branch, an address that
+      // is never compiled, which is why chains averaged 1.3 blocks.
+      if(gba_p4_thumb_jit_chain_terminal_opcode(opcode))
+        opcodes[count++] = (u16)opcode;
       break;
+    }
     if(!gba_p4_thumb_jit_supported_opcode(opcode))
       break;
     opcodes[count++] = (u16)opcode;
@@ -4697,8 +4717,12 @@ static inline int gba_p4_thumb_jit_try(u8 *pc_address_block, s32 cycles_remainin
   if(ok && executed_ops < entry->op_count && executed_ops < 16 &&
      (entry->region_guard_mask & (u16)(1U << executed_ops)))
     gba_thumb_jit_region_guard_bails++;
+  // See the matching note in try_hot(): a branch-terminated block chooses its
+  // own exit PC.
+  const bool branch_exit = entry->extra_cycles &&
+      executed_ops == entry->op_count;
   u32 expected_pc = pc + executed_ops * 2;
-  if(ok && reg[REG_PC] != expected_pc)
+  if(ok && !branch_exit && reg[REG_PC] != expected_pc)
     ok = gba_p4_thumb_jit_record_fail(entry, 0x80, executed_ops,
         expected_pc, reg[REG_PC]);
 
@@ -4817,8 +4841,13 @@ static inline int gba_p4_thumb_jit_try_hot(u8 *pc_address_block,
        (entry->region_guard_mask & (u16)(1U << executed_ops)))
       gba_thumb_jit_region_guard_bails++;
 
+    // A block ending on its own branch sets PC from that branch, so the
+    // sequential prediction only holds when no branch ran - which also covers
+    // a WRAM access that bailed before reaching it.
+    const bool branch_exit = entry->extra_cycles &&
+        executed_ops == entry->op_count;
     u32 expected_pc = block_pc + executed_ops * 2;
-    if(ok && reg[REG_PC] != expected_pc)
+    if(ok && !branch_exit && reg[REG_PC] != expected_pc)
       ok = gba_p4_thumb_jit_record_fail(entry, 0x80, executed_ops,
           expected_pc, reg[REG_PC]);
 
