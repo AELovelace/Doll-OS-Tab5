@@ -250,20 +250,18 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
     return false;
   }
 
-  // EWRAM goes first. It is the largest single region and the only one needing
-  // 256 KB contiguous, so allocating it last left it choosing from a fragmented
-  // 81 KB and it always landed in PSRAM. Measured cost of that was roughly 276
-  // host cycles per guest instruction against 20-50 for a threaded interpreter,
-  // which dwarfs what the drawn-frame VRAM traffic below is worth. Anything that
-  // no longer fits internally falls back to PSRAM on its own.
+  // Order here decides which regions reach L2, and contiguity binds long before
+  // total free space does. Largest first: EWRAM and VRAM are the only two that
+  // need a big block, and 256K + 96K fits the ~412K free at this point. Taking
+  // the smaller regions first does not stay out of that block - it cost 68K of
+  // it, which left 88K against VRAM's 96K request and exiled VRAM to PSRAM.
   gbsp_memory->p_ewram = static_cast<u8*>(allocEwram());
+  gbsp_memory->p_vram = static_cast<u8*>(allocRegion(GBA_VRAM_SIZE, true));
 
-  // Keep the CPU's working RAM, page map, and emulated VRAM in L2 with whatever
-  // EWRAM left behind.
   gbsp_memory->p_iwram = static_cast<u8*>(allocRegion(GBA_IWRAM_SIZE, true));
   // The 32 KB read map is consulted by instruction fetches and most emulated
-  // loads. Reserve it before the JIT and VRAM so normal operation keeps this
-  // high-frequency pointer table in internal L2 instead of PSRAM.
+  // loads, so it has to stay in L2. It is small enough to come out of whatever
+  // the two large regions above left behind.
   gbsp_memory->p_memory_map_read = static_cast<u8**>(
       allocRegion(GBA_MEMORY_MAP_READ_SIZE, true));
   gbsp_memory->p_palette_ram = static_cast<u16*>(allocRegion(512 * sizeof(u16), true));
@@ -271,7 +269,6 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
   gbsp_memory->p_palette_ram_converted = static_cast<u16*>(allocRegion(512 * sizeof(u16), true));
   gbsp_memory->p_io_registers = static_cast<u16*>(allocRegion(512 * sizeof(u16), true));
 
-  gbsp_memory->p_vram = static_cast<u8*>(allocRegion(GBA_VRAM_SIZE, true));
   (void)gba_thumb_predecode_init();
   gba_p4_thumb_jit_preinit();
 
@@ -345,8 +342,10 @@ bool doll_gba_core_load(const char* rom_path) {
   transitionDebugSequence = 0;
   transitionCaptureConsumed = false;
 #endif
-  // Short generated blocks did not amortize their lookup/call overhead on P4.
-  // Batch+fast is the only accelerated engine in this build.
+  // The dynarec competes with EWRAM for internal L2, and EWRAM wins by a wide
+  // margin: moving it out of PSRAM was worth far more than the arena ever was.
+  // What is left over only funds a starved arena, whose miss and probe traffic
+  // costs more than its hits return, so Batch+fast is the accelerated engine.
   doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_BATCH_FAST);
   gba_rom_page_loads = gba_rom_page_prefetches = 0;
   selected_boot_mode = boot_game;
