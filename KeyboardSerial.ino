@@ -270,6 +270,18 @@ void initKeyboardSerial() {
     keyboardGamepadCodec.reset(nullptr, 0, false);
     keyboardGameMode = false;
 
+#if defined(DOLL_EMULATOR_IMAGE)
+    // The GBA image is driven from the touch overlay, including its MENU button,
+    // so neither keyboard source is reachable input. Skipping both leaves the
+    // I2C bus alone and, more importantly, never installs the USB host stack,
+    // whose internal DMA buffers and task stacks compete with the 256 KB
+    // contiguous block EWRAM needs in L2.
+    tab5KeyboardReady = false;
+    keyboardHub.setConnected(KeyboardSource::Tab5, false);
+    ledSetKeyboardActive(false);
+    Serial.println("[boot] keyboard input omitted: touch-only emulator image");
+    return;
+#else
     auto config = tab5Keyboard.config();
     config.mode = m5::unit::tab5_keyboard::Mode::HID;
     config.start_periodic = true;
@@ -293,6 +305,7 @@ void initKeyboardSerial() {
         ledPulseError();
     }
     initUsbKeyboardHost();
+#endif
 }  // Initializes the official keyboard directly from the Arduino sketch.
 
 static int keyboardReadUserByte() {

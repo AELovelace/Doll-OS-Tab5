@@ -52,6 +52,14 @@ typedef struct {
   uint32_t jit_word_store_specialized;
   uint32_t jit_byte_store_specialized;
   uint32_t jit_region_guard_bails;
+  uint32_t jit_validate_passes;
+  uint32_t jit_validate_failures;
+  uint32_t jit_fail_reason;
+  uint32_t jit_fail_opcode;
+  uint32_t jit_fail_index;
+  uint32_t jit_top_fail;
+  uint32_t jit_top_fail_count;
+  uint32_t jit_chain_runs;
   uint32_t thumb_batch_runs;
   uint32_t thumb_batch_ops;
   uint32_t thumb_predecode_bytes;

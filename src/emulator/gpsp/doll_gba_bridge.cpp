@@ -22,7 +22,13 @@ extern timer_type timer[4];
 
 namespace {
 uint16_t currentButtons = 0;
-constexpr size_t kEwramInternalReserve = 128 * 1024;
+// Headroom left in internal L2 after EWRAM claims its 256 KB, for the JIT
+// arena, audio DMA, and host task stacks. EWRAM is now requested before the
+// other large regions, so this is the only thing bounding how much it takes.
+#ifndef GBA_EWRAM_INTERNAL_RESERVE_KB
+#define GBA_EWRAM_INTERNAL_RESERVE_KB 64
+#endif
+constexpr size_t kEwramInternalReserve = GBA_EWRAM_INTERNAL_RESERVE_KB * 1024;
 #if DOLL_GBA_VERBOSE_DIAGNOSTICS
 uint16_t previousDebugButtons = 0;
 uint32_t transitionDebugFrames = 0;
@@ -168,6 +174,14 @@ extern u32 gba_thumb_jit_word_specialized;
 extern u32 gba_thumb_jit_word_store_specialized;
 extern u32 gba_thumb_jit_byte_store_specialized;
 extern u32 gba_thumb_jit_region_guard_bails;
+extern u32 gba_thumb_jit_validate_passes;
+extern u32 gba_thumb_jit_validate_failures;
+extern u32 gba_thumb_jit_fail_reason;
+extern u32 gba_thumb_jit_fail_opcode;
+extern u32 gba_thumb_jit_fail_index;
+extern u32 gba_thumb_jit_top_fail;
+extern u32 gba_thumb_jit_top_fail_count;
+extern u32 gba_thumb_jit_chain_runs;
 extern u32 gba_thumb_batch_runs;
 extern u32 gba_thumb_batch_ops;
 extern u32 gba_thumb_batch_enabled;
@@ -236,13 +250,18 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
     return false;
   }
 
-  // Keep the CPU's working RAM, page map, and emulated VRAM in L2. Drawn frames
-  // touch VRAM far more consistently than cold emulator data, so protect it
-  // before allocating the expanded batch predecode cache.
+  // Order here decides which regions reach L2, and contiguity binds long before
+  // total free space does. Largest first: EWRAM and VRAM are the only two that
+  // need a big block, and 256K + 96K fits the ~412K free at this point. Taking
+  // the smaller regions first does not stay out of that block - it cost 68K of
+  // it, which left 88K against VRAM's 96K request and exiled VRAM to PSRAM.
+  gbsp_memory->p_ewram = static_cast<u8*>(allocEwram());
+  gbsp_memory->p_vram = static_cast<u8*>(allocRegion(GBA_VRAM_SIZE, true));
+
   gbsp_memory->p_iwram = static_cast<u8*>(allocRegion(GBA_IWRAM_SIZE, true));
   // The 32 KB read map is consulted by instruction fetches and most emulated
-  // loads. Reserve it before the JIT and VRAM so normal operation keeps this
-  // high-frequency pointer table in internal L2 instead of PSRAM.
+  // loads, so it has to stay in L2. It is small enough to come out of whatever
+  // the two large regions above left behind.
   gbsp_memory->p_memory_map_read = static_cast<u8**>(
       allocRegion(GBA_MEMORY_MAP_READ_SIZE, true));
   gbsp_memory->p_palette_ram = static_cast<u16*>(allocRegion(512 * sizeof(u16), true));
@@ -250,13 +269,9 @@ bool doll_gba_core_begin(uint16_t* framebuffer) {
   gbsp_memory->p_palette_ram_converted = static_cast<u16*>(allocRegion(512 * sizeof(u16), true));
   gbsp_memory->p_io_registers = static_cast<u16*>(allocRegion(512 * sizeof(u16), true));
 
-  gbsp_memory->p_vram = static_cast<u8*>(allocRegion(GBA_VRAM_SIZE, true));
   (void)gba_thumb_predecode_init();
   gba_p4_thumb_jit_preinit();
 
-  // The no-dynarec build needs only the physical 256 KB EWRAM image. Prefer L2
-  // when it fits without consuming the reserve needed by audio and host tasks.
-  gbsp_memory->p_ewram = static_cast<u8*>(allocEwram());
   gbsp_memory->p_bios_rom = static_cast<u8*>(allocRegion(GBA_BIOS_ROM_SIZE, false));
   gbsp_memory->p_gamepak_backup = static_cast<u8*>(allocRegion(GBA_GAMEPAK_BACKUP_SIZE, false));
   if (!gbsp_memory->p_iwram || !gbsp_memory->p_memory_map_read ||
@@ -327,8 +342,10 @@ bool doll_gba_core_load(const char* rom_path) {
   transitionDebugSequence = 0;
   transitionCaptureConsumed = false;
 #endif
-  // Short generated blocks did not amortize their lookup/call overhead on P4.
-  // Batch+fast is the only accelerated engine in this build.
+  // The dynarec competes with EWRAM for internal L2, and EWRAM wins by a wide
+  // margin: moving it out of PSRAM was worth far more than the arena ever was.
+  // What is left over only funds a starved arena, whose miss and probe traffic
+  // costs more than its hits return, so Batch+fast is the accelerated engine.
   doll_gba_core_set_cpu_mode(DOLL_GBA_CPU_BATCH_FAST);
   gba_rom_page_loads = gba_rom_page_prefetches = 0;
   selected_boot_mode = boot_game;
@@ -493,6 +510,14 @@ void doll_gba_core_get_perf(doll_gba_perf_stats_t* stats) {
   stats->jit_word_store_specialized = gba_thumb_jit_word_store_specialized;
   stats->jit_byte_store_specialized = gba_thumb_jit_byte_store_specialized;
   stats->jit_region_guard_bails = gba_thumb_jit_region_guard_bails;
+  stats->jit_validate_passes = gba_thumb_jit_validate_passes;
+  stats->jit_validate_failures = gba_thumb_jit_validate_failures;
+  stats->jit_fail_reason = gba_thumb_jit_fail_reason;
+  stats->jit_fail_opcode = gba_thumb_jit_fail_opcode;
+  stats->jit_fail_index = gba_thumb_jit_fail_index;
+  stats->jit_top_fail = gba_thumb_jit_top_fail;
+  stats->jit_top_fail_count = gba_thumb_jit_top_fail_count;
+  stats->jit_chain_runs = gba_thumb_jit_chain_runs;
   stats->thumb_batch_runs = gba_thumb_batch_runs;
   stats->thumb_batch_ops = gba_thumb_batch_ops;
   stats->thumb_predecode_bytes = gba_thumb_predecode_bytes;
