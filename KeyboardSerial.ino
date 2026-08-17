@@ -89,6 +89,23 @@ static bool keyboardQueuePushBytes(const uint8_t* bytes, size_t count) {
     return true;
 }  // Moves one complete terminal or game protocol record into the shared byte queue.
 
+bool keyboardInjectByte(uint8_t value) {
+    const bool queued = keyboardQueuePush(value);
+    if (queued) {
+        ledPulseInput();
+    }
+    return queued;
+}  // Lets the portrait touch keyboard join the same local-input byte stream.
+
+bool keyboardInjectBytes(const uint8_t* bytes, size_t count) {
+    if (!bytes || count == 0) return true;
+    const bool queued = keyboardQueuePushBytes(bytes, count);
+    if (queued) {
+        ledPulseInput();
+    }
+    return queued;
+}  // Preserves escape sequences (arrows, Escape) as one ordered injection.
+
 void keyboardSetGameMode(bool enabled, bool emitReleases, const char* reason) {
     uint8_t encoded[HidGamepadCodec::kMaxEncodedBytes]{};
     const size_t count = keyboardGamepadCodec.reset(
@@ -279,9 +296,15 @@ void initKeyboardSerial() {
 }  // Initializes the official keyboard directly from the Arduino sketch.
 
 static int keyboardReadUserByte() {
+    // Blocking prompt/raw-input loops do not reach the sketch's main loop. Keep
+    // the touch keyboard alive there only while its portrait UI is actually on
+    // screen; landscape full-screen apps own touch for their own controls.
+    if (displayIsPortrait() && !keyboardGameMode) {
+        touchKeyboardService();
+    }
     keyboardPumpHardware();
     return keyboardQueuePop();
-}  // Supplies one translated local-keyboard byte to inherited input paths.
+}  // Supplies physical, USB, or touch-keyboard bytes to inherited input paths.
 
 void readKeyboardSerial() {
     while (true) {

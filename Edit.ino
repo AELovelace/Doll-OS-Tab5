@@ -1475,6 +1475,13 @@ void handleEditCommand(const String parts[], int partCount) {
         editPathLogical = parts[1];
     }
 
+    // The inherited full-screen editor still owns a native landscape grid and
+    // has no touch controls. Do not strand a keyboard-less tablet user inside it.
+    if (displayIsPortrait()) {
+        outLine("edit: tap LAND before opening the full-screen editor", C_YELLOW);
+        return;
+    }
+
     if (!editAlloc()) {
         outLine("edit: out of memory", C_RED);
         if (loadingFromRepo) {

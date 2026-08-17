@@ -51,7 +51,33 @@ static DappCanvasCell* displayCanvasShadow = nullptr;
 static int displayCanvasShadowCols = 0;
 static int displayCanvasShadowRows = 0;
 static bool displayCanvasShadowValid = false;
-static bool displayDappDirtyRows[DISPLAY_HEIGHT] = {};
+static bool displayDappDirtyRows[DISPLAY_WIDTH] = {};
+static bool displayPortrait = false;
+
+bool displayIsPortrait() { return displayPortrait; }
+int displayWidth() { return displayPortrait ? DISPLAY_HEIGHT : DISPLAY_WIDTH; }
+int displayHeight() { return displayPortrait ? DISPLAY_WIDTH : DISPLAY_HEIGHT; }
+int displayTextSize() { return displayPortrait ? 1 : DISPLAY_TEXT_SIZE; }
+void displayUseTerminalTextSize() {
+    if (displayPortrait) {
+        // Half-height glyphs with a modest horizontal stretch land at roughly
+        // 84 columns across 720 pixels. A uniform 1x font would be closer to
+        // 117 columns and too small for comfortable handheld use.
+        frameSprite.setTextSize(1.4f, 1.0f);
+    } else {
+        frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
+    }
+}
+int displayTerminalLineHeight() {
+    return displayPortrait ? DISPLAY_TERMINAL_LINE_HEIGHT / 2
+                           : DISPLAY_TERMINAL_LINE_HEIGHT;
+}
+int displayCommandBarHeight() {
+    return displayPortrait ? 28 : DISPLAY_COMMAND_BAR_HEIGHT;
+}
+int displayTouchKeyboardHeight() {
+    return displayPortrait ? 410 : 0;
+}
 
 static void clearDappDirtyRows() {
     memset(displayDappDirtyRows, 0, sizeof(displayDappDirtyRows));
@@ -59,7 +85,7 @@ static void clearDappDirtyRows() {
 
 static void markDappDirtyRows(int y, int height) {
     int firstRow = max(0, y);
-    int lastRow = min(DISPLAY_HEIGHT, y + height);
+    int lastRow = min(displayHeight(), y + height);
     for (int row = firstRow; row < lastRow; row++) {
         displayDappDirtyRows[row] = true;
     }
@@ -130,8 +156,10 @@ void pushDisplaySpriteRegion(int x, int y, int width, int height) {
 
     if (x < 0) { width += x; x = 0; }
     if (y < 0) { height += y; y = 0; }
-    if (x + width > DISPLAY_WIDTH) width = DISPLAY_WIDTH - x;
-    if (y + height > DISPLAY_HEIGHT) height = DISPLAY_HEIGHT - y;
+    const int canvasWidth = displayWidth();
+    const int canvasHeight = displayHeight();
+    if (x + width > canvasWidth) width = canvasWidth - x;
+    if (y + height > canvasHeight) height = canvasHeight - y;
     if (width <= 0 || height <= 0) return;
 
     const int rowsPerPush = min(DISPLAY_IMAGE_STAGING_ROWS, height);
@@ -152,7 +180,7 @@ void pushDisplaySpriteRegion(int x, int y, int width, int height) {
         if (displayImageStaging) {
             for (int row = 0; row < rows; row++) {
                 memcpy(displayImageStaging + (size_t)row * width,
-                       frame + (size_t)(y + pushed + row) * DISPLAY_WIDTH + x,
+                       frame + (size_t)(y + pushed + row) * canvasWidth + x,
                        (size_t)width * sizeof(uint16_t));
             }
             tft.pushImage(x, y + pushed, width, rows, displayImageStaging);
@@ -161,7 +189,7 @@ void pushDisplaySpriteRegion(int x, int y, int width, int height) {
             // packed multi-row buffer.
             for (int row = 0; row < rows; row++) {
                 uint16_t* src = frame
-                    + (size_t)(y + pushed + row) * DISPLAY_WIDTH + x;
+                    + (size_t)(y + pushed + row) * canvasWidth + x;
                 tft.pushImage(x, y + pushed + row, width, 1, src);
             }
         }
@@ -187,8 +215,9 @@ static void pushDisplayRows(int y, int rowCount) {
     int pushed = 0;
     while (pushed < rowCount) {
         int rowsThisPush = min(DISPLAY_PUSH_ROWS, rowCount - pushed);
-        uint16_t* src = frame + (size_t)(y + pushed) * DISPLAY_WIDTH;
-        tft.pushImage(0, y + pushed, DISPLAY_WIDTH, rowsThisPush, src);
+        const int canvasWidth = displayWidth();
+        uint16_t* src = frame + (size_t)(y + pushed) * canvasWidth;
+        tft.pushImage(0, y + pushed, canvasWidth, rowsThisPush, src);
         pushed += rowsThisPush;
     }
     tft.setSwapBytes(oldSwapBytes);
@@ -196,12 +225,13 @@ static void pushDisplayRows(int y, int rowCount) {
 
 static void pushDappDirtyRows() {
     int row = 0;
-    while (row < DISPLAY_HEIGHT) {
-        while (row < DISPLAY_HEIGHT && !displayDappDirtyRows[row]) {
+    const int canvasHeight = displayHeight();
+    while (row < canvasHeight) {
+        while (row < canvasHeight && !displayDappDirtyRows[row]) {
             row++;
         }
         int firstRow = row;
-        while (row < DISPLAY_HEIGHT && displayDappDirtyRows[row]) {
+        while (row < canvasHeight && displayDappDirtyRows[row]) {
             row++;
         }
         if (firstRow < row) {
@@ -223,15 +253,15 @@ static bool copyDisplayRowsToShadow(int y, int rowCount) {
 
     //The sprite and its shadow are two distinct PSRAM allocations, so one straight memcpy
     //is safe: M5GFX's corruption warning covers copying a framebuffer region onto itself.
-    const size_t offset = (size_t)y * DISPLAY_WIDTH;
+    const size_t offset = (size_t)y * displayWidth();
     memcpy(displayShadow + offset, frame + offset,
-           (size_t)rowCount * DISPLAY_WIDTH * sizeof(uint16_t));
+           (size_t)rowCount * displayWidth() * sizeof(uint16_t));
     return true;
 }  // Synchronizes the diff shadow with the sprite rows just sent to the panel.
 
 void pushDisplayFrame() {
     uint16_t* frame = (uint16_t*)frameSprite.getBuffer();
-    const size_t rowWords = (size_t)DISPLAY_WIDTH;
+    const size_t rowWords = (size_t)displayWidth();
     const size_t rowBytes = rowWords * sizeof(uint16_t);
 
     //Nothing can be sent before createSprite has allocated the canvas.
@@ -243,13 +273,14 @@ void pushDisplayFrame() {
     if (!displayShadow || !displayShadowValid) {
         //pushDisplayRows commits each strip as its own transaction. Combining the full
         //frame into one would force a 1.84MB cache writeback burst.
-        pushDisplayRows(0, DISPLAY_HEIGHT);
-        displayShadowValid = copyDisplayRowsToShadow(0, DISPLAY_HEIGHT);
+        pushDisplayRows(0, displayHeight());
+        displayShadowValid = copyDisplayRowsToShadow(0, displayHeight());
         return;
     }
 
     int row = 0;
-    while (row < DISPLAY_HEIGHT) {
+    const int canvasHeight = displayHeight();
+    while (row < canvasHeight) {
         const uint16_t* frameRow = frame + (size_t)row * rowWords;
         if (memcmp(frameRow, displayShadow + (size_t)row * rowWords, rowBytes) == 0) {
             row++;
@@ -258,7 +289,7 @@ void pushDisplayFrame() {
         //walk the whole run of changed rows so they go out as one transfer rather than one
         //setAddrWindow per row
         int start = row;
-        while (row < DISPLAY_HEIGHT &&
+        while (row < canvasHeight &&
                memcmp(frame + (size_t)row * rowWords,
                       displayShadow + (size_t)row * rowWords, rowBytes) != 0) {
             row++;
@@ -314,11 +345,47 @@ void initDisplay() {
                                       : "unavailable (full canvas redraws)");
 
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
-    frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
+    displayUseTerminalTextSize();
     frameSprite.fillSprite(TFT_BLACK);
     //setup() draws the boot splash immediately after initDisplay(). Avoid a redundant
     //full black commit immediately before that first cyan frame.
 }
+
+bool displaySetPortrait(bool portrait) {
+    if (portrait == displayPortrait) return true;
+    if (dappCanvasActive) return false;
+
+    frameSprite.deleteSprite();
+    displayPortrait = portrait;
+    tft.setRotation(displayPortrait ? TAB5_DISPLAY_PORTRAIT_ROTATION
+                                    : TAB5_DISPLAY_ROTATION);
+    frameSprite.setColorDepth(16);
+    void* buffer = frameSprite.createSprite(displayWidth(), displayHeight());
+    if (!buffer) {
+        Serial.printf("[display] %s canvas allocation failed; restoring landscape\n",
+                      displayPortrait ? "portrait" : "landscape");
+        displayPortrait = false;
+        tft.setRotation(TAB5_DISPLAY_ROTATION);
+        buffer = frameSprite.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        if (!buffer) {
+            Serial.println("[display] FATAL: canvas restore allocation failed");
+            return false;
+        }
+    }
+
+    frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
+    displayUseTerminalTextSize();
+    frameSprite.setTextDatum(TL_DATUM);
+    frameSprite.fillSprite(TFT_BLACK);
+    displayScrollOffset = 0;
+    displayInvalidateShadow();
+    displayInvalidateDappCanvas();
+    markDisplayDirty();
+    Serial.printf("[display] mode=%s rotation=%d logical=%dx%d text=%d\n",
+                  displayPortrait ? "portrait" : "landscape",
+                  tft.getRotation(), displayWidth(), displayHeight(), displayTextSize());
+    return displayPortrait == portrait;
+}  // Reuses the same pixel count while exchanging the canvas axes.
 
 void displaySetSleeping(bool sleeping) {
     if (sleeping) {
@@ -374,10 +441,11 @@ int displayTerminalY() {
     return DISPLAY_STATUS_BAR_HEIGHT;
 }
 int displayTerminalHeight() {
-    return DISPLAY_HEIGHT - DISPLAY_STATUS_BAR_HEIGHT - DISPLAY_COMMAND_BAR_HEIGHT;
+    return displayHeight() - DISPLAY_STATUS_BAR_HEIGHT - displayCommandBarHeight()
+        - displayTouchKeyboardHeight();
 }
 int displayCommandBarY() {
-    return DISPLAY_HEIGHT - DISPLAY_COMMAND_BAR_HEIGHT;
+    return displayHeight() - displayTouchKeyboardHeight() - displayCommandBarHeight();
 }
 
 void markDisplayDirty() {
@@ -397,6 +465,7 @@ void setActiveInput(const String& prompt, const String& text, bool masked) {
 //   History ring buffer (mirrors DOLL-OS's HistoryRow / addWrappedHistoryLine)
 
 static int displayCharWidth(char ch) {
+    displayUseTerminalTextSize();
     char glyph[2] = { ch, '\0' };
     return (int)frameSprite.textWidth(glyph);
 }
@@ -452,7 +521,8 @@ void addDisplayLine(const String& line) {
 }
 
 void addDisplayLine(const String& line, uint16_t color) {
-    const int maxWidth = DISPLAY_WIDTH - (DISPLAY_PADDING * 2);
+    displayUseTerminalTextSize();
+    const int maxWidth = displayWidth() - (DISPLAY_PADDING * 2);
     if (maxWidth < 0) {
         return;
     }
@@ -545,7 +615,8 @@ void displayStreamNewline(DisplayStreamState& st) {
 }
 
 void displayStreamPutChar(DisplayStreamState& st, char ch, uint16_t color) {
-    const int maxWidth = DISPLAY_WIDTH - (DISPLAY_PADDING * 2);
+    displayUseTerminalTextSize();
+    const int maxWidth = displayWidth() - (DISPLAY_PADDING * 2);
     if (maxWidth < 0) {
         return;
     }
@@ -855,9 +926,10 @@ uint16_t ansiCodeToPixelColor(int code) {
 //   DOLL-OS's own per-tick drawTerminalHistory()/drawCommandBar() calls
 
 void drawDisplayStatusBar() {
-    frameSprite.fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_STATUS_BAR_HEIGHT, TFT_BLACK);
+    const int canvasWidth = displayWidth();
+    frameSprite.fillRect(0, 0, canvasWidth, DISPLAY_STATUS_BAR_HEIGHT, TFT_BLACK);
     frameSprite.setTextDatum(TL_DATUM);
-    frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
+    displayUseTerminalTextSize();
     frameSprite.setTextColor(TFT_PINK, TFT_BLACK);
     frameSprite.drawString("DOLL-OS", DISPLAY_PADDING, 4);
 
@@ -866,32 +938,32 @@ void drawDisplayStatusBar() {
         (unsigned long)(ESP.getFreeHeap() / 1000), radioGetVolume(), readBatteryPercent());
     frameSprite.setTextDatum(TR_DATUM);
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
-    const int statusRight = dappCanvasActive
-        ? DISPLAY_WIDTH - DISPLAY_PADDING
+    const int statusRight = (dappCanvasActive || displayPortrait)
+        ? canvasWidth - DISPLAY_PADDING
         : gbMainTouchLauncherLeft() - DISPLAY_PADDING;
     frameSprite.drawString(statusText, statusRight, 4);
 
-    if (!dappCanvasActive) {
+    if (!dappCanvasActive && !displayPortrait) {
         gbDrawMainTouchLauncher();
         gbaDrawMainTouchLauncher();
     }
 
-    frameSprite.drawFastHLine(0, DISPLAY_STATUS_BAR_HEIGHT - 1, DISPLAY_WIDTH, TFT_PINK);
+    frameSprite.drawFastHLine(0, DISPLAY_STATUS_BAR_HEIGHT - 1, canvasWidth, TFT_PINK);
     frameSprite.setTextDatum(TL_DATUM);
 }
 
 void drawDisplayHistory() {
-    const int lineHeight = DISPLAY_TERMINAL_LINE_HEIGHT;
+    const int lineHeight = displayTerminalLineHeight();
     const int top = displayTerminalY();
     const int height = displayTerminalHeight();
 
-    frameSprite.fillRect(0, top, DISPLAY_WIDTH, height, TFT_BLACK);
+    frameSprite.fillRect(0, top, displayWidth(), height, TFT_BLACK);
     if (displayHistoryCount == 0) {
         return;
     }
 
     frameSprite.setTextDatum(TL_DATUM);
-    frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
+    displayUseTerminalTextSize();
     //rows are drawn starting DISPLAY_PADDING below `top`, so the space actually available
     //for text is height - DISPLAY_PADDING. Dividing the full height counted one row too
     //many for the region: on the 240px panel that put the bottom row flush at y=219, right
@@ -922,7 +994,7 @@ void drawDisplayHistory() {
         //cheap "you're not looking at the live tail" hint, top-right of the terminal area
         frameSprite.setTextDatum(TR_DATUM);
         frameSprite.setTextColor(TFT_YELLOW, TFT_BLACK);
-        frameSprite.drawString("SCROLL", DISPLAY_WIDTH - DISPLAY_PADDING, top + DISPLAY_PADDING);
+        frameSprite.drawString("SCROLL", displayWidth() - DISPLAY_PADDING, top + DISPLAY_PADDING);
         frameSprite.setTextDatum(TL_DATUM);
         frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
     }
@@ -930,15 +1002,17 @@ void drawDisplayHistory() {
 
 void drawDisplayCommandBar() {
     const int y = displayCommandBarY();
-    frameSprite.fillRect(0, y, DISPLAY_WIDTH, DISPLAY_COMMAND_BAR_HEIGHT, TFT_BLACK);
-    frameSprite.drawFastHLine(0, y, DISPLAY_WIDTH, TFT_WHITE);
+    const int barHeight = displayCommandBarHeight();
+    const int canvasWidth = displayWidth();
+    frameSprite.fillRect(0, y, canvasWidth, barHeight, TFT_BLACK);
+    frameSprite.drawFastHLine(0, y, canvasWidth, TFT_WHITE);
     frameSprite.setTextDatum(TL_DATUM);
-    frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
+    displayUseTerminalTextSize();
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
 
     frameSprite.drawString(activeInputPrompt, DISPLAY_PADDING, y + DISPLAY_PADDING);
     int textX = DISPLAY_PADDING + (int)frameSprite.textWidth(activeInputPrompt);
-    int maxWidth = max(0, DISPLAY_WIDTH - textX - DISPLAY_PADDING);
+    int maxWidth = max(0, canvasWidth - textX - DISPLAY_PADDING);
 
     String shown = activeInputText;
     if (activeInputMasked) {
@@ -981,26 +1055,26 @@ void drawDappCanvas() {
     const int top = displayTerminalY();
     const int height = displayTerminalHeight();
     if (!dappCanvasCells || dappCanvasCols <= 0 || dappCanvasRows <= 0) {
-        frameSprite.fillRect(0, top, DISPLAY_WIDTH, height, TFT_BLACK);
+        frameSprite.fillRect(0, top, displayWidth(), height, TFT_BLACK);
         markDappDirtyRows(top, height);
         displayInvalidateDappCanvas();
         return;
     }
 
-    const int cellW = max(1, (DISPLAY_WIDTH - DISPLAY_PADDING * 2) / dappCanvasCols);
+    const int cellW = max(1, (displayWidth() - DISPLAY_PADDING * 2) / dappCanvasCols);
     const int cellH = max(1, (height - DISPLAY_PADDING * 2) / dappCanvasRows);
 
     //Keep AppRunner glyphs at the user-selected compact built-in size.
     const int textSize = 1;
 
     //center the grid in the area it didn't divide evenly into
-    const int originX = (DISPLAY_WIDTH - cellW * dappCanvasCols) / 2;
+    const int originX = (displayWidth() - cellW * dappCanvasCols) / 2;
     const int originY = top + (height - cellH * dappCanvasRows) / 2;
     const bool fullRedraw = !displayCanvasShadow || !displayCanvasShadowValid ||
         displayCanvasShadowCols != dappCanvasCols ||
         displayCanvasShadowRows != dappCanvasRows;
     if (fullRedraw) {
-        frameSprite.fillRect(0, top, DISPLAY_WIDTH, height, TFT_BLACK);
+        frameSprite.fillRect(0, top, displayWidth(), height, TFT_BLACK);
         markDappDirtyRows(top, height);
     }
 
@@ -1049,7 +1123,7 @@ void drawDappCanvas() {
         displayCanvasShadowValid = true;
     }
 
-    frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
+    displayUseTerminalTextSize();
     frameSprite.setTextDatum(TL_DATUM);
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
 }
@@ -1068,8 +1142,9 @@ void drawDisplayFrame() {
         markDappDirtyRows(0, DISPLAY_STATUS_BAR_HEIGHT);
         drawDappCanvas();
         drawDisplayCommandBar();
-        markDappDirtyRows(DISPLAY_HEIGHT - DISPLAY_COMMAND_BAR_HEIGHT,
-                          DISPLAY_COMMAND_BAR_HEIGHT);
+        drawTouchKeyboard();
+        markDappDirtyRows(displayCommandBarY(),
+                          displayHeight() - displayCommandBarY());
         pushDappDirtyRows();
         return;
     }
@@ -1077,5 +1152,6 @@ void drawDisplayFrame() {
     drawDisplayStatusBar();
     drawDisplayHistory();
     drawDisplayCommandBar();
+    drawTouchKeyboard();
     pushDisplayFrame();
 }

@@ -48,13 +48,14 @@
 static GameBoyHost gbHost;
 
 // Output rectangle on the panel. "fit" selects the board's largest safe scale
-// (a centered integer 3x on Tab5); "1x" is native 160x144 centered. Chosen
+// (3x landscape or 4x portrait on Tab5); "1x" is native 160x144. Chosen
 // per-launch: `gb <rom> [1x|fit]`.
 static const int GB_W = GameBoyHost::kWidth;    // 160
 static const int GB_H = GameBoyHost::kHeight;   // 144
 #if defined(DOLL_BOARD_TAB5)
 // Match the shell's safe per-transaction byte range while avoiding hundreds of
-// tiny cache-writeback transactions. 480 x 24 x 2 = 23 KB per fit-mode strip.
+// tiny cache-writeback transactions. A fit-mode strip is 23 KB landscape or
+// 30 KB portrait, both small enough for internal RAM.
 static const int GB_TAB5_STAGE_ROWS = 24;
 #endif
 
@@ -152,12 +153,14 @@ static bool gbSetupScale() {
     // The Tab5's panel is a continuously scanned PSRAM framebuffer. Scaling a
     // 160x144 frame all the way to 800x720 makes every drawn emulator frame
     // rewrite 1.15 MB of that same PSRAM and can starve DSI scanout, leaving
-    // only gbClearPanel()'s black frame visible. A crisp 3x image is 480x432
-    // (414 KB), large enough on the 7-inch panel while leaving scanout headroom.
-    const int scale = gbFitMode ? 3 : 1;
+    // only gbClearPanel()'s black frame visible. Landscape therefore keeps its
+    // proven 3x image. Portrait has room for a crisp 4x image (640x576, 737 KB),
+    // still comfortably below the unstable 800x720 transfer while leaving the
+    // lower half of the 720x1280 panel for touch controls.
+    const int scale = gbFitMode ? (displayIsPortrait() ? 4 : 3) : 1;
     gbOutW = GB_W * scale;
     gbOutH = GB_H * scale;
-    gbOutX = (DISPLAY_WIDTH - gbOutW) / 2;
+    gbOutX = (displayWidth() - gbOutW) / 2;
     gbOutY = 0;  // top-align the Game Boy picture; controls use the space below
 
     if (!gbFitMode) {
@@ -166,9 +169,9 @@ static bool gbSetupScale() {
 
     gbColMap = (int16_t*)heap_caps_malloc(gbOutW * sizeof(int16_t), MALLOC_CAP_8BIT);
     gbRowMap = (int16_t*)heap_caps_malloc(gbOutH * sizeof(int16_t), MALLOC_CAP_8BIT);
-    //Only four scaled rows are materialized at once. The emulator framebuffer,
-    //this strip, and Display.ino's transfer strip all stay internal; the live DSI
-    //framebuffer is now the sole PSRAM participant in a Game Boy panel update.
+    // Only one short strip is materialized at once. The emulator framebuffer,
+    // this strip, and Display.ino's transfer strip all stay internal; the live
+    // DSI framebuffer is the sole PSRAM participant in a Game Boy panel update.
     gbScaleBuf = (uint16_t*)heap_caps_malloc(
         (size_t)gbOutW * GB_TAB5_STAGE_ROWS * sizeof(uint16_t),
         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -354,18 +357,28 @@ static void gbLogFrameDiagnostic(uint32_t frameNumber) {
 }  // Proves gnuboy rendered pixels without using unsupported DSI panel readback.
 
 #if defined(DOLL_BOARD_TAB5)
-// Touch controls live in the wide margins around the centered 3x Game Boy
-// picture. They deliberately remain outside the 480x432 game image, so no UI
-// pixels obscure the game and the same layout can stay visible in the menu.
-static constexpr int GB_TOUCH_DPAD_X = 180;
-static constexpr int GB_TOUCH_DPAD_Y = 510;
-static constexpr int GB_TOUCH_DPAD_HALF = 175;
-static constexpr int GB_TOUCH_DPAD_DEAD = 44;
-static constexpr int GB_TOUCH_A_X = 1160;
-static constexpr int GB_TOUCH_A_Y = 430;
-static constexpr int GB_TOUCH_B_X = 1010;
-static constexpr int GB_TOUCH_B_Y = 550;
-static constexpr int GB_TOUCH_FACE_R = 70;
+// Touch controls stay outside the game image in both orientations. Landscape
+// retains the hardware-proven coordinates. Portrait puts the 4x image at the
+// top and arranges a handheld-style control deck in the remaining 704 pixels.
+static GbTouchLayout gbGetTouchLayout() {
+    if (displayIsPortrait()) {
+        return {
+            180, 880, 175, 44, 120, 110,  // D-pad
+            565, 790, 465, 955, 70,       // A, B
+            180, 1170, 135, 60,           // Select
+            400, 1170, 135, 60,           // Start
+            540, 610, 150, 60,            // Menu
+        };
+    }
+    return {
+        180, 510, 175, 44, 120, 110,
+        1160, 430, 1010, 550, 70,
+        485, 650, 135, 48,
+        660, 650, 135, 48,
+        1090, 30, 150, 52,
+    };
+}
+
 static constexpr int GB_TOUCH_DOT_R = 14;
 static constexpr int GB_TOUCH_DOT_BOX = GB_TOUCH_DOT_R * 2 + 1;
 
@@ -382,49 +395,60 @@ static bool gbTouchDotsDirty = false;
 static uint16_t gbTouchDotRestore[GB_TOUCH_DOT_BOX * GB_TOUCH_DOT_BOX];
 
 static void gbDrawTouchControls() {
+    const GbTouchLayout layout = gbGetTouchLayout();
     const uint16_t padFill = 0x2104;  // very dark grey; visible without glare
     const uint16_t padEdge = TFT_CYAN;
-    const int arm = 120;
-    const int thick = 110;
+    const int arm = layout.dpadArm;
+    const int thick = layout.dpadThick;
 
-    frameSprite.fillRoundRect(GB_TOUCH_DPAD_X - thick / 2,
-                              GB_TOUCH_DPAD_Y - arm - thick / 2,
+    frameSprite.fillRoundRect(layout.dpadX - thick / 2,
+                              layout.dpadY - arm - thick / 2,
                               thick, arm + thick / 2, 12, padFill);
-    frameSprite.fillRoundRect(GB_TOUCH_DPAD_X - thick / 2,
-                              GB_TOUCH_DPAD_Y,
+    frameSprite.fillRoundRect(layout.dpadX - thick / 2,
+                              layout.dpadY,
                               thick, arm + thick / 2, 12, padFill);
-    frameSprite.fillRoundRect(GB_TOUCH_DPAD_X - arm - thick / 2,
-                              GB_TOUCH_DPAD_Y - thick / 2,
+    frameSprite.fillRoundRect(layout.dpadX - arm - thick / 2,
+                              layout.dpadY - thick / 2,
                               arm + thick / 2, thick, 12, padFill);
-    frameSprite.fillRoundRect(GB_TOUCH_DPAD_X,
-                              GB_TOUCH_DPAD_Y - thick / 2,
+    frameSprite.fillRoundRect(layout.dpadX,
+                              layout.dpadY - thick / 2,
                               arm + thick / 2, thick, 12, padFill);
-    frameSprite.drawRoundRect(GB_TOUCH_DPAD_X - thick / 2,
-                              GB_TOUCH_DPAD_Y - arm - thick / 2,
+    frameSprite.drawRoundRect(layout.dpadX - thick / 2,
+                              layout.dpadY - arm - thick / 2,
                               thick, arm * 2 + thick, 12, padEdge);
-    frameSprite.drawRoundRect(GB_TOUCH_DPAD_X - arm - thick / 2,
-                              GB_TOUCH_DPAD_Y - thick / 2,
+    frameSprite.drawRoundRect(layout.dpadX - arm - thick / 2,
+                              layout.dpadY - thick / 2,
                               arm * 2 + thick, thick, 12, padEdge);
 
-    frameSprite.fillCircle(GB_TOUCH_A_X, GB_TOUCH_A_Y, GB_TOUCH_FACE_R, 0x4008);
-    frameSprite.drawCircle(GB_TOUCH_A_X, GB_TOUCH_A_Y, GB_TOUCH_FACE_R, TFT_PINK);
-    frameSprite.fillCircle(GB_TOUCH_B_X, GB_TOUCH_B_Y, GB_TOUCH_FACE_R, 0x4008);
-    frameSprite.drawCircle(GB_TOUCH_B_X, GB_TOUCH_B_Y, GB_TOUCH_FACE_R, TFT_PINK);
+    frameSprite.fillCircle(layout.aX, layout.aY, layout.faceRadius, 0x4008);
+    frameSprite.drawCircle(layout.aX, layout.aY, layout.faceRadius, TFT_PINK);
+    frameSprite.fillCircle(layout.bX, layout.bY, layout.faceRadius, 0x4008);
+    frameSprite.drawCircle(layout.bX, layout.bY, layout.faceRadius, TFT_PINK);
 
-    frameSprite.fillRoundRect(485, 650, 135, 48, 18, padFill);
-    frameSprite.drawRoundRect(485, 650, 135, 48, 18, padEdge);
-    frameSprite.fillRoundRect(660, 650, 135, 48, 18, padFill);
-    frameSprite.drawRoundRect(660, 650, 135, 48, 18, padEdge);
-    frameSprite.fillRoundRect(1090, 30, 150, 52, 18, padFill);
-    frameSprite.drawRoundRect(1090, 30, 150, 52, 18, TFT_YELLOW);
+    frameSprite.fillRoundRect(layout.selectX, layout.selectY,
+                              layout.selectW, layout.selectH, 18, padFill);
+    frameSprite.drawRoundRect(layout.selectX, layout.selectY,
+                              layout.selectW, layout.selectH, 18, padEdge);
+    frameSprite.fillRoundRect(layout.startX, layout.startY,
+                              layout.startW, layout.startH, 18, padFill);
+    frameSprite.drawRoundRect(layout.startX, layout.startY,
+                              layout.startW, layout.startH, 18, padEdge);
+    frameSprite.fillRoundRect(layout.menuX, layout.menuY,
+                              layout.menuW, layout.menuH, 18, padFill);
+    frameSprite.drawRoundRect(layout.menuX, layout.menuY,
+                              layout.menuW, layout.menuH, 18, TFT_YELLOW);
 
+    frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
     frameSprite.setTextDatum(MC_DATUM);
     frameSprite.setTextColor(TFT_WHITE);
-    frameSprite.drawString("A", GB_TOUCH_A_X, GB_TOUCH_A_Y);
-    frameSprite.drawString("B", GB_TOUCH_B_X, GB_TOUCH_B_Y);
-    frameSprite.drawString("SELECT", 552, 674);
-    frameSprite.drawString("START", 727, 674);
-    frameSprite.drawString("MENU", 1165, 56);
+    frameSprite.drawString("A", layout.aX, layout.aY);
+    frameSprite.drawString("B", layout.bX, layout.bY);
+    frameSprite.drawString("SELECT", layout.selectX + layout.selectW / 2,
+                           layout.selectY + layout.selectH / 2);
+    frameSprite.drawString("START", layout.startX + layout.startW / 2,
+                           layout.startY + layout.startH / 2);
+    frameSprite.drawString("MENU", layout.menuX + layout.menuW / 2,
+                           layout.menuY + layout.menuH / 2);
     frameSprite.setTextDatum(TL_DATUM);
 }
 #else
@@ -470,7 +494,7 @@ static uint8_t gbPumpInput(uint8_t& buttons) {
 }
 
 // Samples every active Tab5 contact so combinations such as diagonal+A work.
-// Coordinates are already rotated into the display's 1280x720 space by
+// Coordinates are already rotated into the display's current logical space by
 // M5Unified. MENU is edge-triggered; ordinary Game Boy buttons remain held for
 // as long as their contact remains inside the corresponding control.
 static uint8_t gbPumpTouch(uint8_t& buttons) {
@@ -478,6 +502,7 @@ static uint8_t gbPumpTouch(uint8_t& buttons) {
     buttons = 0;
     return 0;
 #else
+    const GbTouchLayout layout = gbGetTouchLayout();
     M5.update();
     uint8_t next = 0;
     bool menuDown = false;
@@ -495,32 +520,35 @@ static uint8_t gbPumpTouch(uint8_t& buttons) {
             nextPointCount++;
         }
 
-        if (x >= 1090 && x < 1240 && y >= 30 && y < 82) {
+        if (x >= layout.menuX && x < layout.menuX + layout.menuW &&
+            y >= layout.menuY && y < layout.menuY + layout.menuH) {
             menuDown = true;
             continue;
         }
 
-        const int dx = x - GB_TOUCH_DPAD_X;
-        const int dy = y - GB_TOUCH_DPAD_Y;
-        if (abs(dx) <= GB_TOUCH_DPAD_HALF && abs(dy) <= GB_TOUCH_DPAD_HALF) {
-            if (dx < -GB_TOUCH_DPAD_DEAD) next |= GameBoyHost::kLeft;
-            if (dx >  GB_TOUCH_DPAD_DEAD) next |= GameBoyHost::kRight;
-            if (dy < -GB_TOUCH_DPAD_DEAD) next |= GameBoyHost::kUp;
-            if (dy >  GB_TOUCH_DPAD_DEAD) next |= GameBoyHost::kDown;
+        const int dx = x - layout.dpadX;
+        const int dy = y - layout.dpadY;
+        if (abs(dx) <= layout.dpadHalf && abs(dy) <= layout.dpadHalf) {
+            if (dx < -layout.dpadDead) next |= GameBoyHost::kLeft;
+            if (dx >  layout.dpadDead) next |= GameBoyHost::kRight;
+            if (dy < -layout.dpadDead) next |= GameBoyHost::kUp;
+            if (dy >  layout.dpadDead) next |= GameBoyHost::kDown;
         }
 
-        const int dax = x - GB_TOUCH_A_X;
-        const int day = y - GB_TOUCH_A_Y;
-        if (dax * dax + day * day <= GB_TOUCH_FACE_R * GB_TOUCH_FACE_R)
+        const int dax = x - layout.aX;
+        const int day = y - layout.aY;
+        if (dax * dax + day * day <= layout.faceRadius * layout.faceRadius)
             next |= GameBoyHost::kA;
-        const int dbx = x - GB_TOUCH_B_X;
-        const int dby = y - GB_TOUCH_B_Y;
-        if (dbx * dbx + dby * dby <= GB_TOUCH_FACE_R * GB_TOUCH_FACE_R)
+        const int dbx = x - layout.bX;
+        const int dby = y - layout.bY;
+        if (dbx * dbx + dby * dby <= layout.faceRadius * layout.faceRadius)
             next |= GameBoyHost::kB;
 
-        if (x >= 485 && x < 620 && y >= 650 && y < 698)
+        if (x >= layout.selectX && x < layout.selectX + layout.selectW &&
+            y >= layout.selectY && y < layout.selectY + layout.selectH)
             next |= GameBoyHost::kSelect;
-        if (x >= 660 && x < 795 && y >= 650 && y < 698)
+        if (x >= layout.startX && x < layout.startX + layout.startW &&
+            y >= layout.startY && y < layout.startY + layout.startH)
             next |= GameBoyHost::kStart;
     }
 
@@ -560,14 +588,14 @@ static void gbRenderTouchDots(bool force) {
     for (uint8_t i = 0; i < gbTouchDrawnPointCount; i++) {
         const int x0 = max(0, (int)gbTouchDrawnPoints[i].x - GB_TOUCH_DOT_R);
         const int y0 = max(0, (int)gbTouchDrawnPoints[i].y - GB_TOUCH_DOT_R);
-        const int x1 = min(DISPLAY_WIDTH, (int)gbTouchDrawnPoints[i].x + GB_TOUCH_DOT_R + 1);
-        const int y1 = min(DISPLAY_HEIGHT, (int)gbTouchDrawnPoints[i].y + GB_TOUCH_DOT_R + 1);
+        const int x1 = min(displayWidth(), (int)gbTouchDrawnPoints[i].x + GB_TOUCH_DOT_R + 1);
+        const int y1 = min(displayHeight(), (int)gbTouchDrawnPoints[i].y + GB_TOUCH_DOT_R + 1);
         const int width = x1 - x0;
         const int height = y1 - y0;
         if (width <= 0 || height <= 0) continue;
         for (int row = 0; row < height; row++) {
             memcpy(gbTouchDotRestore + row * width,
-                   frame + (size_t)(y0 + row) * DISPLAY_WIDTH + x0,
+                   frame + (size_t)(y0 + row) * displayWidth() + x0,
                    (size_t)width * sizeof(uint16_t));
         }
         tft.pushImage(x0, y0, width, height, gbTouchDotRestore);
@@ -735,14 +763,15 @@ static String gbFitMenuText(String text, int maxWidth) {
 }
 
 static void gbDrawRomMenu(String names[], int count, int selected, bool truncated) {
-    const int rowH = 18;
+    frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
+    const int rowH = displayIsPortrait() ? 22 : 18;
     const int top = 28;
 #if defined(DOLL_BOARD_TAB5)
-    // Keep the list between the touch-control rails: the D-pad ends at x=363
-    // and B begins at x=940. Start/Select occupy the bottom center.
-    const int left = 365;
-    const int width = 550;
-    const int footY = 620;
+    // Landscape keeps the list between its control rails. Portrait uses the
+    // full width above the control deck, ending before MENU at y=610.
+    const int left = displayIsPortrait() ? 40 : 365;
+    const int width = displayIsPortrait() ? displayWidth() - 80 : 550;
+    const int footY = displayIsPortrait() ? 580 : 620;
 #else
     const int left = 14;
     const int width = DISPLAY_WIDTH - left * 2;
@@ -956,8 +985,8 @@ static void gbPrintUsage() {
     outLine("  Bare 'gb' opens the /sd/gb ROM picker.", C_CYAN);
     outLine("  ROM path is a normal DOLL-OS path (e.g. /sd/roms/zelda.gb).", C_CYAN);
 #if defined(DOLL_BOARD_TAB5)
-    outLine("  fit (default) is a centered 3x image (480x432); 1x is native", C_CYAN);
-    outLine("  160x144. The bounded scale keeps DSI scanout stable.", C_CYAN);
+    outLine("  fit is 3x in landscape or 4x in portrait; 1x is native", C_CYAN);
+    outLine("  160x144. Both bounded scales keep DSI scanout stable.", C_CYAN);
 #else
     outLine("  fit (default) fills the panel but costs ~38ms of SPI per push,", C_CYAN);
     outLine("  so most frames go undrawn; 1x is small but near-smooth.", C_CYAN);
@@ -1019,14 +1048,16 @@ static void gbSetDisplayMode(bool fit) {
 }
 
 static void gbDrawMenu(int selected, const String& note) {
-    const int rowH = 18;
-    const int top = (DISPLAY_HEIGHT - (GB_MENU_COUNT * rowH + 60)) / 2;
-    const int left = DISPLAY_WIDTH / 2 - 110;
-    const int width = 220;
+    frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
+    const int rowH = displayIsPortrait() ? 26 : 18;
+    const int boxHeight = GB_MENU_COUNT * rowH + 60;
+    const int top = displayIsPortrait() ? 100 : (displayHeight() - boxHeight) / 2;
+    const int width = displayIsPortrait() ? 540 : 220;
+    const int left = (displayWidth() - width) / 2;
 
     frameSprite.fillSprite(TFT_BLACK);
     frameSprite.drawRect(left - 8, top - 8, width + 16,
-                         GB_MENU_COUNT * rowH + 60, TFT_PINK);
+                         boxHeight, TFT_PINK);
 
     frameSprite.setTextDatum(TL_DATUM);
     frameSprite.setTextColor(TFT_PINK, TFT_BLACK);
@@ -1125,7 +1156,9 @@ static bool gbRunMenu(uint8_t& buttons, uint8_t& touchButtons) {
                 // Left/right and A all just flip it -- there are only two modes.
                 gbSetDisplayMode(!gbFitMode);
 #if defined(DOLL_BOARD_TAB5)
-                note = gbFitMode ? "fit: top-aligned 3x, DSI-safe"
+                note = gbFitMode ? (displayIsPortrait()
+                                      ? "fit: top-aligned 4x portrait"
+                                      : "fit: top-aligned 3x landscape")
                                  : "1x: native 160x144";
 #else
                 note = gbFitMode ? "fit: fills the panel, most frames skipped"
@@ -1207,11 +1240,13 @@ void handleGbCommand(const String parts[], int partCount) {
                   gbFitMode ? "fit" : "1x");
     Serial.flush();
 
-    // Reassert the Tab5's logical landscape mapping before any Game Boy draw;
-    // this corrects the portrait-native DSI panel by 90 degrees counterclockwise.
-    tft.setRotation(TAB5_DISPLAY_ROTATION);
+    // Inherit the shell orientation. The frame sprite already has the matching
+    // dimensions; reassert the panel rotation without recreating either buffer.
+    const int gbRotation = displayIsPortrait()
+        ? TAB5_DISPLAY_PORTRAIT_ROTATION : TAB5_DISPLAY_ROTATION;
+    tft.setRotation(gbRotation);
     Serial.printf("[gb] display rotation=%d logical=%dx%d\n",
-                  TAB5_DISPLAY_ROTATION, tft.width(), tft.height());
+                  gbRotation, tft.width(), tft.height());
     Serial.println("[GBDBG launch 07] host begin call");
     Serial.flush();
     if (!gbHost.begin()) {

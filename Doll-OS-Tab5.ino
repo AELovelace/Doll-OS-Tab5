@@ -164,6 +164,7 @@ void setup() {
 void loop() {
     acceptTelnetClient();
     readTelnetClient();
+    touchKeyboardService(); //portrait status toggle and on-screen keyboard input
     readKeyboardSerial();   //official Tab5 Keyboard events normalized into terminal bytes
     gbServiceMainTouch();   //status-bar GB launcher; opens the same picker as the `gb` command
     gbaServiceMainTouch();  //status-bar GBA launcher, to its right; same deal for `gba`

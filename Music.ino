@@ -738,6 +738,14 @@ static void musicRunPlayer() {
         return;
     }
 
+    // The library/player is a dedicated keyboard-driven 1280x720 surface. Keep
+    // a keyboard-less tablet user in the usable portrait shell instead of
+    // dropping them into a screen they cannot exit.
+    if (displayIsPortrait()) {
+        outLine("music: tap LAND before opening the full-screen player", C_YELLOW);
+        return;
+    }
+
     musicRebuildFilter("");
     int selected = musicFilteredPositionForTrack(musicCurrentTrack);
     if (selected < 0) selected = 0;

@@ -1381,6 +1381,7 @@ void handleGbaCommand(const String parts[], int partCount) {
         gbaPrintUsage();
         return;
     }
+    if (displayIsPortrait()) displaySetPortrait(false);
     if (partCount < 2 || (partCount == 2 && gbaIsModeArg(parts[1]))) {
         gbaScale = partCount == 2 ? gbaModeScale(parts[1]) : 3;
         if (!gbaPickRom(romLogical)) return;

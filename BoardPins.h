@@ -20,6 +20,10 @@ static constexpr int TAB5_KEYBOARD_INTERRUPT_PIN = 50;
 
 // Rotation 3 presents this Tab5 panel as upright 1280x720 landscape.
 static constexpr int TAB5_DISPLAY_ROTATION = 3;
+// The adjacent rotation presents the same panel as 720x1280 portrait. Keeping
+// this explicit makes the status-bar tablet toggle easy to reverse on hardware
+// if a later panel revision reports its native orientation differently.
+static constexpr int TAB5_DISPLAY_PORTRAIT_ROTATION = 2;
 
 // ESP32-P4 reaches the onboard ESP32-C6 radio through this SDIO2 bus.
 static constexpr int WIFI_SDIO_CLK_PIN = 12;

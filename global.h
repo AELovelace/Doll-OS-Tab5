@@ -479,6 +479,77 @@ const int DISPLAY_TERMINAL_LINE_HEIGHT = 24;
 const int DISPLAY_STATUS_BAR_HEIGHT = 32;
 const int DISPLAY_COMMAND_BAR_HEIGHT = 40;
 const int DISPLAY_PADDING = 8;
+
+// Display.ino exposes the shell's runtime geometry. Full-screen apps retain the
+// native landscape constants above; the portrait status-bar mode uses the same
+// 921,600-pixel canvas with its axes exchanged and reserves the bottom for the
+// touch keyboard.
+bool displayIsPortrait();
+bool displaySetPortrait(bool portrait);
+int displayWidth();
+int displayHeight();
+int displayTextSize();
+void displayUseTerminalTextSize();
+int displayTerminalLineHeight();
+int displayCommandBarHeight();
+int displayTouchKeyboardHeight();
+void drawTouchKeyboard();
+void touchKeyboardService();
+bool keyboardInjectByte(uint8_t value);
+bool keyboardInjectBytes(const uint8_t* bytes, size_t count);
+
+// TouchKeyboard.ino's helpers mention these in Arduino-generated prototypes,
+// so the vocabulary must live above the concatenated .ino body (the same
+// prototype-hoisting rule as LineInputResult/EditKey above).
+enum TouchKeyAction : uint8_t {
+    TKA_TEXT,
+    TKA_SHIFT,
+    TKA_SYMBOLS,
+    TKA_CTRL,
+    TKA_BACKSPACE,
+    TKA_ENTER,
+    TKA_ESCAPE,
+    TKA_LEFT,
+    TKA_RIGHT,
+    TKA_SPACE,
+};
+struct TouchKeySpec {
+    const char* label;
+    const char* shiftedLabel;
+    const char* bytes;
+    const char* shiftedBytes;
+    TouchKeyAction action;
+    uint8_t units;
+};
+
+// Gameboy.ino uses one orientation-selected control map for drawing and hit
+// testing. Keeping the type above Arduino's generated prototypes avoids the
+// same .ino prototype-hoisting trap as the input types above.
+struct GbTouchLayout {
+    int dpadX;
+    int dpadY;
+    int dpadHalf;
+    int dpadDead;
+    int dpadArm;
+    int dpadThick;
+    int aX;
+    int aY;
+    int bX;
+    int bY;
+    int faceRadius;
+    int selectX;
+    int selectY;
+    int selectW;
+    int selectH;
+    int startX;
+    int startY;
+    int startW;
+    int startH;
+    int menuX;
+    int menuY;
+    int menuW;
+    int menuH;
+};
 //   .dapp canvas (AppRunner.ino) -- a fixed character grid a script can address by cell
 //   instead of appending scrolling lines, which is what a game needs. While
 //   dappCanvasActive is set, drawDisplayFrame() paints this grid over the terminal
