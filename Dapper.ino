@@ -216,7 +216,7 @@ static String dapperShaHex(const unsigned char digest[32]) {
     return String(output);
 }
 
-static bool dapperFetchToFile(const String& url, const char* destination,
+static bool dapperFetchToFile(const String& url, const String& destination,
                               size_t maximumBytes, size_t expectedBytes,
                               const String& expectedSha256, String& actualSha256,
                               String& error) {
@@ -276,9 +276,18 @@ static bool dapperFetchToFile(const String& url, const char* destination,
         return false;
     }
 
-    ledPulseStorageWrite(false);
-    LittleFS.remove(destination);
-    File output = LittleFS.open(destination, "w");
+    RoutedPath destinationPath = routePath(destination);
+    if (destinationPath.isSd && !sdCardMounted) {
+        error = "SD not mounted";
+        http->end();
+        delete http;
+        delete secureClient;
+        heap_caps_free(buffer);
+        return false;
+    }
+    ledPulseStorageWrite(destinationPath.isSd);
+    destinationPath.fs->remove(destinationPath.realPath);
+    File output = destinationPath.fs->open(destinationPath.realPath, "w");
     if (!output) {
         error = "cannot create temporary download";
         http->end();
@@ -328,7 +337,7 @@ static bool dapperFetchToFile(const String& url, const char* destination,
             failed = true;
             break;
         }
-        ledPulseStorageWrite(false);
+        ledPulseStorageWrite(destinationPath.isSd);
         mbedtls_sha256_update(&sha, buffer, (size_t)received);
         lastActivity = millis();
         dapperServiceUi();
@@ -358,7 +367,7 @@ static bool dapperFetchToFile(const String& url, const char* destination,
     }
     if (failed) {
         ledPulseError();
-        LittleFS.remove(destination);
+        destinationPath.fs->remove(destinationPath.realPath);
     }
     return !failed;
 }
@@ -676,8 +685,15 @@ static bool dapperHeaderHasBoard(const String& boards) {
     return false;
 }
 
-static bool dapperValidateDownloadedPackage(const DapperRecord& record, String& error) {
-    File package = LittleFS.open(DAPPER_PACKAGE_PART_PATH, "r");
+static bool dapperValidateDownloadedPackage(const DapperRecord& record,
+                                            const String& packagePath,
+                                            String& error) {
+    RoutedPath routedPackage = routePath(packagePath);
+    if (routedPackage.isSd && !sdCardMounted) {
+        error = "SD not mounted";
+        return false;
+    }
+    File package = routedPackage.fs->open(routedPackage.realPath, "r");
     if (!package) {
         error = "cannot reopen downloaded package";
         return false;
@@ -716,7 +732,7 @@ static bool dapperValidateDownloadedPackage(const DapperRecord& record, String& 
         return false;
     }
 
-    package = LittleFS.open(DAPPER_PACKAGE_PART_PATH, "r");
+    package = routedPackage.fs->open(routedPackage.realPath, "r");
     int lineCount = 0;
     while (package.available()) {
         package.readStringUntil('\n');
@@ -787,7 +803,7 @@ bool dapperFetchPackageForEdit(const String& request, const String& targetPrefer
                            record.size, record.sha256, actualHash, error)) {
         return false;
     }
-    if (!dapperValidateDownloadedPackage(record, error)) {
+    if (!dapperValidateDownloadedPackage(record, DAPPER_PACKAGE_PART_PATH, error)) {
         ledPulseStorageWrite(false);
         LittleFS.remove(DAPPER_PACKAGE_PART_PATH);
         return false;
@@ -833,61 +849,6 @@ static bool dapperHashFile(const String& path, String& hash, size_t& size) {
     return true;
 }
 
-static bool dapperCopyDownloadedPackageToTargetPart(const String& targetPart, String& error) {
-    File input = LittleFS.open(DAPPER_PACKAGE_PART_PATH, "r");
-    if (!input || input.isDirectory()) {
-        if (input) input.close();
-        error = "cannot reopen verified download";
-        return false;
-    }
-
-    RoutedPath part = routePath(targetPart);
-    if (part.isSd && !sdCardMounted) {
-        input.close();
-        error = "SD not mounted";
-        return false;
-    }
-    part.fs->remove(part.realPath);
-    ledPulseStorageWrite(part.isSd);
-    File output = part.fs->open(part.realPath, "w");
-    if (!output) {
-        input.close();
-        error = "cannot create package staging file";
-        return false;
-    }
-
-    uint8_t* buffer = (uint8_t*)heap_caps_malloc(DAPPER_IO_BUFFER_BYTES, MALLOC_CAP_8BIT);
-    if (!buffer) {
-        input.close();
-        output.close();
-        dapperRemoveFile(targetPart);
-        error = "not enough heap for package copy";
-        return false;
-    }
-    while (input.available()) {
-        int received = input.read(buffer, DAPPER_IO_BUFFER_BYTES);
-        ledPulseStorageRead(false);
-        if (received <= 0) break;
-        if (output.write(buffer, (size_t)received) != (size_t)received) {
-            heap_caps_free(buffer);
-            input.close();
-            output.close();
-            dapperRemoveFile(targetPart);
-            error = "filesystem write failed";
-            return false;
-        }
-        ledPulseStorageWrite(part.isSd);
-        dapperServiceUi();
-    }
-
-    heap_caps_free(buffer);
-    input.close();
-    output.close();
-    ledPulseStorageWrite(false);
-    LittleFS.remove(DAPPER_PACKAGE_PART_PATH);
-    return true;
-}
-
 static bool dapperInstallRecord(const DapperRecord& record, bool force, const String& target) {
     String error;
     if (!dapperEnsureStorage(error)) {
@@ -920,28 +881,21 @@ static bool dapperInstallRecord(const DapperRecord& record, bool force, const St
         return true;
     }
 
-    outLine("Dapper: downloading " + record.id + " " + record.version + "...", C_CYAN);
-    String actualHash;
-    if (!dapperFetchToFile(String(DAPPER_REPOSITORY_BASE_URL) + record.url,
-                           DAPPER_PACKAGE_PART_PATH, DAPPER_MAX_PACKAGE_BYTES,
-                           record.size, record.sha256, actualHash, error)) {
-        outLine("Dapper: " + error, C_RED);
-        return false;
-    }
-    if (!dapperValidateDownloadedPackage(record, error)) {
-        ledPulseStorageWrite(false);
-        LittleFS.remove(DAPPER_PACKAGE_PART_PATH);
-        outLine("Dapper: " + error, C_RED);
-        return false;
-    }
-
     String targetPart = target + ".part.dsys";
     String targetBackup = target + ".bak.dsys";
     dapperRemoveFile(targetPart);
     dapperRemoveFile(targetBackup);
-    if (!dapperCopyDownloadedPackageToTargetPart(targetPart, error)) {
-        ledPulseStorageWrite(false);
-        LittleFS.remove(DAPPER_PACKAGE_PART_PATH);
+
+    outLine("Dapper: downloading " + record.id + " " + record.version + "...", C_CYAN);
+    String actualHash;
+    if (!dapperFetchToFile(String(DAPPER_REPOSITORY_BASE_URL) + record.url,
+                           targetPart, DAPPER_MAX_PACKAGE_BYTES,
+                           record.size, record.sha256, actualHash, error)) {
+        outLine("Dapper: " + error, C_RED);
+        return false;
+    }
+    if (!dapperValidateDownloadedPackage(record, targetPart, error)) {
+        dapperRemoveFile(targetPart);
         outLine("Dapper: " + error, C_RED);
         return false;
     }

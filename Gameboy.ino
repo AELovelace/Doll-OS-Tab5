@@ -380,7 +380,6 @@ static GbTouchLayout gbGetTouchLayout() {
 }
 
 static constexpr int GB_TOUCH_DOT_R = 14;
-static constexpr int GB_TOUCH_DOT_BOX = GB_TOUCH_DOT_R * 2 + 1;
 
 struct GbTouchPoint {
     int16_t x;
@@ -392,7 +391,6 @@ static uint8_t gbTouchActivePointCount = 0;
 static GbTouchPoint gbTouchDrawnPoints[5];
 static uint8_t gbTouchDrawnPointCount = 0;
 static bool gbTouchDotsDirty = false;
-static uint16_t gbTouchDotRestore[GB_TOUCH_DOT_BOX * GB_TOUCH_DOT_BOX];
 
 static void gbDrawTouchControls() {
     const GbTouchLayout layout = gbGetTouchLayout();
@@ -583,8 +581,6 @@ static void gbRenderTouchDots(bool force) {
     uint16_t* frame = (uint16_t*)frameSprite.getBuffer();
     if (!frame) return;
 
-    const bool oldSwap = tft.getSwapBytes();
-    tft.setSwapBytes(false);  // frameSprite pixels are already panel-native RGB565
     for (uint8_t i = 0; i < gbTouchDrawnPointCount; i++) {
         const int x0 = max(0, (int)gbTouchDrawnPoints[i].x - GB_TOUCH_DOT_R);
         const int y0 = max(0, (int)gbTouchDrawnPoints[i].y - GB_TOUCH_DOT_R);
@@ -593,14 +589,8 @@ static void gbRenderTouchDots(bool force) {
         const int width = x1 - x0;
         const int height = y1 - y0;
         if (width <= 0 || height <= 0) continue;
-        for (int row = 0; row < height; row++) {
-            memcpy(gbTouchDotRestore + row * width,
-                   frame + (size_t)(y0 + row) * displayWidth() + x0,
-                   (size_t)width * sizeof(uint16_t));
-        }
-        tft.pushImage(x0, y0, width, height, gbTouchDotRestore);
+        pushDisplaySpriteRegion(x0, y0, width, height);
     }
-    tft.setSwapBytes(oldSwap);
 
     for (uint8_t i = 0; i < gbTouchActivePointCount; i++) {
         const int x = gbTouchActivePoints[i].x;
@@ -899,10 +889,18 @@ static bool gbPickRom(String& romLogical) {
         return false;
     }
 
-    static String names[kGbRomMenuMax];
+    // This picker is used only on demand. Keeping 128 String objects in static
+    // BSS spent 2 KB of internal RAM for the entire boot, even when Game Boy was
+    // never opened. The general heap routes this 2 KB array to PSRAM.
+    String* names = new (std::nothrow) String[kGbRomMenuMax];
+    if (!names) {
+        outLine("gb: not enough memory for the ROM picker", C_RED);
+        return false;
+    }
     bool truncated = false;
     int count = gbCollectRomNames(names, truncated);
     if (count == 0) {
+        delete[] names;
         outLine("gb: no .gb/.gbc files found in /sd/gb", C_YELLOW);
         return false;
     }
@@ -932,6 +930,7 @@ static bool gbPickRom(String& romLogical) {
         gbRenderTouchDots();
         events |= gbPumpTelnetMenuInput(telnetPressed);
         if (events & (GB_EVT_QUIT | GB_EVT_MENU)) {
+            delete[] names;
             slaveLinkSendLine("GAME 0");
             outLine("gb: ROM selection cancelled", C_YELLOW);
             return false;
@@ -968,6 +967,7 @@ static bool gbPickRom(String& romLogical) {
             continue;
         }
         if (pressed & GameBoyHost::kB) {
+            delete[] names;
             slaveLinkSendLine("GAME 0");
             outLine("gb: ROM selection cancelled", C_YELLOW);
             return false;
@@ -975,6 +975,7 @@ static bool gbPickRom(String& romLogical) {
         if (pressed & (GameBoyHost::kA | GameBoyHost::kStart)) {
             slaveLinkSendLine("GAME 0");
             romLogical = String(kGbRomDir) + "/" + names[selected];
+            delete[] names;
             return true;
         }
     }

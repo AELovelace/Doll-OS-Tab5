@@ -47,11 +47,18 @@ static const int DISPLAY_PUSH_ROWS = 8;
 static const int DISPLAY_IMAGE_STAGING_ROWS = 4;
 static uint16_t* displayImageStaging = nullptr;
 static int displayImageStagingPixels = 0;
+// Own one full-resolution shell canvas explicitly in PSRAM and only reinterpret
+// its axes when the user rotates the UI. M5Canvas otherwise frees and reallocates
+// the same 1.84 MB on every landscape/portrait transition. Apart from churning
+// PSRAM, its generic DMA allocator is allowed to consider internal-capable heaps.
+static uint16_t* displayFrameBuffer = nullptr;
 static DappCanvasCell* displayCanvasShadow = nullptr;
 static int displayCanvasShadowCols = 0;
 static int displayCanvasShadowRows = 0;
 static bool displayCanvasShadowValid = false;
-static bool displayDappDirtyRows[DISPLAY_WIDTH] = {};
+// Only AppRunner FLIP scans this row bitmap. It is cold bookkeeping, so keep its
+// 1.25 KB out of internal BSS; a null bitmap falls back to a full canvas push.
+static uint8_t* displayDappDirtyRows = nullptr;
 static bool displayPortrait = false;
 
 bool displayIsPortrait() { return displayPortrait; }
@@ -80,10 +87,13 @@ int displayTouchKeyboardHeight() {
 }
 
 static void clearDappDirtyRows() {
-    memset(displayDappDirtyRows, 0, sizeof(displayDappDirtyRows));
+    if (displayDappDirtyRows) {
+        memset(displayDappDirtyRows, 0, DISPLAY_WIDTH * sizeof(*displayDappDirtyRows));
+    }
 }  // Starts a canvas FLIP with no panel rows scheduled for transfer.
 
 static void markDappDirtyRows(int y, int height) {
+    if (!displayDappDirtyRows) return;
     int firstRow = max(0, y);
     int lastRow = min(displayHeight(), y + height);
     for (int row = firstRow; row < lastRow; row++) {
@@ -224,6 +234,11 @@ static void pushDisplayRows(int y, int rowCount) {
 }  // Copies complete sprite rows to the panel in bounded-writeback strips.
 
 static void pushDappDirtyRows() {
+    if (!displayDappDirtyRows) {
+        pushDisplayRows(0, displayHeight());
+        displayInvalidateShadow();
+        return;
+    }
     int row = 0;
     const int canvasHeight = displayHeight();
     while (row < canvasHeight) {
@@ -244,6 +259,22 @@ static void pushDappDirtyRows() {
     //only one full resynchronization after the app exits.
     displayInvalidateShadow();
 }  // Transfers canvas changes without scanning or copying the two 1.84MB PSRAM images.
+
+static bool bindDisplayFrameBuffer(int width, int height) {
+    const size_t pixelCount = (size_t)DISPLAY_WIDTH * DISPLAY_HEIGHT;
+    if (!displayFrameBuffer) {
+        displayFrameBuffer = (uint16_t*)heap_caps_calloc(
+            pixelCount, sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        Serial.printf("[psram] frameSprite backing: %u bytes -> %s\n",
+                      (unsigned)(pixelCount * sizeof(uint16_t)),
+                      displayFrameBuffer ? "PSRAM" : "allocation failed");
+    }
+    if (!displayFrameBuffer) return false;
+
+    frameSprite.setColorDepth(16);
+    frameSprite.setBuffer(displayFrameBuffer, width, height, 16);
+    return frameSprite.getBuffer() == displayFrameBuffer;
+}  // Rebinds the same PSRAM pixels without freeing or reallocating them.
 
 static bool copyDisplayRowsToShadow(int y, int rowCount) {
     uint16_t* frame = (uint16_t*)frameSprite.getBuffer();
@@ -302,9 +333,15 @@ void pushDisplayFrame() {
 }
 
 void initDisplay() {
+    const size_t internalBefore = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     //history ring first, so its PSRAM use is accounted before the sprite snapshot below
     displayHistoryRows = (DisplayHistoryRow*) psramOrInternalCalloc(
         DISPLAY_HISTORY_MAX_LINES, sizeof(DisplayHistoryRow), "displayHistory");
+    displayDappDirtyRows = (uint8_t*)heap_caps_calloc(
+        DISPLAY_WIDTH, sizeof(*displayDappDirtyRows), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    Serial.printf("[psram] display dirty rows: %u bytes -> %s\n",
+                  (unsigned)(DISPLAY_WIDTH * sizeof(*displayDappDirtyRows)),
+                  displayDappDirtyRows ? "PSRAM" : "unavailable (full canvas pushes)");
 
     //The frame sprite is about 1.8MB at 16bpp. Snapshot PSRAM around allocation
     //so the boot log proves where M5Canvas placed it.
@@ -313,8 +350,7 @@ void initDisplay() {
     Serial.printf("[display] rotation=%d logical=%dx%d\n",
                   TAB5_DISPLAY_ROTATION, tft.width(), tft.height());
 
-    frameSprite.setColorDepth(16);
-    frameSprite.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    bindDisplayFrameBuffer(DISPLAY_WIDTH, DISPLAY_HEIGHT);
     Serial.printf("[psram] frameSprite: %u bytes drawn from PSRAM (0 => it fell back to internal RAM)\n",
                   (unsigned)(psramFreeBeforeSprite - ESP.getFreePsram()));
 
@@ -347,6 +383,10 @@ void initDisplay() {
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
     displayUseTerminalTextSize();
     frameSprite.fillSprite(TFT_BLACK);
+    const size_t internalAfter = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    Serial.printf("[ram] initDisplay internal: before=%u after=%u delta=%d\n",
+                  (unsigned)internalBefore, (unsigned)internalAfter,
+                  (int)internalAfter - (int)internalBefore);
     //setup() draws the boot splash immediately after initDisplay(). Avoid a redundant
     //full black commit immediately before that first cyan frame.
 }
@@ -355,19 +395,18 @@ bool displaySetPortrait(bool portrait) {
     if (portrait == displayPortrait) return true;
     if (dappCanvasActive) return false;
 
-    frameSprite.deleteSprite();
+    const size_t internalBefore = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     displayPortrait = portrait;
     tft.setRotation(displayPortrait ? TAB5_DISPLAY_PORTRAIT_ROTATION
                                     : TAB5_DISPLAY_ROTATION);
-    frameSprite.setColorDepth(16);
-    void* buffer = frameSprite.createSprite(displayWidth(), displayHeight());
-    if (!buffer) {
+    bool bound = bindDisplayFrameBuffer(displayWidth(), displayHeight());
+    if (!bound) {
         Serial.printf("[display] %s canvas allocation failed; restoring landscape\n",
                       displayPortrait ? "portrait" : "landscape");
         displayPortrait = false;
         tft.setRotation(TAB5_DISPLAY_ROTATION);
-        buffer = frameSprite.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT);
-        if (!buffer) {
+        bound = bindDisplayFrameBuffer(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        if (!bound) {
             Serial.println("[display] FATAL: canvas restore allocation failed");
             return false;
         }
@@ -384,6 +423,10 @@ bool displaySetPortrait(bool portrait) {
     Serial.printf("[display] mode=%s rotation=%d logical=%dx%d text=%d\n",
                   displayPortrait ? "portrait" : "landscape",
                   tft.getRotation(), displayWidth(), displayHeight(), displayTextSize());
+    const size_t internalAfter = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    Serial.printf("[ram] display rotation internal: before=%u after=%u delta=%d\n",
+                  (unsigned)internalBefore, (unsigned)internalAfter,
+                  (int)internalAfter - (int)internalBefore);
     return displayPortrait == portrait;
 }  // Reuses the same pixel count while exchanging the canvas axes.
 
