@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id synth
 # @name Three Channel Synth
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.4.0 <2.0.0
 # @summary Mix three live sine, triangle, square, or noise voices
 
@@ -25,7 +25,7 @@ WAVE 2 $w2 $f2 $l2
 WAVE 3 $w3 $f3 $l3
 IF $audiook = 0 GOTO audio_fail
 
-CANVAS 60 20
+CANVAS 100 40
 
 :loop
 GOSUB draw
@@ -211,7 +211,7 @@ CLEAR
 COLOR pink
 PUT 1 0 "THREE CHANNEL SYNTH"
 COLOR white
-PUT 25 0 "1/2/3 select  X exit"
+PUT 68 0 "1/2/3 select  X exit"
 PUT 1 1 "S sine  T triangle  Q square  N noise  O off"
 PUT 1 2 "left/right frequency   up/down level"
 
@@ -251,7 +251,7 @@ RETURN
 :plot
 SET x 0
 :plot_loop
-IF $x >= 48 GOTO plot_done
+IF $x >= 80 GOTO plot_done
 SET y 0
 IFEQ $pw "sine" GOTO plot_sine
 IFEQ $pw "triangle" GOTO plot_tri

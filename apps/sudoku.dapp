@@ -1,15 +1,15 @@
 # @dapp-format 1
 # @id sudoku
 # @name Sudoku 9x9
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.1.0 <2.0.0
 # @summary A full-size 9x9 Sudoku game designed for the DS canvas
 # /apps/sudoku.dapp
 # Arrows move, 1-9 enter a digit, 0 or backspace clears, c checks the
 # board, n starts a fresh digit-shifted puzzle, escape quits.
 
-CANVAS 52 24
+CANVAS 80 36
 DIM grid 81
 DIM solution 81
 DIM fixed 81
@@ -130,7 +130,7 @@ CLS
 COLOR pink
 PUT 2 1 "SUDOKU 9x9"
 COLOR cyan
-PUT 25 1 "$msg"
+PUT 52 5 "$msg"
 COLOR gray
 PUT 6 3 "+-----------+-----------+-----------+"
 PUT 6 10 "+-----------+-----------+-----------+"
@@ -178,7 +178,11 @@ ADD r 1
 GOTO drawrow
 :drawdone
 COLOR white
-PUT 2 22 "0/back clear   c check   n new   esc quit"
+PUT 52 12 "digits      enter"
+PUT 52 14 "0 / BACK    clear"
+PUT 52 16 "C           check"
+PUT 52 18 "N           new"
+PUT 52 20 "ESC         quit"
 FLIP
 RETURN
 

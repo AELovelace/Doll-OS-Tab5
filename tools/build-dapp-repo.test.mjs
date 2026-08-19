@@ -130,8 +130,8 @@ test("current repository sources validate", async () => {
     assert.match(record.sha256, /^[a-f0-9]{64}$/);
   }
 
-  const universal = result.records.find((record) => record.id === "decide");
-  assert.deepEqual(universal.boards, ["fnk0104", "m5cardputer"]);
+  const tab5Edition = result.records.find((record) => record.id === "decide");
+  assert.deepEqual(tab5Edition.boards, ["m5stack-tab5"]);
 });
 
 test("FNK0104 compatibility contract matches AppRunner source", async () => {
@@ -142,6 +142,27 @@ test("FNK0104 compatibility contract matches AppRunner source", async () => {
   const declared = compatibility.boards.fnk0104.runtime;
   assert.deepEqual(sourceOpcodes(source), resolvedRuntimeOpcodes(compatibility, declared));
   assertLimitsMatch(source, compatibility.boards.fnk0104.limits, {
+    DAPP_MAX_LINES: "lines",
+    DAPP_MAX_LABELS: "labels",
+    DAPP_MAX_VARS: "numeric_variables",
+    DAPP_MAX_STRING_VARS: "string_variables",
+    DAPP_MAX_STRING_LEN: "string_length",
+    DAPP_MAX_ARRAYS: "arrays",
+    DAPP_ARRAY_POOL_CELLS: "array_cells",
+    DAPP_MAX_CALL_DEPTH: "call_depth",
+    DAPP_CANVAS_MAX_COLS: "canvas_columns",
+    DAPP_CANVAS_MAX_ROWS: "canvas_rows",
+    DAPP_MAX_STEPS: "steps",
+    DAPP_BUF_MAX_BYTES: "buffer_bytes",
+  });
+});
+
+test("Tab5 compatibility contract matches AppRunner source", async () => {
+  const compatibility = JSON.parse(await readFile(projectCompatibility, "utf8"));
+  const source = await readFile(path.join(projectRoot, "AppRunner.ino"), "utf8");
+  const declared = compatibility.boards["m5stack-tab5"].runtime;
+  assert.deepEqual(sourceOpcodes(source), resolvedRuntimeOpcodes(compatibility, declared));
+  assertLimitsMatch(source, compatibility.boards["m5stack-tab5"].limits, {
     DAPP_MAX_LINES: "lines",
     DAPP_MAX_LABELS: "labels",
     DAPP_MAX_VARS: "numeric_variables",
@@ -181,7 +202,9 @@ test("M5Cardputer compatibility contract matches sibling AppRunner when availabl
 });
 
 test("builds a universal artifact and parseable static catalog", async (t) => {
-  const fixture = await makeFixture(t, { "apps/hello.dapp": packageText() });
+  const fixture = await makeFixture(t, {
+    "apps/hello.dapp": packageText({ boards: "m5cardputer,fnk0104,m5stack-tab5" }),
+  });
   const result = await buildRepository(fixture);
   assert.equal(result.records.length, 1);
   assert.equal(result.records[0].url, "packages/hello/1.0.0/universal.dapp");
@@ -201,7 +224,7 @@ test("builds a universal artifact and parseable static catalog", async (t) => {
     path.join(fixture.outputPath, "packages", "hello", "1.0.0", "universal.dapp"),
     "utf8",
   );
-  assert.equal(copied, packageText());
+  assert.equal(copied, packageText({ boards: "m5cardputer,fnk0104,m5stack-tab5" }));
 });
 
 test("rejects an opcode newer than the declared runtime minimum", async (t) => {

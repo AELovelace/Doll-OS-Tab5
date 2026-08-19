@@ -1,37 +1,64 @@
 # @dapp-format 1
 # @id dappstore
 # @name Dappstore
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.6.0 <2.0.0
 # @echo off
-# @summary Browse, install, update and repair verified Dapper packages
+# @summary A wide Tab5 front end for browsing and maintaining Dapper packages
 # /system/apps/dappstore.dapp
 #
-# A guided front end for the runtime's deliberately narrow DAPPER bridge. The
-# bridge enters Dapper.ino directly rather than executing a shell command, so
-# repository identity checks, HTTPS verification, SHA-256 validation, atomic
-# replacement, managed-path rules and rollback remain exactly the same as at
-# the shell. This app adds prompts and confirmations; it does not install files
-# itself.
+# DAPPER remains the only installation path. This interface only collects choices,
+# then returns to the terminal surface while Dapper prints verified operation details.
 
 :menu
-CLEAR
+CANVAS 100 40
+CLS
 COLOR pink
-PRINT "========================================"
-PRINT "              DAPPSTORE"
-PRINT "========================================"
+PUT 3 1 "DAPPSTORE // TAB5 PACKAGE DESK"
 COLOR white
-PRINT "1  browse compatible packages"
-PRINT "2  search the catalog"
-PRINT "3  package details"
-PRINT "4  install a package"
-PRINT "5  update packages"
-PRINT "6  remove a package"
-PRINT "7  refresh catalog"
-PRINT "8  verify installed packages"
-PRINT "q  return to DOLL-OS"
-PRINT ""
+PUT 3 3 "Choose an action in the command bar. Repository operations remain HTTPS + SHA-256 verified."
+
+COLOR cyan
+PUT 4 7 "1  BROWSE"
+COLOR white
+PUT 4 9 "All compatible packages"
+COLOR cyan
+PUT 4 13 "2  SEARCH"
+COLOR white
+PUT 4 15 "Find packages by keyword"
+COLOR cyan
+PUT 4 19 "3  DETAILS"
+COLOR white
+PUT 4 21 "Versions and installation state"
+COLOR cyan
+PUT 4 25 "4  INSTALL"
+COLOR white
+PUT 4 27 "Install to flash or SD"
+
+COLOR yellow
+PUT 53 7 "5  UPDATE"
+COLOR white
+PUT 53 9 "One package or everything"
+COLOR yellow
+PUT 53 13 "6  REMOVE"
+COLOR white
+PUT 53 15 "Keep the app's save data"
+COLOR yellow
+PUT 53 19 "7  REFRESH"
+COLOR white
+PUT 53 21 "Download the latest catalog"
+COLOR yellow
+PUT 53 25 "8  DOCTOR"
+COLOR white
+PUT 53 27 "Verify registry and hashes"
+
+COLOR pink
+PUT 4 34 "Q  RETURN TO DOLL-OS"
+COLOR white
+PUT 4 37 "The operation report opens in the terminal and returns here when acknowledged."
+FLIP
+
 INPUT choice "store> "
 IFEQ $choice "1" GOTO browse
 IFEQ $choice "2" GOTO search
@@ -46,6 +73,7 @@ IFEQ $choice "Q" GOTO leave
 GOTO menu
 
 :browse
+ENDCANVAS
 CLEAR
 COLOR cyan
 PRINT "COMPATIBLE PACKAGES"
@@ -55,6 +83,7 @@ GOSUB pause
 GOTO menu
 
 :search
+ENDCANVAS
 CLEAR
 INPUT query "search> "
 LEN n $query
@@ -67,6 +96,7 @@ GOSUB pause
 GOTO menu
 
 :info
+ENDCANVAS
 CLEAR
 INPUT id "package id> "
 LEN n $id
@@ -76,6 +106,7 @@ GOSUB pause
 GOTO menu
 
 :install
+ENDCANVAS
 CLEAR
 COLOR cyan
 PRINT "INSTALL PACKAGE"
@@ -101,6 +132,7 @@ GOSUB pause
 GOTO menu
 
 :update
+ENDCANVAS
 CLEAR
 COLOR cyan
 PRINT "UPDATE PACKAGES"
@@ -120,6 +152,7 @@ GOSUB pause
 GOTO menu
 
 :remove
+ENDCANVAS
 CLEAR
 COLOR yellow
 PRINT "REMOVE PACKAGE"
@@ -136,6 +169,7 @@ GOSUB pause
 GOTO menu
 
 :refresh
+ENDCANVAS
 CLEAR
 COLOR cyan
 PRINT "REFRESH CATALOG"
@@ -145,6 +179,7 @@ GOSUB pause
 GOTO menu
 
 :doctor
+ENDCANVAS
 CLEAR
 COLOR cyan
 PRINT "VERIFY INSTALLED PACKAGES"
@@ -166,6 +201,7 @@ INPUT waitkey "press enter> "
 RETURN
 
 :leave
+ENDCANVAS
 COLOR pink
 PRINT "Dappstore closed"
 EXIT

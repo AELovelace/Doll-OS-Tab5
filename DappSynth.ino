@@ -1,7 +1,7 @@
 //   DappSynth.ino
 //   Three-channel PCM synthesizer for the .dapp WAVE opcode. The oscillator task
 //   owns phase/noise state while the interpreter only updates a tiny guarded set
-//   of channel parameters. Audio uses the same ES8311/I2S handoff as Game Boy.
+//   of channel parameters. Audio uses the same ES8388/I2S handoff as Game Boy.
 
 #include "src/AudioOut.h"
 #include <math.h>

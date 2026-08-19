@@ -296,7 +296,10 @@ static inline uint16_t readw(unsigned a)
 	{
 		return readb(a) | (readb(a + 1) << 8);
 	}
-	return *(uint16_t *)(p + a);
+	// Do not cast external-PSRAM bytes to uint16_t*. Game Boy operands are
+	// commonly unaligned, and an aligned halfword load is not portable on the
+	// ESP32-P4/RISC-V path. Assemble the little-endian word explicitly.
+	return p[a] | ((uint16_t)p[a + 1] << 8);
 }
 
 static inline void writew(unsigned a, uint16_t w)
@@ -309,6 +312,8 @@ static inline void writew(unsigned a, uint16_t w)
 	}
 	else
 	{
-		*(uint16_t *)(p + a) = w;
+		// Match readw(): word destinations can be unaligned too.
+		p[a] = (byte)w;
+		p[a + 1] = (byte)(w >> 8);
 	}
 }

@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id requests
 # @name Requests
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.5.0 <2.0.0
 # @echo off
 # @summary A pocket HTTP client with headers, JSON paths and saved responses
@@ -162,7 +162,7 @@ FREAD line
 IF $feof = 1 GOTO sf_done
 PRINT "$line"
 ADD lines 1
-IF $lines >= 20 GOTO sf_pause
+IF $lines >= 34 GOTO sf_pause
 GOTO sf_loop
 :sf_pause
 SET lines 0

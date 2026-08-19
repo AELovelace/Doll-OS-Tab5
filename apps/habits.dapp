@@ -1,15 +1,15 @@
 # @dapp-format 1
 # @id habits
 # @name Pocket Habits
-# @version 1.0.0
-# @boards m5cardputer
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.1.0 <2.0.0
 # @summary A persistent four-habit weekly tracker sized for Cardputer
 # /apps/habits.dapp
 # Left/right choose a day, 1-4 toggle habits, r twice resets the week,
 # escape quits. State is kept in /apps/habits.dat.
 
-CANVAS 36 14
+CANVAS 80 36
 DIM done 28
 SET day 0
 SET confirm 0
@@ -85,15 +85,15 @@ RETURN
 :draw
 CLS
 COLOR pink
-PUT 1 0 "POCKET HABITS"
+PUT 3 2 "P O C K E T   H A B I T S"
 COLOR cyan
-PUT 19 0 "week view"
+PUT 58 2 "WEEK VIEW"
 COLOR white
-PUT 11 2 "M  T  W  T  F  S  S"
+PUT 20 7 "MON     TUE     WED     THU     FRI     SAT     SUN"
 SET row 0
 :drawhabit
 IF $row >= 4 GOTO drawfoot
-EXPR y 4 + $row * 2
+EXPR y 11 + $row * 5
 IF $row = 0 GOTO namewater
 IF $row = 1 GOTO namemove
 IF $row = 2 GOTO nameread
@@ -109,12 +109,12 @@ GOTO namedone
 SETSTR name "Read "
 :namedone
 COLOR white
-PUT 1 $y "$name"
+PUT 3 $y "$name"
 SET col 0
 :drawday
 IF $col >= 7 GOTO nextrow
 EXPR idx $row * 7 + $col
-EXPR x 11 + $col * 3
+EXPR x 21 + $col * 8
 IF $col = $day GOTO drawselected
 COLOR blue
 GOTO drawmark
@@ -136,7 +136,9 @@ ADD row 1
 GOTO drawhabit
 :drawfoot
 COLOR cyan
-PUT 1 12 "$msg"
+PUT 3 32 "$msg"
+COLOR white
+PUT 3 34 "1-4 toggle   LEFT/RIGHT choose day   R twice reset   ESC save and quit"
 FLIP
 RETURN
 

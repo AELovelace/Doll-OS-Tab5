@@ -262,7 +262,7 @@ Kinds are `sine`, `triangle`, `square`, `sawtooth`, `noise`, and `off`;
 frequency is `1..12000` Hz and level is `0..100` per channel. `sawtooth`
 requires AppRunner `>=1.8.0` -- older runtimes reject it as an invalid
 waveform. Noise frequency controls its sample-and-hold rate. The three voices
-are mixed and clamped before reaching the onboard ES8311 speaker. Starting the
+are mixed and clamped before reaching the onboard ES8388 speaker. Starting the
 synth stops/relinquishes internet radio, and leaving the app always silences
 and releases the synth. `$audiook` reports whether the most recent hardware
 start succeeded. `run synth` is the interactive three-channel mixer and
@@ -287,6 +287,14 @@ ENDCANVAS
 A canvas is at most 120 by 60 cells. `run tetris` is the worked example: a well
 in a 200-cell array, pieces rotated with `EXPR`, gravity paced off `$millis`, and
 every frame drawn cell by cell.
+
+Tab5 applications should normally use `84x36` for roomy calendar or grid views,
+or `100x40` for multi-panel tools. Those sizes retain readable glyphs on the
+1280x720 panel while exposing substantially more information than the inherited
+FNK layouts. The bundled Calendar and Sheet demonstrate `84x36`; Files, Today,
+Dappstore, and Paint demonstrate `100x40`. Touch is intentionally unavailable,
+so every visible action must remain reachable from the keyboard and the active
+focus or shortcut state must be written on the canvas.
 
 ## Files
 

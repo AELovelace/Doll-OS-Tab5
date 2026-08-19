@@ -26,7 +26,7 @@ BLE keyboard (BLE HID) ---+--> KeyboardHub --> terminal codec --> DOLL-OS
 USB keyboard (USB HID) ---+                  +-> held-key state --> games
 ```
 
-`libraries/DollInput` owns source identification, connection events, per-source
+`src/DollInput` owns source identification, connection events, per-source
 held-key state, boot-keyboard report differencing, and HID-to-terminal encoding.
 Transport callbacks must copy their reports into a transport-owned queue; the
 main input service is the only owner that submits reports to `KeyboardHub`.
@@ -46,9 +46,9 @@ modifier or game button stuck.
 - Track the source repository as `upstream-fnk`.
 - Pin the first port baseline with tag `fnk-base-27313e8`.
 - Add reviewed upstream-sync pull requests; never auto-merge source changes.
-- Establish a reproducible ESP32-P4 bring-up build.
+- Establish a reproducible Arduino IDE/Arduino CLI build of the complete sketch.
 
-### M1: hardware bring-up
+### M1: complete-sketch hardware integration
 
 - Initialize M5Unified/M5GFX without registering touch as an input source.
 - Verify the 1280x720 display, 32MB PSRAM, and board detection.
@@ -67,7 +67,9 @@ modifier or game button stuck.
 ### M3: three keyboard transports
 
 - Finish the Tab5 Keyboard backend, including modifiers and repeats.
-- Add a USB HID host backend with hot-plug and composite-device handling.
+- Validate the USB HID host backend, hot-plug reset, and composite keyboards.
+- Preserve modified terminal sequences such as Ctrl+Up/Down and Shift+Up/Down,
+  plus the inherited F12/held-button Game Boy mode, across local and USB HID.
 - Add a BLE HID client with bonding, reconnect, and a keyboard-management command.
 - Exercise simultaneous Tab5, USB, and BLE input without shared modifier state.
 
@@ -79,10 +81,10 @@ modifier or game button stuck.
 
 ### M5: Tab5 media and power
 
-- Replace the FNK ES8311 audio path with a Tab5 ES8388 audio backend.
-- Restore radio, music, DappSynth, and Game Boy audio through that backend.
+- [x] Replace the FNK ES8311 audio path with a Tab5 ES8388 audio backend.
+- [x] Route radio, music, DappSynth, and Game Boy audio through that backend.
 - Add keyboard-interrupt wake, display sleep, battery reporting, and shutdown.
-- Tune display pushes and Game Boy scaling for the MIPI display.
+- [x] Stage shell, `.dapp`, and Game Boy frame pushes through internal RAM for the MIPI display.
 
 ## MVP acceptance criteria
 
@@ -106,4 +108,11 @@ a second external ESP32.
 
 USB host is supported by the P4, but the final application must own the USB-A
 role and its switched 5V rail. USB device/HID forwarding demos are not the same
-as accepting a keyboard, so the port uses Espressif's HID host component.
+as accepting a keyboard, so the port uses `EspUsbHost` on the ESP-IDF USB Host stack.
+
+## Canonical build
+
+The repository root is the Arduino sketch. `Doll-OS-Tab5.ino` and
+`sketch.yaml` are the only supported firmware entry point; there is no separate
+PlatformIO or throwaway bring-up project. Arduino IDE is used for development
+and flashing, while Arduino CLI compiles the same profile in CI.

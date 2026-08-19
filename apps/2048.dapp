@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id 2048
 # @name 2048
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.1.0 <2.0.0
 # @summary Slide and merge tiles until one of them reads 2048
 # /apps/2048.dapp
@@ -17,7 +17,7 @@
 # direction handling -- the compact/merge/compact pass below never learns
 # which way the player pressed.
 
-CANVAS 40 14
+CANVAS 80 36
 COLOR yellow
 PUT 13 5 "2 0 4 8"
 COLOR white
@@ -332,20 +332,21 @@ ADD r 1
 IF $r < 4 GOTO dr_row
 
 COLOR yellow
-PUT 30 0 "2048"
+PUT 48 2 "2 0 4 8"
 COLOR cyan
-PUT 30 2 "SCORE"
+PUT 48 6 "SCORE"
 COLOR white
-PUT 30 3 $score
+PUT 48 7 $score
 COLOR cyan
-PUT 30 5 "BEST"
+PUT 48 10 "BEST"
 COLOR white
-PUT 30 6 $hiscore
+PUT 48 11 $hiscore
 COLOR yellow
-PUT 30 9 "wasd"
-PUT 30 10 "or arw"
-PUT 30 12 "r new"
-PUT 30 13 "esc"
+PUT 48 17 "WASD / arrows  move"
+PUT 48 20 "R               new game"
+PUT 48 23 "ESC             quit"
+PUT 48 29 "Join matching tiles"
+PUT 48 31 "and chase 2048!"
 FLIP
 RETURN
 

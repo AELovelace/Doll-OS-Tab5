@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id mines
 # @name Minesweeper
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.1.0 <2.0.0
 # @summary Sweep a 12x10 field of eighteen mines without opening one
 # /apps/mines.dapp
@@ -18,7 +18,7 @@
 # expanded, which is the same order a recursive version would visit them
 # without needing 100 nested GOSUBs to hold the frontier.
 
-CANVAS 40 15
+CANVAS 80 36
 COLOR red
 PUT 12 5 "M I N E S"
 COLOR white
@@ -341,9 +341,14 @@ PUT 12 13 "time"
 COLOR white
 PUT 17 13 $elapsed
 COLOR cyan
-PUT 24 13 "best"
+PUT 48 16 "best"
 COLOR white
-PUT 29 13 $best
+PUT 58 16 $best
+COLOR cyan
+PUT 48 21 "SPACE       open"
+PUT 48 23 "F           flag"
+PUT 48 25 "R           new field"
+PUT 48 27 "ESC         quit"
 COLOR yellow
 PUT 0 14 "space opens  f flags  r new  esc quit"
 FLIP

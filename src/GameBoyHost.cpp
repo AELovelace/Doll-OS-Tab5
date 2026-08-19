@@ -1,5 +1,6 @@
 #include "GameBoyHost.h"
 
+#include "../BoardVariant.h"
 #include "AudioOut.h"
 #include "esp_heap_caps.h"
 
@@ -20,11 +21,46 @@ void audioTrampoline(void* buf, size_t len) { AudioOut::onSamples(buf, len); }
 // Floor between periodic SRAM flushes so always-dirty carts (RTC games mark
 // SRAM dirty continuously) don't hammer the SD card every debounce period.
 constexpr uint32_t kSaveMinIntervalMs = 30000;
+
+void logMemory(const char* checkpoint) {
+  Serial.printf(
+      "[GBDBG host] %s heap_free=%u heap_largest=%u internal_free=%u "
+      "internal_largest=%u psram_free=%u psram_largest=%u\n",
+      checkpoint,
+      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
+  Serial.flush();
+}
 }
 
 bool GameBoyHost::begin() {
-  if (ready_) return true;
+  Serial.printf("[GBDBG host 01] begin enter ready=%u loaded=%u\n",
+                ready_ ? 1u : 0u, loaded_ ? 1u : 0u);
+  Serial.flush();
+  if (ready_) {
+    Serial.println("[GBDBG host 02] begin reuse existing core");
+    Serial.flush();
+    return true;
+  }
+  logMemory("before host buffers");
   const size_t framePixels = kWidth * kHeight;
+#if defined(DOLL_BOARD_TAB5)
+  //The DSI controller continuously reads its own framebuffer from PSRAM. Keep
+  //gnuboy's small, write-heavy source frame internal so LCD scanline rendering
+  //cannot contend with that scanout before Gameboy.ino stages the finished image.
+  frame_ = static_cast<uint16_t*>(heap_caps_calloc(
+      framePixels, sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  bool frameInPsram = false;
+  if (!frame_) {
+    frame_ = static_cast<uint16_t*>(heap_caps_calloc(
+        framePixels, sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    frameInPsram = frame_ != nullptr;
+  }
+#else
   frame_ = static_cast<uint16_t*>(heap_caps_calloc(
       framePixels, sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   const bool frameInPsram = frame_ != nullptr;
@@ -32,19 +68,30 @@ bool GameBoyHost::begin() {
     frame_ = static_cast<uint16_t*>(heap_caps_calloc(
         framePixels, sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   }
+#endif
+  Serial.printf("[GBDBG host 03] framebuffer allocation ptr=%p bytes=%u location=%s\n",
+                static_cast<void*>(frame_),
+                static_cast<unsigned>(framePixels * sizeof(uint16_t)),
+                frame_ ? (frameInPsram ? "PSRAM" : "INTERNAL") : "FAILED");
+  Serial.flush();
   soundScratch_ = static_cast<int16_t*>(heap_caps_malloc(
       kSoundScratchSamples * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  Serial.printf("[GBDBG host 04] audio scratch allocation ptr=%p bytes=%u\n",
+                static_cast<void*>(soundScratch_),
+                static_cast<unsigned>(kSoundScratchSamples * sizeof(int16_t)));
+  Serial.flush();
   if (!frame_ || !soundScratch_) {
     if (frame_) heap_caps_free(frame_);
     if (soundScratch_) heap_caps_free(soundScratch_);
     frame_ = nullptr;
     soundScratch_ = nullptr;
     status_ = "Game Boy buffers unavailable";
+    logMemory("host buffer allocation FAILED");
     return false;
   }
   Serial.printf("[psram] gbFrame: %u bytes -> %s\n",
                 (unsigned)(framePixels * sizeof(uint16_t)),
-                frameInPsram ? "PSRAM" : "INTERNAL RAM (PSRAM unavailable)");
+                frameInPsram ? "PSRAM" : "INTERNAL RAM");
   // The callback is always registered, even if the codec never came up: gnuboy
   // is init'd once for the life of the firmware, so binding on AudioOut's state
   // here would freeze the first launch's answer in forever. AudioOut::onSamples
@@ -53,8 +100,15 @@ bool GameBoyHost::begin() {
   //
   // Mono, not stereo: the board has one speaker on one I2S slot -- see the
   // mixdown note in AudioOut::onSamples.
-  if (gnuboy_init(kSampleRate, GB_AUDIO_MONO_S16, GB_PIXEL_565_LE, nullptr,
-                  &audioTrampoline) != 0) {
+  Serial.printf("[GBDBG host 05] gnuboy_init begin rate=%u frame=%p audio=%p\n",
+                static_cast<unsigned>(kSampleRate), static_cast<void*>(frame_),
+                static_cast<void*>(soundScratch_));
+  Serial.flush();
+  const int initResult = gnuboy_init(kSampleRate, GB_AUDIO_MONO_S16,
+                                     GB_PIXEL_565_LE, nullptr, &audioTrampoline);
+  Serial.printf("[GBDBG host 06] gnuboy_init returned %d\n", initResult);
+  Serial.flush();
+  if (initResult != 0) {
     heap_caps_free(frame_);
     heap_caps_free(soundScratch_);
     frame_ = nullptr;
@@ -62,27 +116,79 @@ bool GameBoyHost::begin() {
     status_ = "gnuboy initialization failed";
     return false;
   }
+  Serial.println("[GBDBG host 07] binding framebuffer");
+  Serial.flush();
   gnuboy_set_framebuffer(frame_);
+  Serial.println("[GBDBG host 08] binding audio scratch buffer");
+  Serial.flush();
   gnuboy_set_soundbuffer(soundScratch_, kSoundScratchSamples);
   ready_ = true;
   status_ = "Game Boy ready";
+  logMemory("host begin complete");
   return true;
 }
 
 bool GameBoyHost::load(const String& romPath, const String& savePath) {
-  if (!begin()) return false;
-  if (loaded_) stop();
-  if (romPath.isEmpty() || gnuboy_load_rom_file(romPath.c_str()) != 0) {
+  Serial.printf("[GBDBG host 10] load enter rom='%s' save='%s' loaded=%u\n",
+                romPath.c_str(), savePath.c_str(), loaded_ ? 1u : 0u);
+  Serial.flush();
+  if (!begin()) {
+    Serial.println("[GBDBG host 11] load stopped: begin failed");
+    Serial.flush();
+    return false;
+  }
+  if (loaded_) {
+    Serial.println("[GBDBG host 12] stopping previously loaded ROM");
+    Serial.flush();
+    stop();
+  }
+  if (romPath.isEmpty()) {
     status_ = "ROM load failed";
+    Serial.println("[GBDBG host 13] load stopped: empty ROM path");
+    Serial.flush();
+    return false;
+  }
+  logMemory("before gnuboy_load_rom_file");
+  Serial.println("[GBDBG host 14] gnuboy_load_rom_file begin");
+  Serial.flush();
+  const int loadResult = gnuboy_load_rom_file(romPath.c_str());
+  Serial.printf("[GBDBG host 15] gnuboy_load_rom_file returned %d\n", loadResult);
+  Serial.flush();
+  logMemory("after gnuboy_load_rom_file");
+  if (loadResult != 0) {
+    status_ = loadResult == -5
+                  ? "ROM integrity check failed (replace corrupt ROM)"
+                  : "ROM load failed (core error " + String(loadResult) + ")";
+    // gnuboy_load_rom_file may already have allocated cartridge RAM and ROM
+    // banks before detecting a malformed image. Release that partial load so
+    // the user can replace the file and try again without rebooting.
+    gnuboy_free_rom();
     return false;
   }
   savePath_ = savePath;
+  Serial.println("[GBDBG host 16] hard reset begin");
+  Serial.flush();
   gnuboy_reset(true);
-  if (!savePath_.isEmpty()) gnuboy_load_sram(savePath_.c_str());
+  Serial.println("[GBDBG host 17] hard reset complete");
+  Serial.flush();
+  if (!savePath_.isEmpty()) {
+    Serial.printf("[GBDBG host 18] SRAM load begin path='%s'\n", savePath_.c_str());
+    Serial.flush();
+    const int sramResult = gnuboy_load_sram(savePath_.c_str());
+    Serial.printf("[GBDBG host 19] SRAM load returned %d (%s)\n", sramResult,
+                  sramResult == 0 ? "loaded" : "absent/not-applicable");
+    Serial.flush();
+  } else {
+    Serial.println("[GBDBG host 19] SRAM load skipped: empty save path");
+    Serial.flush();
+  }
   loaded_ = true;
   savePending_ = false;
   lastSaveMs_ = 0;
   status_ = "Playing " + romPath;
+  logMemory("ROM load complete");
+  Serial.println("[GBDBG host 20] load complete; ready for first frame");
+  Serial.flush();
   return true;
 }
 

@@ -1,10 +1,10 @@
 # @dapp-format 1
 # @id grotto2
 # @name The Cursed Grotto II
-# @version 1.0.2
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.4.2 <2.0.0
-# @summary Descend the Abyssal Depths in the canvas sequel to The Cursed Grotto
+# @summary Descend the Abyssal Depths with an expanded Tab5 map and status view
 # @echo off
 # /sd/apps/grotto2.dapp
 # The Cursed Grotto II: The Abyssal Depths
@@ -41,15 +41,15 @@ WAVE 2 sine 110 5
 WAIT 300
 WAVESTOP
 
-CANVAS 10 6
+# The old ten-column title clipped its own text; Tab5 gives the opening room to breathe.
+CANVAS 80 30
 CLS
 COLOR cyan
-PUT 0 0 "  C U R S E D"
-PUT 0 1 "   G R O T T O"
+PUT 24 7 "C U R S E D   G R O T T O"
 COLOR pink
-PUT 0 3 "II: The Abyssal Depths"
+PUT 27 12 "II: THE ABYSSAL DEPTHS"
 COLOR yellow
-PUT 0 5 "[Enter] Start"
+PUT 31 19 "[ ENTER ]  DESCEND"
 FLIP
 
 :waitstart
@@ -979,40 +979,51 @@ RETURN
 # Cell 0,0 = surface camp
 # Row 5 = treasure/deep
 
-# Draw map on canvas
-CANVAS 12 8
+# Draw a wide tactical map with persistent stats beside it.
+CANVAS 84 36
 CLS
 COLOR cyan
-PUT 0 0 " MAP:"
+PUT 3 2 "ABYSSAL DEPTHS // MAP"
+PUT 55 2 "ADVENTURER"
 
 # Draw the cave map
 # S = Surface, # = wall, . = path, * = player, ? = unexplored
 COLOR white
 
 # Row 0: surface camp
-PUT 1 1 "....C....."
+PUT 5 6 ".  .  .  .  C  .  .  .  .  ."
 # Row 1: halls / lake
-PUT 1 2 "..H...L..."
+PUT 5 10 ".  .  H  .  .  .  L  .  .  ."
 # Row 2: shadow / lake
-PUT 1 3 "..S...L..."
+PUT 5 14 ".  .  S  .  .  .  L  .  .  ."
 # Row 3: ruins / caverns
-PUT 1 4 "..R...D..."
+PUT 5 18 ".  .  R  .  .  .  D  .  .  ."
 # Row 4: lava / boss
-PUT 1 5 "..V...B..."
+PUT 5 22 ".  .  V  .  .  .  B  .  .  ."
 # Row 5: garden / treasure / exit
-PUT 1 6 "..G.T.E..."
+PUT 5 26 ".  .  G  .  T  .  E  .  .  ."
 
 # Show player position
 COLOR pink
-EXPR pcol 1 + $px
-EXPR prow 1 + $py
+EXPR pcol 5 + $px * 3
+EXPR prow 6 + $py * 4
 PUT $pcol $prow "@"
 
-# Status bar
+# The right-hand dashboard makes the map useful instead of a tiny thumbnail.
+COLOR white
+PUT 55 7 "HP       $health/$maxhp"
+PUT 55 10 "GOLD     $gold"
+PUT 55 13 "POTIONS  $potions"
+PUT 55 16 "KEYS     $keys"
+PUT 55 19 "SCORE    $score"
+COLOR yellow
+PUT 55 23 "W/A/S/D  MOVE"
+PUT 55 25 "I        INVENTORY"
+PUT 55 27 "H        HEAL"
 COLOR cyan
-PUT 0 7 "HP:$health G:$gold"
+PUT 3 33 "$zone"
 FLIP
-WAIT 200
+WAIT 350
 ENDCANVAS
 RETURN
 

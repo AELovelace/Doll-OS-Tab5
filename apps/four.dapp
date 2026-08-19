@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id four
 # @name Connect Four
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.1.0 <2.0.0
 # @summary Connect Four against an alpha-beta search opponent
 # /apps/four.dapp
@@ -28,7 +28,7 @@
 # call -- the mover, the row just played, whether it won -- is read back
 # out fresh afterward rather than trusted to have survived it.
 
-CANVAS 40 22
+CANVAS 80 36
 DIM board 42
 DIM height 7
 DIM colorder 7
@@ -420,9 +420,11 @@ CLS
 COLOR yellow
 PUT 3 0 "CONNECT FOUR"
 COLOR cyan
-PUT 20 0 $diffname
+PUT 48 3 $diffname
 COLOR white
-PUT 30 0 "w$wins l$losses d$draws"
+PUT 48 6 "wins $wins"
+PUT 48 8 "losses $losses"
+PUT 48 10 "draws $draws"
 
 SET dc 0
 :dr_marker
@@ -461,8 +463,10 @@ PUT 0 9 "+-----------------------+"
 COLOR green
 PUT 0 11 $msg
 COLOR yellow
-PUT 0 20 "left/right pick   space drops"
-PUT 0 21 "n new game        esc quits"
+PUT 48 18 "LEFT/RIGHT  choose"
+PUT 48 20 "SPACE       drop"
+PUT 48 22 "N           new game"
+PUT 48 24 "ESC         quit"
 FLIP
 RETURN
 

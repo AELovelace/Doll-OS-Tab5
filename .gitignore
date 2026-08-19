@@ -1,2 +1,11 @@
 config.h
 dapper/dist/
+.pio/
+.arduino-build/
+.pio-preprocess/
+.pio-generated/
+sdkconfig.tab5
+sdkconfig.emulator
+/*.piobuildtab5firmware.map
+/*.piobuildemulatorfirmware.map
+managed_components/

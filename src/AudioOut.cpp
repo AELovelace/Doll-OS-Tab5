@@ -8,7 +8,9 @@
 // pin); these are its exported entry points. Declared rather than included
 // because config/globals of the sketch can't be pulled into a .cpp without
 // dragging in duplicate definitions.
-bool audioCodecEnsure();
+bool audioCodecEnsure(uint16_t mclkMultiple);
+void audioCodecSetOutputEnabled(bool enabled);
+void audioCodecForceReinit();
 int radioGetVolume();
 
 namespace {
@@ -25,6 +27,10 @@ constexpr gpio_num_t kPinDout = static_cast<gpio_num_t>(AUDIO_I2S_DOUT_PIN);
 // button-to-sound latency, which this keeps to about four GB frames.
 constexpr uint32_t kDmaDescNum = 8;
 constexpr uint32_t kDmaFrameNum = 256;
+// Fill five descriptors before the amp is unmuted. Producers submit one burst
+// per emulated frame, so an empty-start queue can never grow this cushion later
+// when production and playback both average exactly 32768 frames per second.
+constexpr size_t kPrimeFrames = kDmaFrameNum * (kDmaDescNum - 3);
 
 // Staging buffer for the mono -> stereo expansion (see onSamples). One frame of
 // GB audio is ~549 mono samples; this covers it in a single write.
@@ -44,21 +50,62 @@ uint32_t pushedFrames = 0;
 uint32_t droppedFrames = 0;
 uint32_t underrunCount = 0;
 
+bool writeStage(size_t frames, TickType_t timeout, bool countStats) {
+  size_t written = 0;
+  const esp_err_t err = i2s_channel_write(
+      txChan, stage, frames * 2 * sizeof(int16_t), &written, timeout);
+  const size_t framesWritten = written / (2 * sizeof(int16_t));
+  if (countStats) pushedFrames += framesWritten;
+  if (err == ESP_OK && framesWritten == frames) return true;
+  if (countStats) {
+    droppedFrames += frames - framesWritten;
+    underrunCount++;
+  }
+  return false;
+}  // Writes one already-expanded stereo block and accounts game audio only.
+
+bool primeDmaWithSilence() {
+  memset(stage, 0, kStageFrames * 2 * sizeof(int16_t));
+  size_t remaining = kPrimeFrames;
+  while (remaining > 0) {
+    const size_t chunk = remaining > kStageFrames ? kStageFrames : remaining;
+    if (!writeStage(chunk, pdMS_TO_TICKS(100), false)) return false;
+    remaining -= chunk;
+  }
+  return true;
+}  // Gives bursty emulation about 39 ms of silent playback headroom at startup.
+
 }  // namespace
 
 bool AudioOut::begin() {
-  if (ready) return true;
+  if (ready) {
+    // A teardown that set discard but never reached end() leaves it latched,
+    // and this early return used to skip the reset below -- so the channel
+    // stayed open and every sample was silently dropped.
+    discard = false;
+    return true;
+  }
+
+  Serial.printf("[gb audio] begin rate=%lu mclk=%lu volume=%d\n",
+                static_cast<unsigned long>(kSampleRate),
+                static_cast<unsigned long>(kSampleRate * 128u), radioGetVolume());
 
   stage = static_cast<int16_t*>(heap_caps_malloc(
       kStageFrames * 2 * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  if (!stage) return false;
+  if (!stage) {
+    Serial.println("[gb audio] internal staging allocation failed");
+    return false;
+  }
 
   i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
   chanCfg.dma_desc_num = kDmaDescNum;
   chanCfg.dma_frame_num = kDmaFrameNum;
   chanCfg.auto_clear = true;   // ring goes silent on underrun instead of looping the last buffer
-  if (i2s_new_channel(&chanCfg, &txChan, nullptr) != ESP_OK) {
+  esp_err_t err = i2s_new_channel(&chanCfg, &txChan, nullptr);
+  if (err != ESP_OK) {
     // Both controllers still spoken for -- Radio.ino didn't (or couldn't) let go.
+    Serial.printf("[gb audio] i2s_new_channel failed: %s (0x%X)\n",
+                  esp_err_to_name(err), static_cast<unsigned>(err));
     txChan = nullptr;
     end();
     return false;
@@ -76,24 +123,38 @@ bool AudioOut::begin() {
   stdCfg.gpio_cfg.ws = kPinWs;
   stdCfg.gpio_cfg.dout = kPinDout;
   stdCfg.gpio_cfg.din = I2S_GPIO_UNUSED;
-  // 384x matches what es8311_codec_init() programs the codec's dividers for
-  // (EXAMPLE_MCLK_MULTIPLE, es8311.h). The codec is an I2S slave, so what
-  // actually has to hold is the MCLK:LRCK *ratio* -- keep it at 384 and the
-  // registers stay correct even though they were computed for 16kHz.
-  stdCfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
+  //Tab5's ES8388 setup uses the board-supported 128x MCLK ratio. Keeping the I2S
+  //clock and codec register 24 in agreement preserves the 32768Hz Game Boy pitch.
+  stdCfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_128;
 
-  if (i2s_channel_init_std_mode(txChan, &stdCfg) != ESP_OK) {
+  err = i2s_channel_init_std_mode(txChan, &stdCfg);
+  if (err != ESP_OK) {
+    Serial.printf("[gb audio] i2s init failed: %s (0x%X)\n",
+                  esp_err_to_name(err), static_cast<unsigned>(err));
     end();
     return false;
   }
-  // Clocks must already be running when the codec's registers are programmed --
-  // same order Radio.ino uses (I2S up, then es8311_codec_init).
-  if (i2s_channel_enable(txChan) != ESP_OK) {
+  // Keep a warm-restart amp quiet while clocks and the DMA safety cushion return.
+  audioCodecSetOutputEnabled(false);
+  //Clocks must already be running when the slave codec's registers are programmed.
+  err = i2s_channel_enable(txChan);
+  if (err != ESP_OK) {
+    Serial.printf("[gb audio] i2s enable failed: %s (0x%X)\n",
+                  esp_err_to_name(err), static_cast<unsigned>(err));
     end();
     return false;
   }
   enabled = true;
-  if (!audioCodecEnsure()) {
+  if (!primeDmaWithSilence()) {
+    Serial.println("[gb audio] DMA prime failed");
+    end();
+    return false;
+  }
+  // Clocks are live now, so reprogram the codec from scratch rather than trust
+  // a latch set before whatever left the board silent.
+  audioCodecForceReinit();
+  if (!audioCodecEnsure(128)) {
+    Serial.println("[gb audio] ES8388 setup failed");
     end();
     return false;
   }
@@ -101,10 +162,13 @@ bool AudioOut::begin() {
   discard = false;
   pushedFrames = droppedFrames = underrunCount = 0;
   ready = true;
+  Serial.printf("[gb audio] ready, primed %u frames\n",
+                static_cast<unsigned>(kPrimeFrames));
   return true;
-}
+}  // Claims I2S, restores the codec, and starts playback with buffered silence.
 
 void AudioOut::end() {
+  audioCodecSetOutputEnabled(false);  // Mutes the Tab5 amp before its clocks disappear.
   if (txChan) {
     if (enabled) i2s_channel_disable(txChan);
     i2s_del_channel(txChan);
@@ -124,7 +188,7 @@ void AudioOut::setDiscard(bool on) { discard = on; }
 
 // gnuboy calls this once per emulated frame with GB_AUDIO_MONO_S16 samples.
 //
-// Mono is deliberate: the ES8311 drives a single speaker off one I2S slot, so a
+// Mono is deliberate: the ES8388 drives a single speaker off one I2S slot, so a
 // true stereo feed would silently throw away everything panned to the other
 // side (NR51 pans plenty of Pokemon's channels). We take gnuboy's own mixdown
 // and write the same sample into both slots, which is right whichever slot the
@@ -140,7 +204,6 @@ void AudioOut::onSamples(void* buf, size_t len) {
 
   const int16_t* src = static_cast<const int16_t*>(buf);
   const int volume = radioGetVolume();
-  if (volume <= 0) return;
 
   while (len > 0) {
     const size_t n = (len > kStageFrames) ? kStageFrames : len;
@@ -152,21 +215,37 @@ void AudioOut::onSamples(void* buf, size_t len) {
       stage[i * 2 + 1] = s;
     }
 
-    size_t written = 0;
-    const esp_err_t err = i2s_channel_write(txChan, stage, n * 2 * sizeof(int16_t),
-                                            &written, pdMS_TO_TICKS(8));
-    const size_t framesWritten = written / (2 * sizeof(int16_t));
-    pushedFrames += framesWritten;
-    if (err != ESP_OK || framesWritten < n) {
-      droppedFrames += (n - framesWritten);
-      underrunCount++;
-      return;   // behind the clock: drop the rest of this frame rather than pile up
-    }
+    if (!writeStage(n, pdMS_TO_TICKS(8), true)) return;
 
     src += n;
     len -= n;
   }
-}
+}  // Expands mono emulator samples into both physical I2S slots.
+
+void AudioOut::onStereoSamples(const int16_t* buf, size_t frames,
+                               size_t cadenceFrames) {
+  if (!ready || discard || cadenceFrames == 0) return;
+
+  const int volume = radioGetVolume();
+  size_t offset = 0;
+  while (offset < cadenceFrames) {
+    const size_t n = (cadenceFrames - offset > kStageFrames)
+        ? kStageFrames : cadenceFrames - offset;
+    for (size_t i = 0; i < n; ++i) {
+      int16_t sample = 0;
+      if (buf && offset + i < frames) {
+        const size_t source = (offset + i) * 2;
+        const int32_t mixed = static_cast<int32_t>(buf[source]) +
+                              static_cast<int32_t>(buf[source + 1]);
+        sample = static_cast<int16_t>((mixed / 2) * volume / kVolumeMax);
+      }
+      stage[i * 2] = sample;
+      stage[i * 2 + 1] = sample;
+    }
+    if (!writeStage(n, pdMS_TO_TICKS(8), true)) return;
+    offset += n;
+  }
+}  // Downmixes GBA stereo once and pads startup shortages without losing cadence.
 
 void AudioOut::stats(uint32_t& pushed, uint32_t& dropped, uint32_t& underruns) {
   pushed = pushedFrames;

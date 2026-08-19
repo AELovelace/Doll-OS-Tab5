@@ -370,6 +370,19 @@ size_t HidTerminalCodec::encode(const KeyEvent& event, uint8_t* output,
         offset = appendByte(0x1B, output, capacity, offset);
     }
 
+    if ((event.usage == 0x51 || event.usage == 0x52) &&
+        hasControl(event.modifiers)) {
+        const char* sequence = event.usage == 0x52
+            ? "\x1B[1;5A" : "\x1B[1;5B";
+        return appendText(sequence, output, capacity, offset);
+    }
+    if ((event.usage == 0x51 || event.usage == 0x52) &&
+        hasShift(event.modifiers)) {
+        const char* sequence = event.usage == 0x52
+            ? "\x1B[1;2A" : "\x1B[1;2B";
+        return appendText(sequence, output, capacity, offset);
+    }
+
     const char* sequence = sequenceForUsage(event.usage);
     if (sequence) {
         return appendText(sequence, output, capacity, offset);
@@ -391,6 +404,140 @@ size_t HidTerminalCodec::encode(const KeyEvent& event, uint8_t* output,
     }
     return appendByte(static_cast<uint8_t>(character), output, capacity, offset);
 }  // Converts press/repeat events into the existing terminal byte vocabulary.
+
+HidGamepadCodec::HidGamepadCodec() {
+    reset(nullptr, 0, false);
+}  // Starts every transport with no held Game Boy buttons or modal actions.
+
+size_t HidGamepadCodec::sourceIndex(KeyboardSource source) {
+    const size_t index = static_cast<size_t>(source);
+    return index < static_cast<size_t>(KeyboardSource::Count) ? index : 0;
+}  // Converts a checked transport identifier into its independent game state slot.
+
+uint8_t HidGamepadCodec::gamepadBitForUsage(uint8_t usage) {
+    switch (usage) {
+        case 0x4F: case 0x07: return 0x01;  // Right Arrow or D drives Right.
+        case 0x50: case 0x04: return 0x02;  // Left Arrow or A drives Left.
+        case 0x52: case 0x1A: return 0x04;  // Up Arrow or W drives Up.
+        case 0x51: case 0x16: return 0x08;  // Down Arrow or S drives Down.
+        case 0x11: return 0x10;             // N is the Game Boy A button.
+        case 0x10: return 0x20;             // M is the Game Boy B button.
+        case 0x31: return 0x40;             // Backslash is Select.
+        case 0x28: return 0x80;             // Enter is Start.
+        default: return 0x00;
+    }
+}  // Preserves the established DS-Slave keyboard-to-Game-Boy layout.
+
+bool HidGamepadCodec::hasControl(uint8_t modifiersValue) {
+    return (modifiersValue & kModifierControl) != 0;
+}  // Recognizes either left or right Control for the Ctrl+T quit chord.
+
+size_t HidGamepadCodec::appendByte(uint8_t byte, uint8_t* output,
+                                   size_t capacity, size_t offset) {
+    if (output && offset < capacity) {
+        output[offset] = byte;
+        return offset + 1U;
+    }
+    return offset;
+}  // Appends one game protocol byte without overrunning the caller's buffer.
+
+size_t HidGamepadCodec::appendPair(uint8_t prefix, uint8_t value,
+                                   uint8_t* output, size_t capacity,
+                                   size_t offset) {
+    offset = appendByte(prefix, output, capacity, offset);
+    return appendByte(value, output, capacity, offset);
+}  // Appends one DOWN or UP record in the inherited two-byte game protocol.
+
+size_t HidGamepadCodec::emitMerged(bool menuPressed, uint8_t* output,
+                                   size_t capacity) {
+    uint8_t nextMask = 0;
+    bool nextQuit = false;
+    for (const SourceState& state : states_) {
+        nextMask |= state.mask;
+        nextQuit = nextQuit ||
+            (state.quitKeyDown && hasControl(state.modifiers));
+    }
+
+    size_t offset = 0;
+    const uint8_t down = nextMask & static_cast<uint8_t>(~mergedMask_);
+    const uint8_t up = mergedMask_ & static_cast<uint8_t>(~nextMask);
+    for (uint16_t bit = 1; bit <= 0x80; bit <<= 1) {
+        if (down & bit) {
+            offset = appendPair(0xF0, static_cast<uint8_t>(bit),
+                                output, capacity, offset);
+        }
+    }
+    for (uint16_t bit = 1; bit <= 0x80; bit <<= 1) {
+        if (up & bit) {
+            offset = appendPair(0xF1, static_cast<uint8_t>(bit),
+                                output, capacity, offset);
+        }
+    }
+    if (nextQuit && !mergedQuit_) {
+        offset = appendByte(0xF2, output, capacity, offset);
+    }
+    if (menuPressed) {
+        offset = appendByte(0xF3, output, capacity, offset);
+    }
+    mergedMask_ = nextMask;
+    mergedQuit_ = nextQuit;
+    return offset;
+}  // Merges simultaneous keyboards and emits only changed buttons and modal edges.
+
+size_t HidGamepadCodec::reset(uint8_t* output, size_t capacity,
+                              bool emitReleases) {
+    size_t offset = 0;
+    if (emitReleases) {
+        for (uint16_t bit = 1; bit <= 0x80; bit <<= 1) {
+            if (mergedMask_ & bit) {
+                offset = appendPair(0xF1, static_cast<uint8_t>(bit),
+                                    output, capacity, offset);
+            }
+        }
+    }
+    for (SourceState& state : states_) {
+        state = SourceState{};
+    }
+    mergedMask_ = 0;
+    mergedQuit_ = false;
+    return offset;
+}  // Clears held state and optionally releases buttons for a still-running game.
+
+size_t HidGamepadCodec::encode(const KeyEvent& event, uint8_t* output,
+                               size_t capacity) {
+    SourceState& state = states_[sourceIndex(event.source)];
+    if (event.type == KeyEventType::ResetSource ||
+        event.type == KeyEventType::Disconnected) {
+        state = SourceState{};
+        return emitMerged(false, output, capacity);
+    }
+
+    state.modifiers = event.modifiers;
+    bool menuPressed = false;
+    if (event.type == KeyEventType::Pressed ||
+        event.type == KeyEventType::Repeat ||
+        event.type == KeyEventType::Released) {
+        const bool down = event.type != KeyEventType::Released;
+        const uint8_t bit = gamepadBitForUsage(event.usage);
+        if (bit != 0) {
+            if (down) {
+                state.mask |= bit;
+            } else {
+                state.mask &= static_cast<uint8_t>(~bit);
+            }
+        }
+        if (event.usage == 0x17) {
+            state.quitKeyDown = down;
+        }
+        menuPressed = event.usage == 0x29 &&
+            event.type == KeyEventType::Pressed;
+    }
+    return emitMerged(menuPressed, output, capacity);
+}  // Converts HID transitions into held Game Boy buttons, quit, and menu events.
+
+bool HidGamepadCodec::isToggleEvent(const KeyEvent& event) {
+    return event.usage == 0x45 && event.type == KeyEventType::Pressed;
+}  // Treats the rising edge of F12 as the manual keyboard game-mode switch.
 
 }  // namespace input
 }  // namespace doll

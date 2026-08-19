@@ -1,8 +1,9 @@
 # DOLL-OS for M5Stack Tab5
 
-> **Port status:** foundation work is in progress. The committed FNK application
-> is preserved as the upstream baseline while the Tab5 display, storage, audio,
-> power, and keyboard backends are brought up. See
+> **Port status:** the complete inherited application now builds through the
+> pinned PlatformIO Arduino + ESP-IDF environment for Tab5. Display, power,
+> storage, and the official Tab5 Keyboard are integrated; USB HID is ready for
+> hardware validation and BLE HID comes next. See
 > [the Tab5 port plan](docs/TAB5_PORT_PLAN.md) and
 > [the upstream-sync policy](docs/UPSTREAM_SYNC.md).
 
@@ -10,8 +11,12 @@ This fork targets only the M5Stack Tab5. Its local interface is the official
 Tab5 Keyboard, with BLE HID and USB HID keyboards joining the same input hub.
 Touchscreen input is intentionally disabled for the initial releases.
 
-The text below documents the inherited FNK baseline and will be revised as each
-Tab5 milestone becomes functional.
+The Tab5 interface uses a 2× base font scale for the shell, history, status,
+command bar, editor, and modal screens. Character-grid `.dapp` canvases retain
+their adaptive scaling so larger playfields still fit on the panel.
+
+The command set is inherited from DOLL-OS-FNK. Features that still depend on
+FNK-only hardware are called out below instead of being presented as complete.
 
 ## Inherited FNK baseline
 
@@ -46,13 +51,15 @@ usable with no network.
 - **Editor** — full-screen text editor (`edit`)
 - **Networking** — telnet server + client, SSH client, FTP server, ping/ARP
   sweep, IP tools, MQTT (`motoko`)
-- **Radio** — MP3 stream playback over I²S (ES8311 codec)
+- **Radio** — inherited MP3 playback UI using the Tab5 ES8388 audio backend
 - **Music library** — full-screen local MP3 player with recursive `/sd/music`
   scanning, ID3 metadata, search, and PSRAM-backed catalog storage
-- **Game Boy emulator** — `gb`, gnuboy port, gamepad via DS-Slave
+- **Game Boy / Game Boy Advance emulators** — `gb` runs inside Doll-OS while
+  `gba` reboots into a lean second image; Tab5 and USB keyboards share
+  held-button controls
 - **ASUKA** — local LLM chat with tool calling (search / weather / URL fetch / time)
-- **BLE input bridge** — DS-Slave connects keyboard + gamepad at once and merges
-  them into one UART stream
+- **Input hub** — the official Tab5 Keyboard and USB HID keyboards are active
+  producers for the same event queue; BLE HID remains planned
 
 ---
 
@@ -60,12 +67,20 @@ usable with no network.
 
 | | |
 |---|---|
-| Board | Freenove FNK0104-series ESP32-S3 display kit |
-| Panel | 2.8" 240×320 ILI9341, 3.5" 320×480 ST77922 QSPI, or 4.0" ST7796 |
-| Flash / PSRAM | 16MB flash, OPI PSRAM (required) |
+| Board | M5Stack Tab5 (ESP32-P4 + ESP32-C6) |
+| Panel | 5" 1280×720, managed by M5Unified/M5GFX |
+| Flash / PSRAM | 16MB flash, 32MB PSRAM |
 | Storage | SD_MMC card slot + LittleFS |
-| Audio | ES8311 codec over I²S |
-| Companion | second ESP32-S3 running `DS-Slave` (BLE HID → UART) |
+| Audio | onboard ES8388 playback / ES7210 capture; ES8388 playback backend active |
+| Local input | official Tab5 Keyboard over its expansion connector |
+| USB input | USB HID keyboards through the onboard USB-A host port |
+| Future input | Bluetooth keyboards through the shared input hub |
+
+Touch input is deliberately ignored. The USB-A host port is powered at startup,
+and USB keyboard hot-plug events feed the same input hub as the Tab5 Keyboard.
+
+<details>
+<summary>Inherited FNK hardware history</summary>
 
 DS-Slave always uses GPIO17 TX and GPIO18 RX on its end. On DOLL-OS, connect
 RX/TX to GPIO21/2 for FNK0104AB/S or GPIO46/45 for FNK0104N. The N move keeps
@@ -89,11 +104,101 @@ Recommended build:
 https://store.freenove.com/products/fnk0104
 https://lonelybinary.com/en-us/products/esp32-s3-ipex?variant=43699253706909
 
-NOTE: THIS VERSION OF DOLL-OS REQUIRES A 16R8, AND IS NOT GUARANTEED TO WORK ON ANYTHING OTHER THAN
-AN S3
+The FNK hardware notes above are retained only as upstream history; this fork
+targets the ESP32-P4-based Tab5 exclusively.
+
+</details>
+
 ---
 
-## Getting started
+## Recommended PlatformIO build
+
+The Tab5 display continuously scans its framebuffer from PSRAM. Use the pinned
+hybrid environment in `platformio.ini`; it builds Arduino as an ESP-IDF
+component with M5Stack's working UserDemo cache baseline:
+
+- performance optimization;
+- 200MHz HEX PSRAM with PSRAM XIP;
+- 128KB L2 cache with 128-byte cache lines;
+- the project ST7123 detection and native 80MHz DPI / 1040Mbps DSI timings.
+
+PlatformIO Core 6.1.19 and Arduino CLI are required. Arduino CLI is used only
+to generate the combined `.ino` source and prototypes; PlatformIO/ESP-IDF
+performs the actual firmware build. Keep the `tab5` profile and its pinned
+Arduino libraries installed. On Windows, build, flash, and verify both images
+with one command:
+
+```powershell
+copy config.h.example config.h
+.\ps\Flash-DualImages.ps1
+```
+
+The script installs Doll-OS (including OG Game Boy) in `ota_0`, installs the
+GBA-only runtime in `ota_1` at `0x650000`, and verifies both slots. A normal
+`pio run -e tab5 -t
+upload` updates only Doll-OS; it does not install the second image. Pass `-Port
+COMx` if Windows assigns another port, or `-SkipBuild` to reinstall already
+built artifacts. Moving from the former single-image table relocates LittleFS
+from `0x650000` to `0x950000`. Back up internal `/apps` and configuration files
+before the first dual-image flash because they cannot be preserved in place;
+SD-card ROMs and saves are unaffected.
+
+The checked-in environments target `COM38`. Do not open a serial monitor until
+upload is complete because opening the port resets the board.
+
+On Windows, pioarduino 54.03.21's esptool 5.0.0 requires Click 8.1.8. If image
+generation reports `ParamType.get_metavar`, repair the PlatformIO environment
+once with:
+
+```powershell
+& "$env:USERPROFILE\.platformio\penv\Scripts\python.exe" -m pip install "click==8.1.8"
+```
+
+After building, verify that both `sdkconfig.tab5` and `sdkconfig.emulator`
+contain `CONFIG_SPIRAM_SPEED_200M=y`, not `CONFIG_SPIRAM_SPEED_20M=y`. The
+complete dual-image and display regression procedure is in
+[TESTING_GUIDE.md](TESTING_GUIDE.md).
+
+## Legacy Arduino IDE build
+
+The Arduino-only build remains available for comparison and sketch development,
+but its precompiled ESP-IDF libraries use the smaller cache baseline and are not
+the release path for the cyan-flash fix. It produces only the `ota_0` OS image;
+`gb` and `gba` require the `emulator` image built and installed through
+PlatformIO.
+
+1. Install Arduino IDE 2 and Espressif's `esp32` board package version 3.3.5.
+   Do not use 3.3.6 or newer for this Tab5 build yet: Arduino-ESP32 issue
+   #12417 tracks a display flicker regression introduced after 3.3.5.
+2. Install `ESP32Ping` 1.6 from its GitHub release. The remaining exact library
+   versions, including `EspUsbHost` 2.7.3, are declared in `sketch.yaml` and
+   Arduino resolves them for the `tab5` profile. If the IDE does not activate
+   the profile automatically, install `EspUsbHost` 2.7.3 from Library Manager.
+3. Copy `config.h.example` to `config.h`, then add private Wi-Fi credentials,
+   passwords, and API keys. `config.h` is ignored by Git.
+4. Open `Doll-OS-Tab5.ino` in Arduino IDE and select the `tab5` sketch profile.
+5. Connect the Tab5 over USB-C, click Verify, then Upload.
+
+The profile selects the ESP32-P4 target, 16MB flash, 32MB PSRAM, the custom
+partition table, hardware USB CDC/JTAG, M5Unified/M5GFX, and the official Tab5
+Keyboard library. Touch is initialized only as part of display detection and is
+never read or submitted to DOLL-OS input.
+
+Keyboard game mode uses the inherited layout: arrows/WASD are the D-pad, N/M
+are A/B, Enter is Start, and backslash is Select. Escape opens the emulator
+menu and Ctrl+T quits. The `gb` command switches modes automatically; F12
+toggles the same mode manually for diagnostics.
+
+To build the same project outside the IDE:
+
+```powershell
+arduino-cli compile --profile tab5 .
+```
+
+## Inherited FNK setup notes (not used by this fork)
+
+<details>
+<summary>Show the old FNK build and DS-Slave instructions</summary>
 
 ### 1. Configure
 
@@ -107,6 +212,20 @@ gitignored so secrets stay local. Select the hardware model once in
 rear LED, and DS-Slave wiring together.
 
 ### 2. Build and flash
+
+After `arduino-cli` installs the `sketch.yaml` profile libraries, apply the
+project's M5GFX 0.2.26 Tab5 detection fix once:
+
+```powershell
+.\ps\Patch-M5GfxTab5Detection.ps1
+```
+
+The upstream fallback recognizes the ST7123 DSI ID but forgets to select that
+panel when its touch-firmware probe times out. It also drives ST7123 at an
+80MHz DPI clock and its DSI link at 1040Mbps. The project patch fixes detection
+and uses conservative 50MHz/800Mbps timings; startup also raises both possible
+DSI DW-GDMA read ports to maximum AXI QoS. Together these settings protect the
+continuously scanned PSRAM framebuffer from blue/cyan underruns.
 
 Open the sketch in the Arduino IDE and select the **`esp32s3 Dev Module` profile** from the
 toolbar dropdown before Verify/Upload. That covers board, flash size, custom
@@ -167,6 +286,8 @@ flash using these settings:
 - **USB MSC On Boot:** `Disabled`
 - **USB DFU On Boot:** `Disabled`
 
+</details>
+
 ## Commands
 
 Run `help` on the device for the live list.
@@ -194,7 +315,7 @@ Run `help` on the device for the live list.
 | `reboot` | restart |
 | `run` | run a `.dapp` app |
 | `settings` | view/set/unset runtime overrides for config.h defaults (FTP, MQTT, radio, ASUKA), stored in `/system/conf/settings.dsys` |
-| `slave` | talk to DS-Slave |
+| `slave` | legacy compatibility command; DS-Slave is not used on Tab5 |
 | `ssh` | SSH client |
 | `status` | Wi-Fi status |
 | `telnet` | telnet client |
@@ -226,6 +347,15 @@ EXIT
 - [docs/DAPP-BOOK.md](docs/DAPP-BOOK.md) — the long-form guide
 - [dapp-web/](dapp-web/) — DOLL-OS web emulator + `.dapp` IDE/runtime, no build step
 
+### Tab5-enhanced editions
+
+All 46 shipped apps now use ordinary package-format-1 artifacts that declare
+`# @boards m5stack-tab5`. The 27 canvas apps use 80-100 column workspaces with
+30-40 rows: editors and dashboards gain visible data, while games keep their
+boards readable and move scores, help, and state into side panels. Terminal-native
+apps use longer 90-94 column records and 34-line pages where their data model can
+benefit. Existing save-file formats remain compatible with the earlier editions.
+
 ---
 
 ## Project layout
@@ -233,7 +363,7 @@ EXIT
 > TODO: prune to what a newcomer actually needs to find.
 
 ```text
-DS.ino               entry point, setup/loop
+Doll-OS-Tab5.ino     Arduino IDE entry point, setup/loop
 CommandProcessor.ino tokenizing, history, dispatch table
 Display.ino          TFT panel mirror
 Storage.ino          LittleFS + SD unified namespace
@@ -243,8 +373,9 @@ Gameboy.ino          gnuboy port
 Music.ino            PSRAM-backed local MP3 library/player
 Radio.ino            audio streaming
 Asuka.ino            LLM chat        AsukaTools.ino  its tool calls
-SlaveLink.ino        outbound channel to DS-Slave
-KeyboardSerial.ino   inbound keystrokes from DS-Slave
+SlaveLink.ino        no-op compatibility layer for inherited commands
+KeyboardSerial.ino   official Tab5 Keyboard HID backend
+src/DollInput/       built-in transport-neutral keyboard hub
 global.h  config.h   shared state / local secrets
 sketch.yaml          board profile + pinned libraries
 apps/                bundled .dapp sources
@@ -258,7 +389,7 @@ dapp-web/            browser emulator + `.dapp` playground
 ## Known issues / roadmap
 
 > TODO. Starting points:
-> - Game Boy audio is still muted
+> - Game Boy and radio audio need extended hardware soak testing
 > - Wi-Fi autoconnect vs. radio contention
 > - FTP storage backend depends on a hand edit to the library's own header
 

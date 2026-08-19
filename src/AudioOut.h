@@ -2,14 +2,13 @@
 
 #include <Arduino.h>
 
-// Emulator audio sink: the Game Boy APU's samples on the board's onboard ES8311
+// Emulator audio sink: the Game Boy APU's samples on the board's onboard ES8388
 // codec + speaker.
 //
 // DOLL-OS port note: DOLL-OS's codec is normally Radio.ino's -- it owns the I2C control
-// bus, the codec registers, and *both* of the S3's two I2S controllers (one
-// bootstrap channel for MCLK, one for the ESP32-audioI2S engine). So a game
-// can't just open a channel: Gameboy.ino first calls radioReleaseAudio()
-// (Radio.ino), which stops any stream and hands the controllers back, then
+// bus, codec registers, and active I2S TX controller. So a game can't just open
+// a channel: Gameboy.ino first calls radioReleaseAudio() (Radio.ino), which
+// stops any stream and hands the controller back, then
 // begin() below claims one for itself and reuses the codec registers Radio
 // already knows how to program (audioCodecEnsure()). end() gives it back, so a
 // "radio play" after a game session brings the stream up again normally.
@@ -28,6 +27,8 @@ bool begin();
 void end();
 bool available();
 void onSamples(void* buf, size_t len);   // gb_audio_cb_t shape; len = mono int16 count
+void onStereoSamples(const int16_t* buf, size_t frames, size_t cadenceFrames);
+                                            // Downmixes GBA stereo and pads one clocked frame.
 void setDiscard(bool on);                // true = swallow samples (paused/quitting)
 void stats(uint32_t& pushed, uint32_t& dropped, uint32_t& underruns);
 }  // namespace AudioOut

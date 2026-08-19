@@ -1,42 +1,36 @@
 //   global.h
-//   shared state used across DOLL-OS -- the telnet-interface port of DOLL-OS.
+// Shared state used across the Tab5-exclusive DOLL-OS fork.
 //
-//   Telnet is the sole *input* path (this is what the user asked to replace
-//   DOLL-OS's physical keyboard with), but this board's TFT panel is driven as a
-//   mirror of the telnet session -- "a second screen for the cardputer" -- so it
-//   still needs DOLL-OS's pixel-wrapped terminal history/ANSI-filter machinery.
+// The Tab5 panel mirrors one shell session. Telnet and each local keyboard
+// backend are equivalent producers for the same line editor and history view.
 //   That machinery lives here for the same reason DOLL-OS kept it in global.h:
 //   it's used by hoisted function prototypes and by subclasses declared in files
 //   further down the concatenated sketch.
 #pragma once
 
 #include <WiFi.h>
-#ifdef FNK0104N_3P5_320x480_ST77922
-    #include "DollST77922.h"
-#endif
-#include <TFT_eSPI.h>
+#include <LittleFS.h>
+#include <SD_MMC.h>
+#include <M5Unified.h>
 #include <ArduinoJson.h>
+#include "src/EmulatorBoot.h"
 //   Pulled in here (not just in Radio.ino) so the ESP32-audioI2S `Audio` class is
 //   declared before the Arduino sketch builder's auto-generated function
 //   prototypes. radioAudioInfo(Audio::msg_t) (Radio.ino) gets a synthetic
 //   prototype hoisted to the top of the concatenated sketch, above Radio.ino's
 //   own `#include "Audio.h"`; without Audio visible that early the prototype
 //   fails to parse ("'Audio' has not been declared"). global.h is included first
-//   from DS.ino, so declaring it here fixes the ordering -- the same reason every
+//   from Doll-OS-Tab5.ino, so declaring it here fixes the ordering -- the same reason every
 //   other cross-file type lives in this file.
 #include "Audio.h"
 
-//   Rear WS2812 RGB LED for app/runtime effects. Pin defaults match Freenove's
-//   FNK0104 RGB examples: GPIO42 on the AB/S variants, GPIO40 on the N variant.
-//   Set REAR_RGB_LED_PIN in config.h to override, or -1 to disable LED control.
+// Tab5 does not expose the inherited FNK rear WS2812. Keep the API disabled so
+// shared apps and activity calls remain safe no-ops.
 #ifndef REAR_RGB_LED_PIN
     #define REAR_RGB_LED_PIN DOLL_REAR_RGB_LED_PIN
 #endif
 #ifndef REAR_RGB_LED_BRIGHTNESS
     #define REAR_RGB_LED_BRIGHTNESS 255
-#endif
-#ifndef DOLL_DISPLAY_UPSIDE_DOWN
-    #define DOLL_DISPLAY_UPSIDE_DOWN 0
 #endif
 
 //   Shared rear-LED API for native modules (.ino/.cpp) and AppRunner opcodes.
@@ -74,25 +68,14 @@ void ledSetAppOverrideRgbLong(long red, long green, long blue);
 void ledClearAppOverride();
 void ledPrepareForSleep();
 
-//   Manual paired-board sleep path. DS-Slave sends the request over its private
-//   UART controls; Power.ino owns light sleep while Display.ino owns panel power.
+// Power.ino owns light sleep while Display.ino owns panel power. The official
+// keyboard interrupt is the reserved local wake source.
 void enterSystemLightSleep();
 void displaySetSleeping(bool sleeping);
 
-//   Display panel geometry, keyed off the same FNK0104* board-variant macro
-//   config.h already defines for SD_MMC/battery pins. Native panel resolution is
-//   portrait; the display runs rotated to landscape (see Display.ino), hence
-//   width/height are swapped from the driver's native W x H here.
-#ifdef FNK0104N_3P5_320x480_ST77922
-    const int DISPLAY_WIDTH = 480;
-    const int DISPLAY_HEIGHT = 320;
-#elif defined(FNK0104S_4P0_320x480_ST7796)
-    const int DISPLAY_WIDTH = 480;
-    const int DISPLAY_HEIGHT = 320;
-#else
-    const int DISPLAY_WIDTH = 320;
-    const int DISPLAY_HEIGHT = 240;
-#endif
+// Tab5 runs its MIPI-DSI display in native landscape orientation.
+const int DISPLAY_WIDTH = 1280;
+const int DISPLAY_HEIGHT = 720;
 
 //   Telnet server + the one connected client. DOLL-OS permits a single interactive
 //   session at a time, same as the original scaffold -- DOLL-OS's whole keyboard/
@@ -118,7 +101,7 @@ enum LineInputResult { LINE_NO_INPUT, LINE_EDITING, LINE_SUBMITTED };
 //per-input-source line-edit state (escape/CSI parsing + CRLF pairing). DOLL-OS had a
 //single physical keyboard, so this was implicit module state in one place. DOLL-OS now has
 //two sources feeding the same line editor -- the telnet client (TelnetServer.ino) and
-//the BLE-keyboard UART bridge (KeyboardSerial.ino) -- so each keeps its own copy: a
+//the official Tab5 Keyboard (KeyboardSerial.ino) -- so each keeps its own copy: a
 //half-finished escape sequence arriving on one source can't corrupt the other's parse.
 enum UserEscState { UESC_NONE, UESC_GOT_ESC, UESC_GOT_CSI };
 struct LineEditState {
@@ -321,11 +304,11 @@ struct DappKeyState {
 };
 
 //shared helpers used across app/file command tabs
-#define DOLL_BOARD_ID "fnk0104"
+#define DOLL_BOARD_ID "m5stack-tab5"
 #define DAPP_RUNTIME_VERSION "1.9.0"
 
 //Runtime-owned PCM synth used by the .dapp WAVE/WAVESTOP opcodes. It borrows
-//the same ES8311/I2S output surface as Game Boy and releases it on app exit.
+//the same ES8388/I2S output surface as Game Boy and releases it on app exit.
 enum DappWaveType : uint8_t {
   DAPP_WAVE_OFF = 0,
   DAPP_WAVE_SINE,
@@ -364,9 +347,40 @@ void handleUnaliasCommand(const String parts[], int partCount);
 void ftpService();
 void radioService();
 void maintainInternetConnection();
+bool wifiStationIsReady();
+bool startTelnetServer();
+void stopTelnetServer();
 void drawDisplayFrame();
+int gbMainTouchLauncherLeft();
+void gbDrawMainTouchLauncher();
+void gbServiceMainTouch();
+void gbaDrawMainTouchLauncher();
+void gbaServiceMainTouch();
+void audioCodecForceReinit();
 int readBatteryPercent();
 int wifiIsConnected();
+
+//   Serializes the Tab5's *internal* I2C bus (GPIO31/32), which is shared by the
+//   ES8388 codec (0x10), both PI4IO expanders (0x43/0x44) and the INA226 the
+//   battery readings come from (0x41). M5Unified's I2C_Class does no locking of
+//   its own -- every method is a bare passthrough to m5gfx::i2c -- so two tasks
+//   using it concurrently interleave transactions on one hardware master.
+//
+//   That is not merely a garbled register read here. Radio.ino programs the codec
+//   from radioTask while the status bar polls the INA226 from loop() on every
+//   frame, and the amp-enable write is a read-modify-write of PI4IO1's output byte
+//   (0x05) -- the byte that also carries bit4=LCD Reset and bit5=GT911 touch reset
+//   (see M5GFX.cpp's Tab5 bring-up table). A read corrupted by an interleaved
+//   battery transaction writes those reset lines back low, dropping the panel into
+//   reset hard enough that only a physical power cycle recovers the board.
+//
+//   Every In_I2C access this firmware makes must be wrapped. Recursive, so a
+//   caller already holding the bus can still use the leaf helpers. Returns false
+//   if the bus could not be claimed within timeoutMs; callers decide whether that
+//   is fatal (codec bring-up) or skippable (a status-bar battery reading).
+void boardI2cBegin();
+bool boardI2cLock(uint32_t timeoutMs);
+void boardI2cUnlock();
 
 //heap instrumentation (see SysInfo.ino)
 const int HEAP_CHECKPOINT_MAX = 16;
@@ -395,7 +409,7 @@ const int C_CYAN    = 36;
 const int C_PINK    = 95;   //bright magenta stands in for DOLL-OS's PINK accent color
 
 //   Radio (Radio.ino) -- background ICY/MP3 stream player on the board's onboard
-//   ES8311 codec, ported from the standalone sgcrelay firmware. Runs in its own
+//   ES8388 codec. Runs in its own
 //   FreeRTOS task so playback survives modal sessions (ssh, outbound telnet) and
 //   display pushes. The enum lives here rather than Radio.ino for the same
 //   hoisted-prototype reason as LineInputResult above.
@@ -411,8 +425,8 @@ const int RADIO_VOLUME_MAX = 21;
 //one-slot command mailbox kinds, shell -> radio task (also here for hoisting: the
 //poster/consumer function signatures use it)
 //RADIO_CMD_RELEASE is the Game Boy emulator's: it stops the stream and tears the
-//radio's I2S controllers back down so src/AudioOut.cpp can claim one (the S3 has
-//exactly two, and a playing radio holds both). See radioReleaseAudio().
+//radio's I2S controller back down so src/AudioOut.cpp can claim it. See
+//radioReleaseAudio().
 enum RadioCommandKind {
     RADIO_CMD_NONE,
     RADIO_CMD_PLAY,
@@ -456,30 +470,86 @@ extern String motokoInputBuffer;
 extern WiFiClient remoteTelnetClient;   //outbound socket for the "telnet" client command (TelnetClient.ino) --
                                          //named distinctly from telnetClient (our server's connected user) above
 
-//   Display mirror (Display.ino). The TFT panel isn't a second *input* device --
-//   telnet remains the only way to control DOLL-OS -- it just shows the same session a
-//   connected telnet client sees, the way the user asked: "as if it was a second
-//   screen for the cardputer." That means reviving DOLL-OS's pixel-wrapped
-//   history/ANSI-filter machinery, just retargeted from an M5GFX sprite to a
-//   TFT_eSPI one.
-//
-//   The N-variant panel (ST77922, QSPI) pushes its whole frame in one call through
-//   a different object than the other two panels' plain TFT_eSPI, so tft/tft_qspi/
-//   tft_st77922 are all declared conditionally -- but every panel draws onto the
-//   same single full-screen frameSprite, so Display.ino's drawing code itself
-//   doesn't need to branch per panel, only the final "push this frame" step does.
-#ifdef FNK0104N_3P5_320x480_ST77922
-    TFT_eSPI tft_qspi = TFT_eSPI();
-    TFT_eSprite frameSprite = TFT_eSprite(&tft_qspi);
-    DollST77922 tft_st77922 = DollST77922();
-#else
-    TFT_eSPI tft = TFT_eSPI();
-    TFT_eSprite frameSprite = TFT_eSprite(&tft);
-#endif
+// M5Canvas preserves the sprite API used by the inherited terminal renderer.
+auto& tft = M5.Display;
+M5Canvas frameSprite(&M5.Display);
 
-const int DISPLAY_STATUS_BAR_HEIGHT = 16;
-const int DISPLAY_COMMAND_BAR_HEIGHT = 20;
-const int DISPLAY_PADDING = 4;
+const int DISPLAY_TEXT_SIZE = 2;
+const int DISPLAY_TERMINAL_LINE_HEIGHT = 24;
+const int DISPLAY_STATUS_BAR_HEIGHT = 32;
+const int DISPLAY_COMMAND_BAR_HEIGHT = 40;
+const int DISPLAY_PADDING = 8;
+
+// Display.ino exposes the shell's runtime geometry. Full-screen apps retain the
+// native landscape constants above; the portrait status-bar mode uses the same
+// 921,600-pixel canvas with its axes exchanged and reserves the bottom for the
+// touch keyboard.
+bool displayIsPortrait();
+bool displaySetPortrait(bool portrait);
+int displayWidth();
+int displayHeight();
+int displayTextSize();
+void displayUseTerminalTextSize();
+int displayTerminalLineHeight();
+int displayCommandBarHeight();
+int displayTouchKeyboardHeight();
+void drawTouchKeyboard();
+void touchKeyboardService();
+bool keyboardInjectByte(uint8_t value);
+bool keyboardInjectBytes(const uint8_t* bytes, size_t count);
+
+// TouchKeyboard.ino's helpers mention these in Arduino-generated prototypes,
+// so the vocabulary must live above the concatenated .ino body (the same
+// prototype-hoisting rule as LineInputResult/EditKey above).
+enum TouchKeyAction : uint8_t {
+    TKA_TEXT,
+    TKA_SHIFT,
+    TKA_SYMBOLS,
+    TKA_CTRL,
+    TKA_BACKSPACE,
+    TKA_ENTER,
+    TKA_ESCAPE,
+    TKA_LEFT,
+    TKA_RIGHT,
+    TKA_SPACE,
+};
+struct TouchKeySpec {
+    const char* label;
+    const char* shiftedLabel;
+    const char* bytes;
+    const char* shiftedBytes;
+    TouchKeyAction action;
+    uint8_t units;
+};
+
+// Gameboy.ino uses one orientation-selected control map for drawing and hit
+// testing. Keeping the type above Arduino's generated prototypes avoids the
+// same .ino prototype-hoisting trap as the input types above.
+struct GbTouchLayout {
+    int dpadX;
+    int dpadY;
+    int dpadHalf;
+    int dpadDead;
+    int dpadArm;
+    int dpadThick;
+    int aX;
+    int aY;
+    int bX;
+    int bY;
+    int faceRadius;
+    int selectX;
+    int selectY;
+    int selectW;
+    int selectH;
+    int startX;
+    int startY;
+    int startW;
+    int startH;
+    int menuX;
+    int menuY;
+    int menuW;
+    int menuH;
+};
 //   .dapp canvas (AppRunner.ino) -- a fixed character grid a script can address by cell
 //   instead of appending scrolling lines, which is what a game needs. While
 //   dappCanvasActive is set, drawDisplayFrame() paints this grid over the terminal
@@ -499,21 +569,14 @@ int dappCanvasCols = 0;
 int dappCanvasRows = 0;
 bool dappCanvasActive = false;
 
-//drawDisplayFrame() (Display.ino) skips its redraw + SPI push entirely unless this
-//is set -- every history/command-bar mutation marks it via markDisplayDirty() so a
-//full-frame push only happens when something actually changed, instead of on every
-//loop() tick regardless of activity
+//drawDisplayFrame() (Display.ino) skips its redraw + DSI framebuffer commit entirely
+//unless this is set. Every history/command-bar mutation marks it via markDisplayDirty(),
+//so an idle Tab5 never interrupts panel scanout merely to refresh a timer or blink a caret.
 bool displayDirty = true;   //starts true so the first frame after boot always draws
-const unsigned long DISPLAY_STATUS_REFRESH_MS = 1000;   //separate timer so the MEM/BAT
-                                                          //readout in the status bar still
-                                                          //ticks over while otherwise idle
-unsigned long displayLastStatusRefresh = 0;
 
-//command-bar caret blink. Like DISPLAY_STATUS_REFRESH_MS above, this is a second reason
-//drawDisplayFrame() may redraw an otherwise-clean frame: each time the blink phase flips
-//the frame is pushed again so the '|' caret in the mirrored command bar visibly blinks.
-const unsigned long DISPLAY_CURSOR_BLINK_MS = 500;   //half-period: on 500ms, off 500ms
-bool displayLastCursorPhase = false;                 //phase drawn last frame, to detect a flip
+//The full-screen editor uses this for its cursor phase. The shell renderer does not use
+//the timer as a reason to commit an otherwise-unchanged DSI framebuffer.
+const unsigned long DISPLAY_CURSOR_BLINK_MS = 500;
 
 const int DISPLAY_HISTORY_MAX_LINES = 200;
 const int DISPLAY_HISTORY_ROW_MAX_CHARS = 128;

@@ -1,11 +1,8 @@
 //   Display.ino
-//   drives the TFT panel as a mirror of the telnet session -- "a second screen for
-//   the cardputer," per the user's request. Telnet remains the only *input* path;
-//   this is output-only. Ported from DOLL-OS's terminal.ino (history wrapping/
-//   rendering) and ansi.ino (SGR color interpretation for raw remote byte streams),
-//   retargeted from an M5GFX sprite to a TFT_eSPI one -- the API shapes
-//   (drawString/textWidth/setTextColor/setTextDatum/fillSprite) are close enough
-//   that the porting is mostly a rename, not a redesign.
+// Drives the Tab5 panel as the shared shell display. It is output-only for this
+// milestone: touchscreen events are never read. Rendering uses an M5Canvas so
+// the inherited terminal-history and ANSI code stays independent of the panel
+// controller fitted to a particular Tab5 revision.
 //
 //   The panel follows the tail of history live by default, same as DOLL-OS, but
 //   Shift+Up/Down (recognized in TelnetServer.ino's handleCsiSequence and
@@ -17,14 +14,13 @@
 //   Panel pushes.
 //
 //   Redrawing the whole sprite every frame is cheap -- it is memory. The blit is the
-//   expensive half: 16bpp over the panel bus is ~150KB per frame at 320x240 and ~300KB at
-//   480x320, and a canvas app that moves one character was paying the full price of it on
+//   expensive half: the 1280x720 16bpp canvas is about 1.8MB, and a canvas app that moves
+//   one character would otherwise pay the full transfer cost on
 //   every FLIP. That transfer, not the interpreter, is what set the ceiling on how fast a
 //   dapp game could feel.
 //
 //   Frames are diffed against a shadow copy of what the panel was last sent, and only the
-//   rows that actually differ go over the bus. On N, those logical landscape rows are
-//   transformed into native portrait strips before reaching Freenove's rotation-0 writer.
+//   rows that actually differ go to the M5GFX display surface.
 //
 //   The shadow can go wrong one way -- if something draws to the panel *without* going through the
 //   sprite, the shadow no longer describes the glass. Gameboy.ino does exactly that, so any
@@ -32,56 +28,290 @@
 //   mode: a null shadow just means every push is a full one, which is the old behaviour.
 static uint16_t* displayShadow = nullptr;
 static bool displayShadowValid = false;
+//The Tab5 panel framebuffer, frameSprite and displayShadow all live in PSRAM. Panel
+//updates used to detour through an internal-RAM strip because M5GFX warns about
+//PSRAM-to-PSRAM memcpy corruption -- but that warning is scoped to
+//Panel_FrameBufferBase::copyRect, which copies a region of the framebuffer onto itself.
+//Our pushes and shadow syncs have disjoint source and destination buffers, and the strip
+//was not what caused the panel blinking. It cost ~20KB of the scarce internal pool, so
+//transfers now read straight out of PSRAM.
+//
+//The row chunking survives for the other reason it existed: Panel_FrameBufferBase tracks
+//one bounding rectangle per transaction, so pushing in bounded strips keeps a sparse
+//update from turning into one giant cache writeback that can starve continuous DSI scanout.
+static const int DISPLAY_PUSH_ROWS = 8;
+// Game Boy is the only caller of pushDisplayImageStaged(). Its scaled frame
+// lives in PSRAM, as does the Tab5 DSI framebuffer. Crossing a small internal
+// strip keeps the two external-memory operations separate without bringing
+// back the old 20 KB full-width shell staging allocation.
+static const int DISPLAY_IMAGE_STAGING_ROWS = 4;
+static uint16_t* displayImageStaging = nullptr;
+static int displayImageStagingPixels = 0;
+// Own one full-resolution shell canvas explicitly in PSRAM and only reinterpret
+// its axes when the user rotates the UI. M5Canvas otherwise frees and reallocates
+// the same 1.84 MB on every landscape/portrait transition. Apart from churning
+// PSRAM, its generic DMA allocator is allowed to consider internal-capable heaps.
+static uint16_t* displayFrameBuffer = nullptr;
+static DappCanvasCell* displayCanvasShadow = nullptr;
+static int displayCanvasShadowCols = 0;
+static int displayCanvasShadowRows = 0;
+static bool displayCanvasShadowValid = false;
+// Only AppRunner FLIP scans this row bitmap. It is cold bookkeeping, so keep its
+// 1.25 KB out of internal BSS; a null bitmap falls back to a full canvas push.
+static uint8_t* displayDappDirtyRows = nullptr;
+static bool displayPortrait = false;
+
+bool displayIsPortrait() { return displayPortrait; }
+int displayWidth() { return displayPortrait ? DISPLAY_HEIGHT : DISPLAY_WIDTH; }
+int displayHeight() { return displayPortrait ? DISPLAY_WIDTH : DISPLAY_HEIGHT; }
+int displayTextSize() { return displayPortrait ? 1 : DISPLAY_TEXT_SIZE; }
+void displayUseTerminalTextSize() {
+    if (displayPortrait) {
+        // Half-height glyphs with a modest horizontal stretch land at roughly
+        // 84 columns across 720 pixels. A uniform 1x font would be closer to
+        // 117 columns and too small for comfortable handheld use.
+        frameSprite.setTextSize(1.4f, 1.0f);
+    } else {
+        frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
+    }
+}
+int displayTerminalLineHeight() {
+    return displayPortrait ? DISPLAY_TERMINAL_LINE_HEIGHT / 2
+                           : DISPLAY_TERMINAL_LINE_HEIGHT;
+}
+int displayCommandBarHeight() {
+    return displayPortrait ? 28 : DISPLAY_COMMAND_BAR_HEIGHT;
+}
+int displayTouchKeyboardHeight() {
+    return displayPortrait ? 410 : 0;
+}
+
+static void clearDappDirtyRows() {
+    if (displayDappDirtyRows) {
+        memset(displayDappDirtyRows, 0, DISPLAY_WIDTH * sizeof(*displayDappDirtyRows));
+    }
+}  // Starts a canvas FLIP with no panel rows scheduled for transfer.
+
+static void markDappDirtyRows(int y, int height) {
+    if (!displayDappDirtyRows) return;
+    int firstRow = max(0, y);
+    int lastRow = min(displayHeight(), y + height);
+    for (int row = firstRow; row < lastRow; row++) {
+        displayDappDirtyRows[row] = true;
+    }
+}  // Records only the screen rows whose final pixels changed during this FLIP.
+
+void displayInvalidateDappCanvas() {
+    displayCanvasShadowValid = false;
+    displayCanvasShadowCols = 0;
+    displayCanvasShadowRows = 0;
+}  // Forces the next AppRunner canvas FLIP to rebuild its complete panel region.
 
 void displayInvalidateShadow() {
     displayShadowValid = false;
+}
+
+void pushDisplayImageStaged(int x, int y, int width, int height,
+                            const uint16_t* pixels, bool swapBytes) {
+    if (!pixels || width <= 0 || height <= 0) {
+        return;
+    }
+
+    const int wantedPixels = width * min(DISPLAY_IMAGE_STAGING_ROWS, height);
+    if (wantedPixels > displayImageStagingPixels) {
+        if (displayImageStaging) {
+            heap_caps_free(displayImageStaging);
+            displayImageStaging = nullptr;
+            displayImageStagingPixels = 0;
+        }
+        displayImageStaging = (uint16_t*)heap_caps_malloc(
+            (size_t)wantedPixels * sizeof(uint16_t),
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (displayImageStaging) {
+            displayImageStagingPixels = wantedPixels;
+        }
+    }
+
+    //Each strip must complete its own M5GFX transaction. Panel_FrameBufferBase tracks one
+    //bounding rectangle per transaction, so wrapping every strip together turns a sparse
+    //update into one giant cache writeback that can starve continuous DSI scanout.
+    bool oldSwapBytes = tft.getSwapBytes();
+    tft.setSwapBytes(swapBytes);
+    int pushed = 0;
+    while (pushed < height) {
+        int rowsThisPush = displayImageStaging
+            ? min(DISPLAY_IMAGE_STAGING_ROWS, height - pushed)
+            : min(DISPLAY_PUSH_ROWS, height - pushed);
+        const uint16_t* src = pixels + (size_t)pushed * width;
+        if (displayImageStaging) {
+            memcpy(displayImageStaging, src,
+                   (size_t)rowsThisPush * width * sizeof(uint16_t));
+            src = displayImageStaging;
+        }
+        tft.pushImage(x, y + pushed, width, rowsThisPush,
+                      const_cast<uint16_t*>(src));
+        pushed += rowsThisPush;
+    }
+    tft.setSwapBytes(oldSwapBytes);
+    displayInvalidateShadow();
+}  // Pushes arbitrary RGB565 images through a small internal-RAM strip.
+
+// Copies only a rectangular region of the shared frameSprite to the Tab5 DSI
+// framebuffer. frameSprite has a 1280-pixel stride, so a sub-rectangle is not
+// contiguous; pack a few rows through the same small internal staging buffer
+// instead of promoting every changed Game Boy row to a full-width transfer.
+void pushDisplaySpriteRegion(int x, int y, int width, int height) {
+    uint16_t* frame = (uint16_t*)frameSprite.getBuffer();
+    if (!frame || width <= 0 || height <= 0) return;
+
+    if (x < 0) { width += x; x = 0; }
+    if (y < 0) { height += y; y = 0; }
+    const int canvasWidth = displayWidth();
+    const int canvasHeight = displayHeight();
+    if (x + width > canvasWidth) width = canvasWidth - x;
+    if (y + height > canvasHeight) height = canvasHeight - y;
+    if (width <= 0 || height <= 0) return;
+
+    const int rowsPerPush = min(DISPLAY_IMAGE_STAGING_ROWS, height);
+    const int wantedPixels = width * rowsPerPush;
+    if (wantedPixels > displayImageStagingPixels) {
+        if (displayImageStaging) heap_caps_free(displayImageStaging);
+        displayImageStaging = (uint16_t*)heap_caps_malloc(
+            (size_t)wantedPixels * sizeof(uint16_t),
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        displayImageStagingPixels = displayImageStaging ? wantedPixels : 0;
+    }
+
+    bool oldSwapBytes = tft.getSwapBytes();
+    tft.setSwapBytes(false);  // frameSprite already contains panel-native RGB565
+    int pushed = 0;
+    while (pushed < height) {
+        const int rows = min(rowsPerPush, height - pushed);
+        if (displayImageStaging) {
+            for (int row = 0; row < rows; row++) {
+                memcpy(displayImageStaging + (size_t)row * width,
+                       frame + (size_t)(y + pushed + row) * canvasWidth + x,
+                       (size_t)width * sizeof(uint16_t));
+            }
+            tft.pushImage(x, y + pushed, width, rows, displayImageStaging);
+        } else {
+            // Low-memory fallback keeps the transfer narrow even without a
+            // packed multi-row buffer.
+            for (int row = 0; row < rows; row++) {
+                uint16_t* src = frame
+                    + (size_t)(y + pushed + row) * canvasWidth + x;
+                tft.pushImage(x, y + pushed + row, width, 1, src);
+            }
+        }
+        pushed += rows;
+    }
+    tft.setSwapBytes(oldSwapBytes);
+    displayInvalidateShadow();
 }
 
 static void pushDisplayRows(int y, int rowCount) {
     if (rowCount <= 0) {
         return;
     }
-    uint16_t* src = (uint16_t*)frameSprite.getPointer() + (size_t)y * DISPLAY_WIDTH;
-#ifdef FNK0104N_3P5_320x480_ST77922
-    // Freenove's LVGL path rounds native regions to four-pixel boundaries.
-    // Align logical rows the same way; after rotation these become native X.
-    int alignedY = y & ~0x3;
-    int alignedEnd = min(DISPLAY_HEIGHT, (y + rowCount + 3) & ~0x3);
-    int alignedRows = alignedEnd - alignedY;
-    src = (uint16_t*)frameSprite.getPointer() + (size_t)alignedY * DISPLAY_WIDTH;
-    tft_st77922.Fill_Colors_Landscape(0, alignedY, DISPLAY_WIDTH, alignedRows, src);
-#else
-    //mirrors what TFT_eSprite::pushSprite does for a 16bpp sprite -- the sprite's buffer is
-    //already in the panel's byte order, so the swap has to be off for the transfer
+
+    uint16_t* frame = (uint16_t*)frameSprite.getBuffer();
+    if (!frame) {
+        return;
+    }
+
+    //Sprite rows go to the panel directly. The strip bound is transaction sizing, not a copy.
     bool oldSwapBytes = tft.getSwapBytes();
     tft.setSwapBytes(false);
-    tft.pushImage(0, y, DISPLAY_WIDTH, rowCount, src);
+    int pushed = 0;
+    while (pushed < rowCount) {
+        int rowsThisPush = min(DISPLAY_PUSH_ROWS, rowCount - pushed);
+        const int canvasWidth = displayWidth();
+        uint16_t* src = frame + (size_t)(y + pushed) * canvasWidth;
+        tft.pushImage(0, y + pushed, canvasWidth, rowsThisPush, src);
+        pushed += rowsThisPush;
+    }
     tft.setSwapBytes(oldSwapBytes);
-#endif
-}
+}  // Copies complete sprite rows to the panel in bounded-writeback strips.
+
+static void pushDappDirtyRows() {
+    if (!displayDappDirtyRows) {
+        pushDisplayRows(0, displayHeight());
+        displayInvalidateShadow();
+        return;
+    }
+    int row = 0;
+    const int canvasHeight = displayHeight();
+    while (row < canvasHeight) {
+        while (row < canvasHeight && !displayDappDirtyRows[row]) {
+            row++;
+        }
+        int firstRow = row;
+        while (row < canvasHeight && displayDappDirtyRows[row]) {
+            row++;
+        }
+        if (firstRow < row) {
+            pushDisplayRows(firstRow, row - firstRow);
+        }
+    }
+
+    //Canvas mode deliberately bypasses the full-frame PSRAM shadow. Keeping it valid
+    //would require another PSRAM write for every changed row, while invalidating it costs
+    //only one full resynchronization after the app exits.
+    displayInvalidateShadow();
+}  // Transfers canvas changes without scanning or copying the two 1.84MB PSRAM images.
+
+static bool bindDisplayFrameBuffer(int width, int height) {
+    const size_t pixelCount = (size_t)DISPLAY_WIDTH * DISPLAY_HEIGHT;
+    if (!displayFrameBuffer) {
+        displayFrameBuffer = (uint16_t*)heap_caps_calloc(
+            pixelCount, sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        Serial.printf("[psram] frameSprite backing: %u bytes -> %s\n",
+                      (unsigned)(pixelCount * sizeof(uint16_t)),
+                      displayFrameBuffer ? "PSRAM" : "allocation failed");
+    }
+    if (!displayFrameBuffer) return false;
+
+    frameSprite.setColorDepth(16);
+    frameSprite.setBuffer(displayFrameBuffer, width, height, 16);
+    return frameSprite.getBuffer() == displayFrameBuffer;
+}  // Rebinds the same PSRAM pixels without freeing or reallocating them.
+
+static bool copyDisplayRowsToShadow(int y, int rowCount) {
+    uint16_t* frame = (uint16_t*)frameSprite.getBuffer();
+    if (!frame || !displayShadow || rowCount <= 0) {
+        return false;
+    }
+
+    //The sprite and its shadow are two distinct PSRAM allocations, so one straight memcpy
+    //is safe: M5GFX's corruption warning covers copying a framebuffer region onto itself.
+    const size_t offset = (size_t)y * displayWidth();
+    memcpy(displayShadow + offset, frame + offset,
+           (size_t)rowCount * displayWidth() * sizeof(uint16_t));
+    return true;
+}  // Synchronizes the diff shadow with the sprite rows just sent to the panel.
 
 void pushDisplayFrame() {
-    uint16_t* frame = (uint16_t*)frameSprite.getPointer();
-    const size_t rowWords = (size_t)DISPLAY_WIDTH;
+    uint16_t* frame = (uint16_t*)frameSprite.getBuffer();
+    const size_t rowWords = (size_t)displayWidth();
     const size_t rowBytes = rowWords * sizeof(uint16_t);
 
-    //TFT_eSprite::pushSprite used to do this guard for us -- nothing to send before
+    //Nothing can be sent before createSprite has allocated the canvas.
     //createSprite has run, and the row pointers below would be offsets from null
     if (!frame) {
         return;
     }
 
     if (!displayShadow || !displayShadowValid) {
-        pushDisplayRows(0, DISPLAY_HEIGHT);
-        if (displayShadow) {
-            memcpy(displayShadow, frame, rowBytes * DISPLAY_HEIGHT);
-            displayShadowValid = true;
-        }
+        //pushDisplayRows commits each strip as its own transaction. Combining the full
+        //frame into one would force a 1.84MB cache writeback burst.
+        pushDisplayRows(0, displayHeight());
+        displayShadowValid = copyDisplayRowsToShadow(0, displayHeight());
         return;
     }
 
     int row = 0;
-    while (row < DISPLAY_HEIGHT) {
+    const int canvasHeight = displayHeight();
+    while (row < canvasHeight) {
         const uint16_t* frameRow = frame + (size_t)row * rowWords;
         if (memcmp(frameRow, displayShadow + (size_t)row * rowWords, rowBytes) == 0) {
             row++;
@@ -90,42 +320,42 @@ void pushDisplayFrame() {
         //walk the whole run of changed rows so they go out as one transfer rather than one
         //setAddrWindow per row
         int start = row;
-        while (row < DISPLAY_HEIGHT &&
+        while (row < canvasHeight &&
                memcmp(frame + (size_t)row * rowWords,
                       displayShadow + (size_t)row * rowWords, rowBytes) != 0) {
-            memcpy(displayShadow + (size_t)row * rowWords, frame + (size_t)row * rowWords, rowBytes);
             row++;
         }
         pushDisplayRows(start, row - start);
+        if (!copyDisplayRowsToShadow(start, row - start)) {
+            displayShadowValid = false;
+        }
     }
 }
 
 void initDisplay() {
+    const size_t internalBefore = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     //history ring first, so its PSRAM use is accounted before the sprite snapshot below
     displayHistoryRows = (DisplayHistoryRow*) psramOrInternalCalloc(
         DISPLAY_HISTORY_MAX_LINES, sizeof(DisplayHistoryRow), "displayHistory");
+    displayDappDirtyRows = (uint8_t*)heap_caps_calloc(
+        DISPLAY_WIDTH, sizeof(*displayDappDirtyRows), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    Serial.printf("[psram] display dirty rows: %u bytes -> %s\n",
+                  (unsigned)(DISPLAY_WIDTH * sizeof(*displayDappDirtyRows)),
+                  displayDappDirtyRows ? "PSRAM" : "unavailable (full canvas pushes)");
 
-    //the frame sprite is the big one (~150KB at 16bpp). TFT_eSPI routes it to PSRAM by
-    //itself when psramFound() (Sprite.cpp callocSprite); snapshot the PSRAM pool around
-    //createSprite so the boot log proves whether it actually landed there.
+    //The frame sprite is about 1.8MB at 16bpp. Snapshot PSRAM around allocation
+    //so the boot log proves where M5Canvas placed it.
     size_t psramFreeBeforeSprite = ESP.getFreePsram();
-#ifdef FNK0104N_3P5_320x480_ST77922
-    tft_st77922.Init();
-    tft_st77922.Set_Rotation(0);
-    frameSprite.setColorDepth(16);
-    frameSprite.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    frameSprite.setSwapBytes(true);
-#else
-    tft.init();
-    tft.setRotation(DOLL_DISPLAY_UPSIDE_DOWN ? 3 : 1);
-    frameSprite.setColorDepth(16);
-    frameSprite.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT);
-#endif
+    tft.setRotation(TAB5_DISPLAY_ROTATION);
+    Serial.printf("[display] rotation=%d logical=%dx%d\n",
+                  TAB5_DISPLAY_ROTATION, tft.width(), tft.height());
+
+    bindDisplayFrameBuffer(DISPLAY_WIDTH, DISPLAY_HEIGHT);
     Serial.printf("[psram] frameSprite: %u bytes drawn from PSRAM (0 => it fell back to internal RAM)\n",
                   (unsigned)(psramFreeBeforeSprite - ESP.getFreePsram()));
 
-    //   Same size as the sprite. Deliberately PSRAM-or-nothing rather than going through
-    //   psramOrInternalCalloc: this buffer only buys speed, and taking 150KB of the scarce
+    //Same size as the sprite. Deliberately PSRAM-or-nothing rather than going through
+    //psramOrInternalCalloc: this buffer only buys speed, and taking 1.8MB of the scarce
     //   internal pool to get it would be a bad trade. A null result costs nothing but the
     //   old full-frame push.
     displayShadow = (uint16_t*) heap_caps_calloc(
@@ -136,56 +366,114 @@ void initDisplay() {
                   displayShadow ? "PSRAM (partial frame pushes enabled)"
                                 : "unavailable (full frame pushes)");
 
+    //Comparing final cells before touching the PSRAM sprite means Tetris usually redraws
+    //only the old and new piece cells instead of clearing 1.6MB per FLIP. The snapshot is
+    //read once per changed cell and never DMA'd, so PSRAM is the right pool for it --
+    //internal RAM is the scarce one and this is ~14KB of it.
+    displayCanvasShadow = (DappCanvasCell*)heap_caps_malloc(
+        (size_t)DAPP_CANVAS_MAX_COLS * DAPP_CANVAS_MAX_ROWS * sizeof(DappCanvasCell),
+        MALLOC_CAP_SPIRAM);
+    displayInvalidateDappCanvas();
+    Serial.printf("[display] dapp canvas shadow: %u bytes -> %s\n",
+                  (unsigned)((size_t)DAPP_CANVAS_MAX_COLS * DAPP_CANVAS_MAX_ROWS *
+                             sizeof(DappCanvasCell)),
+                  displayCanvasShadow ? "PSRAM (changed-cell redraws enabled)"
+                                      : "unavailable (full canvas redraws)");
+
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
+    displayUseTerminalTextSize();
     frameSprite.fillSprite(TFT_BLACK);
-    pushDisplayFrame();
+    const size_t internalAfter = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    Serial.printf("[ram] initDisplay internal: before=%u after=%u delta=%d\n",
+                  (unsigned)internalBefore, (unsigned)internalAfter,
+                  (int)internalAfter - (int)internalBefore);
+    //setup() draws the boot splash immediately after initDisplay(). Avoid a redundant
+    //full black commit immediately before that first cyan frame.
 }
+
+bool displaySetPortrait(bool portrait) {
+    if (portrait == displayPortrait) return true;
+    if (dappCanvasActive) return false;
+
+    const size_t internalBefore = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    displayPortrait = portrait;
+    tft.setRotation(displayPortrait ? TAB5_DISPLAY_PORTRAIT_ROTATION
+                                    : TAB5_DISPLAY_ROTATION);
+    bool bound = bindDisplayFrameBuffer(displayWidth(), displayHeight());
+    if (!bound) {
+        Serial.printf("[display] %s canvas allocation failed; restoring landscape\n",
+                      displayPortrait ? "portrait" : "landscape");
+        displayPortrait = false;
+        tft.setRotation(TAB5_DISPLAY_ROTATION);
+        bound = bindDisplayFrameBuffer(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        if (!bound) {
+            Serial.println("[display] FATAL: canvas restore allocation failed");
+            return false;
+        }
+    }
+
+    frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
+    displayUseTerminalTextSize();
+    frameSprite.setTextDatum(TL_DATUM);
+    frameSprite.fillSprite(TFT_BLACK);
+    displayScrollOffset = 0;
+    displayInvalidateShadow();
+    displayInvalidateDappCanvas();
+    markDisplayDirty();
+    Serial.printf("[display] mode=%s rotation=%d logical=%dx%d text=%d\n",
+                  displayPortrait ? "portrait" : "landscape",
+                  tft.getRotation(), displayWidth(), displayHeight(), displayTextSize());
+    const size_t internalAfter = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    Serial.printf("[ram] display rotation internal: before=%u after=%u delta=%d\n",
+                  (unsigned)internalBefore, (unsigned)internalAfter,
+                  (int)internalAfter - (int)internalBefore);
+    return displayPortrait == portrait;
+}  // Reuses the same pixel count while exchanging the canvas axes.
 
 void displaySetSleeping(bool sleeping) {
     if (sleeping) {
-#ifdef FNK0104N_3P5_320x480_ST77922
-        tft_st77922.Write_Reg(0x28, nullptr, 0);  // Disable ST77922 pixel output before sleep-in.
-        delay(10);
-        tft_st77922.Write_Reg(0x10, nullptr, 0);  // Put the QSPI panel controller into sleep-in.
-#else
-        tft.writecommand(0x28);                   // Disable ILI9341/ST7796 pixel output first.
-        delay(10);
-        tft.writecommand(0x10);                   // Put the SPI panel controller into sleep-in.
-#endif
-        delay(10);
-        digitalWrite(DOLL_DISPLAY_BACKLIGHT_PIN, LOW);  // Remove the largest visible power load.
+        tft.sleep();                              // M5GFX handles every Tab5 panel revision safely.
         return;
     }
 
-#ifdef FNK0104N_3P5_320x480_ST77922
-    tft_st77922.Write_Reg(0x11, nullptr, 0);      // Wake the ST77922 controller without reinitializing RAM.
-#else
-    tft.writecommand(0x11);                       // Wake the ILI9341/ST7796 controller in place.
-#endif
-    delay(120);                                   // Panel datasheets require settling after sleep-out.
-#ifdef FNK0104N_3P5_320x480_ST77922
-    tft_st77922.Write_Reg(0x29, nullptr, 0);      // Re-enable ST77922 display output.
-#else
-    tft.writecommand(0x29);                       // Re-enable ILI9341/ST7796 display output.
-#endif
-    digitalWrite(DOLL_DISPLAY_BACKLIGHT_PIN, HIGH);  // Light the preserved frame immediately.
+    tft.wakeup();                                 // Restores the remembered display brightness.
     displayInvalidateShadow();                    // Force the next render to resynchronize panel RAM.
     markDisplayDirty();                           // Repaint status after network and wake state change.
 }
 
+void displayPrepareForRestart() {
+    // The P4 resets independently of PI4IO1 and the ST7123. If DSI scanout is
+    // severed while the external panel remains awake, its receiver can latch in
+    // a state that survives esp_restart() and only a full power removal clears.
+    tft.setBrightness(0);
+    tft.sleep();
+    delay(20);
+
+    // PI4IO1 OUT_SET bit4 is LCD_RST and bit5 is TP_RST. Hold both low across
+    // the CPU reset; M5GFX's Tab5 autodetect sequence releases them on next boot.
+    bool resetHeld = false;
+    if (boardI2cLock(1000)) {
+        resetHeld = M5.In_I2C.bitOff(0x43, 0x05, 0x30, 100000);
+        boardI2cUnlock();
+    }
+    Serial.printf("[display] restart fence: panel reset %s\n",
+                  resetHeld ? "held low" : "write failed");
+    delay(20);
+}  // Quiesces DSI and carries the external panel reset across a P4 restart.
+
 void drawDisplayBootSplash() {
     frameSprite.fillSprite(TFT_CYAN);
-    const int splashWidth = min(DISPLAY_WIDTH - (DISPLAY_PADDING * 4), 180);
-    const int splashHeight = 64;
+    const int splashWidth = min(DISPLAY_WIDTH - (DISPLAY_PADDING * 4), 360);
+    const int splashHeight = 128;
     const int splashX = (DISPLAY_WIDTH - splashWidth) / 2;
     const int splashY = (DISPLAY_HEIGHT - splashHeight) / 2;
     frameSprite.fillRect(splashX, splashY, splashWidth, splashHeight, TFT_BLACK);
     frameSprite.setTextDatum(MC_DATUM);
     frameSprite.setTextColor(TFT_PINK, TFT_BLACK);
-    frameSprite.setTextSize(2);
-    frameSprite.drawString("DOLL-OS", DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2 - 10);
-    frameSprite.setTextSize(1);
-    frameSprite.drawString("booting...", DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2 + 14);
+    frameSprite.setTextSize(DISPLAY_TEXT_SIZE * 2);
+    frameSprite.drawString("DOLL-OS", DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2 - 20);
+    frameSprite.setTextSize(DISPLAY_TEXT_SIZE);
+    frameSprite.drawString("booting...", DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2 + 28);
     frameSprite.setTextDatum(TL_DATUM);
     pushDisplayFrame();
 }
@@ -196,10 +484,11 @@ int displayTerminalY() {
     return DISPLAY_STATUS_BAR_HEIGHT;
 }
 int displayTerminalHeight() {
-    return DISPLAY_HEIGHT - DISPLAY_STATUS_BAR_HEIGHT - DISPLAY_COMMAND_BAR_HEIGHT;
+    return displayHeight() - DISPLAY_STATUS_BAR_HEIGHT - displayCommandBarHeight()
+        - displayTouchKeyboardHeight();
 }
 int displayCommandBarY() {
-    return DISPLAY_HEIGHT - DISPLAY_COMMAND_BAR_HEIGHT;
+    return displayHeight() - displayTouchKeyboardHeight() - displayCommandBarHeight();
 }
 
 void markDisplayDirty() {
@@ -219,6 +508,7 @@ void setActiveInput(const String& prompt, const String& text, bool masked) {
 //   History ring buffer (mirrors DOLL-OS's HistoryRow / addWrappedHistoryLine)
 
 static int displayCharWidth(char ch) {
+    displayUseTerminalTextSize();
     char glyph[2] = { ch, '\0' };
     return (int)frameSprite.textWidth(glyph);
 }
@@ -274,7 +564,8 @@ void addDisplayLine(const String& line) {
 }
 
 void addDisplayLine(const String& line, uint16_t color) {
-    const int maxWidth = DISPLAY_WIDTH - (DISPLAY_PADDING * 2);
+    displayUseTerminalTextSize();
+    const int maxWidth = displayWidth() - (DISPLAY_PADDING * 2);
     if (maxWidth < 0) {
         return;
     }
@@ -367,7 +658,8 @@ void displayStreamNewline(DisplayStreamState& st) {
 }
 
 void displayStreamPutChar(DisplayStreamState& st, char ch, uint16_t color) {
-    const int maxWidth = DISPLAY_WIDTH - (DISPLAY_PADDING * 2);
+    displayUseTerminalTextSize();
+    const int maxWidth = displayWidth() - (DISPLAY_PADDING * 2);
     if (maxWidth < 0) {
         return;
     }
@@ -677,33 +969,44 @@ uint16_t ansiCodeToPixelColor(int code) {
 //   DOLL-OS's own per-tick drawTerminalHistory()/drawCommandBar() calls
 
 void drawDisplayStatusBar() {
-    frameSprite.fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_STATUS_BAR_HEIGHT, TFT_BLACK);
+    const int canvasWidth = displayWidth();
+    frameSprite.fillRect(0, 0, canvasWidth, DISPLAY_STATUS_BAR_HEIGHT, TFT_BLACK);
     frameSprite.setTextDatum(TL_DATUM);
+    displayUseTerminalTextSize();
     frameSprite.setTextColor(TFT_PINK, TFT_BLACK);
-    frameSprite.drawString("DOLL-OS", DISPLAY_PADDING, 2);
+    frameSprite.drawString("DOLL-OS", DISPLAY_PADDING, 4);
 
     char statusText[64];
     snprintf(statusText, sizeof(statusText), "MEM:%luKB VOL:%02d BAT:%d%%",
         (unsigned long)(ESP.getFreeHeap() / 1000), radioGetVolume(), readBatteryPercent());
     frameSprite.setTextDatum(TR_DATUM);
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
-    frameSprite.drawString(statusText, DISPLAY_WIDTH - DISPLAY_PADDING, 2);
+    const int statusRight = (dappCanvasActive || displayPortrait)
+        ? canvasWidth - DISPLAY_PADDING
+        : gbMainTouchLauncherLeft() - DISPLAY_PADDING;
+    frameSprite.drawString(statusText, statusRight, 4);
 
-    frameSprite.drawFastHLine(0, DISPLAY_STATUS_BAR_HEIGHT - 1, DISPLAY_WIDTH, TFT_PINK);
+    if (!dappCanvasActive && !displayPortrait) {
+        gbDrawMainTouchLauncher();
+        gbaDrawMainTouchLauncher();
+    }
+
+    frameSprite.drawFastHLine(0, DISPLAY_STATUS_BAR_HEIGHT - 1, canvasWidth, TFT_PINK);
     frameSprite.setTextDatum(TL_DATUM);
 }
 
 void drawDisplayHistory() {
-    const int lineHeight = 12;
+    const int lineHeight = displayTerminalLineHeight();
     const int top = displayTerminalY();
     const int height = displayTerminalHeight();
 
-    frameSprite.fillRect(0, top, DISPLAY_WIDTH, height, TFT_BLACK);
+    frameSprite.fillRect(0, top, displayWidth(), height, TFT_BLACK);
     if (displayHistoryCount == 0) {
         return;
     }
 
     frameSprite.setTextDatum(TL_DATUM);
+    displayUseTerminalTextSize();
     //rows are drawn starting DISPLAY_PADDING below `top`, so the space actually available
     //for text is height - DISPLAY_PADDING. Dividing the full height counted one row too
     //many for the region: on the 240px panel that put the bottom row flush at y=219, right
@@ -734,7 +1037,7 @@ void drawDisplayHistory() {
         //cheap "you're not looking at the live tail" hint, top-right of the terminal area
         frameSprite.setTextDatum(TR_DATUM);
         frameSprite.setTextColor(TFT_YELLOW, TFT_BLACK);
-        frameSprite.drawString("SCROLL", DISPLAY_WIDTH - DISPLAY_PADDING, top + DISPLAY_PADDING);
+        frameSprite.drawString("SCROLL", displayWidth() - DISPLAY_PADDING, top + DISPLAY_PADDING);
         frameSprite.setTextDatum(TL_DATUM);
         frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
     }
@@ -742,14 +1045,17 @@ void drawDisplayHistory() {
 
 void drawDisplayCommandBar() {
     const int y = displayCommandBarY();
-    frameSprite.fillRect(0, y, DISPLAY_WIDTH, DISPLAY_COMMAND_BAR_HEIGHT, TFT_BLACK);
-    frameSprite.drawFastHLine(0, y, DISPLAY_WIDTH, TFT_WHITE);
+    const int barHeight = displayCommandBarHeight();
+    const int canvasWidth = displayWidth();
+    frameSprite.fillRect(0, y, canvasWidth, barHeight, TFT_BLACK);
+    frameSprite.drawFastHLine(0, y, canvasWidth, TFT_WHITE);
     frameSprite.setTextDatum(TL_DATUM);
+    displayUseTerminalTextSize();
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
 
     frameSprite.drawString(activeInputPrompt, DISPLAY_PADDING, y + DISPLAY_PADDING);
     int textX = DISPLAY_PADDING + (int)frameSprite.textWidth(activeInputPrompt);
-    int maxWidth = max(0, DISPLAY_WIDTH - textX - DISPLAY_PADDING);
+    int maxWidth = max(0, canvasWidth - textX - DISPLAY_PADDING);
 
     String shown = activeInputText;
     if (activeInputMasked) {
@@ -771,17 +1077,17 @@ void drawDisplayCommandBar() {
     }
     frameSprite.drawString(shown, textX, y + DISPLAY_PADDING);
 
-    //blinking caret at the edit position. commandCursorPos indexes the full buffer; subtract
+    //Solid caret at the edit position. On the Tab5, blinking this by committing the DSI
+    //framebuffer every 500 ms can interrupt panel scanout even when no UI content changed.
+    //commandCursorPos indexes the full buffer; subtract
     //the dropped head to land in `shown`, then clamp so a cursor scrolled off the left edge
     //parks at the start of the visible window rather than drawing off-panel.
-    if (((millis() / DISPLAY_CURSOR_BLINK_MS) & 1UL) == 0) {
-        int caretInShown = commandCursorPos - (int)droppedFromHead;
-        if (caretInShown < 0) caretInShown = 0;
-        if (caretInShown > (int)shown.length()) caretInShown = shown.length();
-        int caretX = textX + (int)frameSprite.textWidth(shown.substring(0, caretInShown));
-        if (caretX > textX + maxWidth) caretX = textX + maxWidth;
-        frameSprite.drawFastVLine(caretX, y + DISPLAY_PADDING, frameSprite.fontHeight(), TFT_WHITE);
-    }
+    int caretInShown = commandCursorPos - (int)droppedFromHead;
+    if (caretInShown < 0) caretInShown = 0;
+    if (caretInShown > (int)shown.length()) caretInShown = shown.length();
+    int caretX = textX + (int)frameSprite.textWidth(shown.substring(0, caretInShown));
+    if (caretX > textX + maxWidth) caretX = textX + maxWidth;
+    frameSprite.drawFastVLine(caretX, y + DISPLAY_PADDING, frameSprite.fontHeight(), TFT_WHITE);
 }
 
 //   paints a running .dapp's CANVAS grid over the terminal area (AppRunner.ino's FLIP).
@@ -791,23 +1097,29 @@ void drawDisplayCommandBar() {
 void drawDappCanvas() {
     const int top = displayTerminalY();
     const int height = displayTerminalHeight();
-    frameSprite.fillRect(0, top, DISPLAY_WIDTH, height, TFT_BLACK);
     if (!dappCanvasCells || dappCanvasCols <= 0 || dappCanvasRows <= 0) {
+        frameSprite.fillRect(0, top, displayWidth(), height, TFT_BLACK);
+        markDappDirtyRows(top, height);
+        displayInvalidateDappCanvas();
         return;
     }
 
-    const int cellW = max(1, (DISPLAY_WIDTH - DISPLAY_PADDING * 2) / dappCanvasCols);
+    const int cellW = max(1, (displayWidth() - DISPLAY_PADDING * 2) / dappCanvasCols);
     const int cellH = max(1, (height - DISPLAY_PADDING * 2) / dappCanvasRows);
 
-    //the built-in font is 6x8 at size 1, so this is how many whole multiples of it fit in
-    //a cell -- a small grid gets big glyphs instead of a lot of empty space
-    int textSize = min(cellW / 6, cellH / 8);
-    if (textSize < 1) textSize = 1;
-    if (textSize > 4) textSize = 4;
+    //Keep AppRunner glyphs at the user-selected compact built-in size.
+    const int textSize = 1;
 
     //center the grid in the area it didn't divide evenly into
-    const int originX = (DISPLAY_WIDTH - cellW * dappCanvasCols) / 2;
+    const int originX = (displayWidth() - cellW * dappCanvasCols) / 2;
     const int originY = top + (height - cellH * dappCanvasRows) / 2;
+    const bool fullRedraw = !displayCanvasShadow || !displayCanvasShadowValid ||
+        displayCanvasShadowCols != dappCanvasCols ||
+        displayCanvasShadowRows != dappCanvasRows;
+    if (fullRedraw) {
+        frameSprite.fillRect(0, top, displayWidth(), height, TFT_BLACK);
+        markDappDirtyRows(top, height);
+    }
 
     frameSprite.setTextSize(textSize);
     frameSprite.setTextDatum(MC_DATUM);
@@ -816,7 +1128,22 @@ void drawDappCanvas() {
     char glyph[2] = { ' ', '\0' };
     for (int row = 0; row < dappCanvasRows; row++) {
         for (int col = 0; col < dappCanvasCols; col++) {
-            const DappCanvasCell& cell = dappCanvasCells[row * dappCanvasCols + col];
+            const int cellIndex = row * dappCanvasCols + col;
+            const DappCanvasCell& cell = dappCanvasCells[cellIndex];
+            if (!fullRedraw &&
+                cell.ch == displayCanvasShadow[cellIndex].ch &&
+                cell.color == displayCanvasShadow[cellIndex].color) {
+                continue;
+            }
+
+            const int cellX = originX + col * cellW;
+            const int cellY = originY + row * cellH;
+            if (!fullRedraw) {
+                //Erase only a changed cell. The selected text size always fits inside its
+                //cell, so this cannot clip a neighbouring glyph.
+                frameSprite.fillRect(cellX, cellY, cellW, cellH, TFT_BLACK);
+            }
+            markDappDirtyRows(cellY, cellH);
             if (cell.ch == ' ' || cell.ch == '\0') {
                 continue;   //the area is already black; skipping blanks is most of the frame
             }
@@ -825,34 +1152,49 @@ void drawDappCanvas() {
             glyph[0] = cell.ch;
             frameSprite.setTextColor(ansiCodeToPixelColor(cell.color));
             frameSprite.drawString(glyph,
-                                   originX + col * cellW + cellW / 2,
-                                   originY + row * cellH + cellH / 2);
+                                   cellX + cellW / 2,
+                                   cellY + cellH / 2);
         }
     }
 
-    frameSprite.setTextSize(1);
+    if (displayCanvasShadow) {
+        const size_t canvasBytes = (size_t)dappCanvasCols * dappCanvasRows *
+            sizeof(DappCanvasCell);
+        memcpy(displayCanvasShadow, dappCanvasCells, canvasBytes);
+        displayCanvasShadowCols = dappCanvasCols;
+        displayCanvasShadowRows = dappCanvasRows;
+        displayCanvasShadowValid = true;
+    }
+
+    displayUseTerminalTextSize();
     frameSprite.setTextDatum(TL_DATUM);
     frameSprite.setTextColor(TFT_WHITE, TFT_BLACK);
 }
 
 void drawDisplayFrame() {
-    unsigned long now = millis();
-    bool statusRefreshDue = (now - displayLastStatusRefresh) >= DISPLAY_STATUS_REFRESH_MS;
-    bool cursorPhase = ((now / DISPLAY_CURSOR_BLINK_MS) & 1UL) == 0;
-    bool cursorBlinkDue = (cursorPhase != displayLastCursorPhase);
-    if (!displayDirty && !statusRefreshDue && !cursorBlinkDue) {
-        return;   //nothing changed since the last push -- skip the full-frame redraw + SPI blit
+    if (!displayDirty) {
+        return;   //nothing changed: do not disturb the live DSI framebuffer while idle
     }
     displayDirty = false;
-    displayLastStatusRefresh = now;
-    displayLastCursorPhase = cursorPhase;
+
+    if (dappCanvasActive) {
+        //A canvas FLIP already knows exactly which cells changed. Preserve that knowledge
+        //as a small internal-RAM row map instead of rereading 3.68MB of PSRAM to rediscover it.
+        clearDappDirtyRows();
+        drawDisplayStatusBar();
+        markDappDirtyRows(0, DISPLAY_STATUS_BAR_HEIGHT);
+        drawDappCanvas();
+        drawDisplayCommandBar();
+        drawTouchKeyboard();
+        markDappDirtyRows(displayCommandBarY(),
+                          displayHeight() - displayCommandBarY());
+        pushDappDirtyRows();
+        return;
+    }
 
     drawDisplayStatusBar();
-    if (dappCanvasActive) {
-        drawDappCanvas();
-    } else {
-        drawDisplayHistory();
-    }
+    drawDisplayHistory();
     drawDisplayCommandBar();
+    drawTouchKeyboard();
     pushDisplayFrame();
 }

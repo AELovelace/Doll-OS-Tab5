@@ -1,11 +1,11 @@
 # @dapp-format 1
 # @id tracker-music
 # @name Tracker Music
-# @version 1.6.0
-# @boards fnk0104
+# @version 1.7.0
+# @boards m5stack-tab5
 # @runtime >=1.8.0 <2.0.0
 # @echo off
-# @summary An eight-pattern song sequencer for the three-channel synth
+# @summary A wide Tab5 song sequencer for the three-channel synth
 # /apps/tracker-music.dapp
 # Arrows move, space toggles a step, z s x d c v g b h n j m play C..B on the
 # selected channel, l and ; play C#/D# one octave up, 1-9 set the octave those
@@ -17,7 +17,8 @@
 # length, Y copies the current pattern, V pastes it into the selected pattern,
 # Escape exits.
 
-CANVAS 60 20
+# Tab5 keeps the transport, three tracks, song chain and shortcut legend visible.
+CANVAS 100 36
 DIM p1 128
 DIM p2 128
 DIM p3 128
@@ -482,46 +483,46 @@ GOSUB notename
 SETSTR tonelabel $nlabel
 APPEND tonelabel "$curoct"
 COLOR pink
-PUT 0 0 "TRACKER MUSIC"
+PUT 2 1 "TRACKER MUSIC // TAB5 STUDIO"
 COLOR white
-PUT 0 1 "PAT $patdisp/8  SONG $songdisp/$songLen  BPM $bpm  OCT $octave"
-PUT 0 2 "CH $channel  TONE $tonelabel  WAVE $wlabel"
+PUT 2 3 "PATTERN $patdisp/8     SONG SLOT $songdisp/$songLen     BPM $bpm     OCTAVE $octave"
+PUT 2 4 "CHANNEL $channel      TONE $tonelabel      WAVEFORM $wlabel"
 COLOR cyan
-PUT 0 4 "    1  2  3  4  5  6  7  8  9  A  B  C  D  E  F  G"
+PUT 10 7 "1    2    3    4    5    6    7    8    9    A    B    C    D    E    F    G"
 SET i 0
 :drawloop
 IF $i >= 16 GOTO drawcursor
 EXPR idx $pattern * 16 + $i
-EXPR x 4 + $i * 3
+EXPR x 10 + $i * 5
 IF $p1[$idx] = 0 GOTO d1off
 COLOR pink
 EXPR semi $t1[$idx] % 12
 GOSUB notename
-PUT $x 7 "$nlabel"
+PUT $x 10 "$nlabel"
 GOTO d2
 :d1off
 COLOR white
-PUT $x 7 "."
+PUT $x 10 "."
 :d2
 IF $p2[$idx] = 0 GOTO d2off
 COLOR cyan
 EXPR semi $t2[$idx] % 12
 GOSUB notename
-PUT $x 10 "$nlabel"
+PUT $x 15 "$nlabel"
 GOTO d3
 :d2off
 COLOR white
-PUT $x 10 "."
+PUT $x 15 "."
 :d3
 IF $p3[$idx] = 0 GOTO d3off
 COLOR yellow
 EXPR semi $t3[$idx] % 12
 GOSUB notename
-PUT $x 13 "$nlabel"
+PUT $x 20 "$nlabel"
 GOTO dn
 :d3off
 COLOR white
-PUT $x 13 "."
+PUT $x 20 "."
 :dn
 ADD i 1
 GOTO drawloop
@@ -529,23 +530,23 @@ GOTO drawloop
 COLOR white
 SET widx $wave1
 GOSUB wavename
-PUT 0 7 "$wlabel"
+PUT 2 10 "CH1 $wlabel"
 SET widx $wave2
 GOSUB wavename
-PUT 0 10 "$wlabel"
+PUT 2 15 "CH2 $wlabel"
 SET widx $wave3
 GOSUB wavename
-PUT 0 13 "$wlabel"
-EXPR x 4 + $step * 3
-EXPR y 4 + $channel * 3
+PUT 2 20 "CH3 $wlabel"
+EXPR x 10 + $step * 5
+EXPR y 5 + $channel * 5
 COLOR green
 PUT $x $y "@"
 COLOR cyan
-PUT 0 16 "SEQ"
+PUT 2 25 "SONG"
 SET i 0
 :drawsong
 IF $i >= $songLen GOTO drawsong_done
-EXPR x 4 + $i * 2
+EXPR x 9 + $i * 3
 EXPR mark $song[$i] + 1
 IF $i = $songpos GOTO drawsong_sel
 COLOR white
@@ -559,9 +560,9 @@ ADD i 1
 GOTO drawsong
 :drawsong_done
 COLOR yellow
-PUT 0 17 "keys z-m play notes, l ; = C#/D# +1oct, 1-9 octave"
-PUT 0 18 "arrows move space toggle [] pattern ,/. song A assign"
-PUT 0 19 "enter pat P song +/- tempo H/? help S save L load esc"
+PUT 2 30 "PIANO  Z-M notes   L/; sharps +1 octave   1-9 octave"
+PUT 2 32 "EDIT   ARROWS move   SPACE toggle   [/] pattern   ,/. song   A assign"
+PUT 2 34 "PLAY   ENTER pattern   P song   +/- tempo   H help   S save   L load   ESC quit"
 FLIP
 RETURN
 
@@ -569,7 +570,7 @@ RETURN
 WAVESTOP
 CLS
 COLOR pink
-PUT 0 0 "TRACKER MUSIC CONTROLS"
+PUT 2 1 "TRACKER MUSIC // CONTROLS"
 COLOR white
 PUT 0 2 "arrows  move channels and steps"
 PUT 0 3 "z s x d c v g b h n j m play C..B (piano row)"
@@ -585,7 +586,8 @@ PUT 0 14 "S       save browser   L load browser"
 PUT 0 16 "N       new dir in save/load browser"
 PUT 0 18 "+/- tempo  C clear pattern  X trim  esc quit"
 COLOR cyan
-PUT 0 19 "SIN/TRI/SQR/SAW/NSE = waveform. Any key returns."
+PUT 2 32 "SIN / TRI / SQR / SAW / NSE are the five waveform labels."
+PUT 2 34 "Press any key to return to the studio."
 FLIP
 :helpwait
 WAIT 16
@@ -707,7 +709,7 @@ SUB savePick 1
 IF $savePick >= 0 GOTO sb_up_page
 SET savePick 0
 :sb_up_page
-EXPR minpick $savePage * 10
+EXPR minpick $savePage * 24
 IF $savePick >= $minpick GOTO sb_loop
 SUB savePage 1
 IF $savePage >= 0 GOTO sb_loop
@@ -721,7 +723,7 @@ IF $savePick < $saveCount GOTO sb_down_page
 EXPR savePick $saveCount - 1
 :sb_down_page
 EXPR nextpage $savePage + 1
-EXPR maxpick $nextpage * 10
+EXPR maxpick $nextpage * 24
 IF $savePick < $maxpick GOTO sb_loop
 ADD savePage 1
 GOTO sb_loop
@@ -788,14 +790,14 @@ GOTO sb_draw_title_done
 :sb_draw_title_load
 SETSTR sbtitle "LOAD TRACKER"
 :sb_draw_title_done
-PUT 0 0 "$sbtitle"
+PUT 2 1 "$sbtitle // TAB5 FILE DESK"
 COLOR white
-PUT 0 2 "$saveDir"
+PUT 2 3 "$saveDir"
 GOSUB sb_refresh_count
 IF $fok = 0 GOTO sb_draw_fail
 FOPEN "/tracker-save.list" read
 IF $fok = 0 GOTO sb_draw_fail
-EXPR skip $savePage * 10
+EXPR skip $savePage * 24
 SET index 0
 :sb_skip
 IF $index >= $skip GOTO sb_show
@@ -806,12 +808,12 @@ GOTO sb_skip
 :sb_show
 SET shown 0
 :sb_show_one
-IF $shown >= 10 GOTO sb_draw_footer
+IF $shown >= 24 GOTO sb_draw_footer
 FREAD line
 IF $feof = 1 GOTO sb_draw_footer
 GOSUB sb_parserow
-EXPR row 4 + $shown
-SUBSTR showname $sbname 0 42
+EXPR row 5 + $shown
+SUBSTR showname $sbname 0 82
 IF $index = $savePick GOTO sb_show_sel
 COLOR white
 GOTO sb_show_color
@@ -829,27 +831,27 @@ ADD index 1
 GOTO sb_show_one
 :sb_empty
 COLOR white
-PUT 2 5 "(empty)"
+PUT 2 7 "(empty)"
 :sb_draw_footer
 FCLOSE
 COLOR yellow
-PUT 0 15 "$saveMsg"
-PUT 0 16 "up/down choose  enter open  bksp/u up"
+PUT 2 30 "$saveMsg"
+PUT 2 32 "UP/DOWN choose   ENTER open   BACKSPACE/U parent"
 IFEQ $browseMode "load" GOTO sb_draw_footer_load
-PUT 0 17 "S save here  N new dir  esc cancel"
-PUT 0 19 "file: $saveName"
+PUT 2 34 "S save here   N new directory   ESC cancel"
+PUT 58 34 "FILE  $saveName"
 GOTO sb_draw_footer_done
 :sb_draw_footer_load
-PUT 0 17 "enter loads file  N new dir  esc cancel"
+PUT 2 34 "ENTER loads file   N new directory   ESC cancel"
 :sb_draw_footer_done
 FLIP
 RETURN
 :sb_draw_fail
 FCLOSE
 COLOR red
-PUT 0 5 "cannot list directory"
+PUT 2 7 "cannot list directory"
 COLOR yellow
-PUT 0 17 "bksp/u up  esc cancel"
+PUT 2 34 "BACKSPACE/U parent   ESC cancel"
 FLIP
 RETURN
 

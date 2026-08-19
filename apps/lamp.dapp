@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id lamp
 # @name Lamp
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.3.0 <2.0.0
 # @summary Mix the rear RGB LED by hand, with presets and a mood cycle
 # /apps/lamp.dapp
@@ -22,7 +22,7 @@
 # EXPR, which is the whole of the conversion: inside each 60-degree
 # segment one channel is climbing, one is falling, and one is parked.
 
-CANVAS 40 14
+CANVAS 80 30
 
 SET red 255
 SET green 120
@@ -309,10 +309,10 @@ IF $ch < 3 GOTO dr_ch
 GOSUB preview
 
 COLOR yellow
-PUT 0 11 "up/down pick   left/right +-8   [ ] +-1"
-PUT 0 12 "1-8 presets  m mood  x off  s save  esc"
+PUT 0 25 "up/down pick   left/right +-8   [ ] +-1"
+PUT 0 27 "1-8 presets   m mood   x off   s save   esc quit"
 COLOR green
-PUT 0 13 $note
+PUT 0 29 $note
 FLIP
 RETURN
 
@@ -379,6 +379,11 @@ COLOR white
 PUT 22 6 $hexs
 COLOR cyan
 PUT 22 7 "$red,$green,$blue"
+COLOR pink
+PUT 45 5 "LIVE COLOUR"
+COLOR white
+PUT 45 8 "Fine controls and presets"
+PUT 45 10 "use the whole Tab5 panel"
 RETURN
 
 # the panel has eight colours and the LED has sixteen million, so the

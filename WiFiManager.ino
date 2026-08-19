@@ -6,8 +6,43 @@
 //   drained) and the AP went unused -- the panel + BLE keyboard already cover
 //   the no-network case, so STA is now the only mode.
 #include <LittleFS.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+//   Co-processor OTA. The Tab5's Wi-Fi lives on an ESP32-C6 reached over SDIO
+//   (ESP-Hosted), and its firmware is normally flashed through UART pads on the
+//   back of the board. This header exposes the alternative: the host pushes a new
+//   slave image over the SDIO link it is already using, so no programmer is needed.
+//
+//   Wrapped in extern "C" deliberately -- unlike most IDF headers this one carries
+//   no __cplusplus guard of its own, so including it from a .ino mangles the names
+//   and every call fails to link.
+extern "C" {
+#include "esp_hosted_ota.h"
+}
 
 const char* WIFI_CREDS_PATH = "/wifi.cfg";
+static bool wifiStationReady = false;
+static bool wifiReconnectEnabled = false;
+
+static bool wifiSsidIsConfigured(const String& ssid) {
+    return ssid.length() > 0 && ssid != "YOUR_WIFI_SSID";
+}  // Rejects the shipped sentinel before it can start the hosted radio.
+
+static void ensureWifiStationReady() {
+    if (wifiStationReady) return;
+
+    WiFi.setPins(WIFI_SDIO_CLK_PIN, WIFI_SDIO_CMD_PIN,
+                 WIFI_SDIO_D0_PIN, WIFI_SDIO_D1_PIN,
+                 WIFI_SDIO_D2_PIN, WIFI_SDIO_D3_PIN,
+                 WIFI_SDIO_RESET_PIN);
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(false);
+    wifiStationReady = true;
+}  // Starts ESP-Hosted only when boot or an explicit Wi-Fi command needs it.
+
+bool wifiStationIsReady() {
+    return wifiStationReady;
+}  // Lets socket and sleep code avoid touching an uninitialized network stack.
 
 //tries saved credentials first, falling back to the config.h defaults
 //returns true if the router connection succeeded
@@ -17,6 +52,15 @@ bool connectToInternet() {
         ssid = STA_DEFAULT_SSID;
         password = STA_DEFAULT_PASSWORD;
     }
+
+    if (!wifiSsidIsConfigured(ssid)) {
+        wifiReconnectEnabled = false;
+        Serial.println("WiFi skipped: no saved credentials (use 'wifi connect').");
+        ledSetWifiConnected(false);
+        return false;
+    }
+
+    ensureWifiStationReady();
 
     //Turn OFF the ESP32 core's built-in auto-reconnect (defaults to ON). Left on, a
     //failed join -- e.g. the config.h default SSID isn't present -- makes the driver
@@ -32,6 +76,7 @@ bool connectToInternet() {
     Serial.printf("Connecting to router: %s\n", ssid.c_str());
     ledPulseNetwork();
     ledSetWifiConnected(false);
+    wifiReconnectEnabled = true;
     WiFi.begin(ssid.c_str(), password.c_str());
 
     unsigned long startTime = millis();
@@ -58,8 +103,11 @@ unsigned long previousReconnectAttempt = 0;
 const unsigned long reconnectInterval = 10000;
 
 void maintainInternetConnection() {
+    if (!wifiStationReady || !wifiReconnectEnabled) return;
+
     if (WiFi.status() == WL_CONNECTED) {
         ledSetWifiConnected(true);
+        startTelnetServer();
         return;
     }
     ledSetWifiConnected(false);
@@ -81,10 +129,11 @@ void maintainInternetConnection() {
 }
 
 int wifiIsConnected() {
-    return WiFi.status() == WL_CONNECTED ? 1 : 0;
+    return wifiStationReady && WiFi.status() == WL_CONNECTED ? 1 : 0;
 }
 
 void scanWifiNetworks() {
+    ensureWifiStationReady();
     WiFi.scanDelete();
     outLine("Scanning for Wifi Networks");
     telnetClient.flush();   //push this line out before the blocking scan begins
@@ -152,6 +201,12 @@ void showWifiStatus() {
 }
 
 void connectWifiNetwork(const String& ssid, const String& password) {
+    if (!wifiSsidIsConfigured(ssid)) {
+        outLine("WiFi connect needs a real SSID", C_RED);
+        return;
+    }
+
+    ensureWifiStationReady();
     outLine("Connecting to: " + ssid);
     telnetClient.flush();
     ledPulseNetwork();
@@ -165,6 +220,7 @@ void connectWifiNetwork(const String& ssid, const String& password) {
     //off (connectToInternet), nothing re-associates underneath us between the two calls.
     WiFi.disconnect();
     delay(200);
+    wifiReconnectEnabled = true;
     WiFi.begin(ssid.c_str(), password.c_str());
 
     const unsigned long timeoutMs = 15000;
@@ -175,6 +231,7 @@ void connectWifiNetwork(const String& ssid, const String& password) {
 
     if (wifiIsConnected() == 1) {
         ledSetWifiConnected(true);
+        startTelnetServer();
         wifiStatus();
     } else {
         ledSetWifiConnected(false);
@@ -216,6 +273,146 @@ void wifiHelp() {
     outLine("wifi scan");
     outLine("wifi connect <ssid> <password>");
     outLine("wifi save <ssid> <password>");
+    outLine("wifi coproc-ota <url>");
+}
+
+//   Updates the ESP32-C6 Wi-Fi co-processor over the existing SDIO link.
+//
+//   Why this exists: the co-processor reports its ESP-Hosted version at every boot,
+//   and a mismatch against the host stack is not cosmetic -- the transport itself
+//   warns it causes RPC timeouts. On this board an outdated slave could not sustain
+//   the throughput of a radio stream: the SDIO writes timed out, ESP-Hosted declared
+//   the transport unrecoverable and rebooted the whole tablet mid-playback. Updating
+//   the slave is the fix, and this is the route that does not need the UART pads.
+//
+//   The one-shot esp_hosted_slave_ota(url) this used to call is declared but no
+//   longer defined in the bundled component -- upstream moved fetching into the
+//   caller and left only the chunked begin/write/end/activate API. So the download
+//   loop lives here, streaming straight from the HTTP body into the slave rather
+//   than buffering a whole image the internal heap has no room for.
+//
+//   Blocking by design: the shell is unusable for the duration, which is the honest
+//   representation of what is happening to the board.
+static const size_t COPROC_OTA_CHUNK = 4096;
+
+static void wifiCoprocessorOta(const String& url) {
+    if (wifiIsConnected() != 1) {
+        outLine("wifi: coproc-ota needs a working connection to fetch the image", C_RED);
+        return;
+    }
+    if (url.length() == 0) {
+        outLine("Usage: wifi coproc-ota <url to esp32c6 ESP-Hosted slave image>");
+        return;
+    }
+
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
+    HTTPClient http;
+    http.setTimeout(15000);
+    if (url.startsWith("https://")) {
+        secureClient.setInsecure();
+        if (!http.begin(secureClient, url)) {
+            outLine("wifi: could not open " + url, C_RED);
+            return;
+        }
+    } else if (!http.begin(plainClient, url)) {
+        outLine("wifi: could not open " + url, C_RED);
+        return;
+    }
+
+    const int httpCode = http.GET();
+    if (httpCode != HTTP_CODE_OK) {
+        outLine("wifi: image fetch returned HTTP " + String(httpCode), C_RED);
+        http.end();
+        return;
+    }
+    const int imageSize = http.getSize();
+
+    outLine("wifi: updating co-processor from " + url, C_PINK);
+    outLine("wifi: do not power the tablet off until this reports a result.", C_YELLOW);
+    Serial.printf("[coproc] slave OTA from %s (%d bytes)\n", url.c_str(), imageSize);
+
+    uint8_t* buffer = (uint8_t*)malloc(COPROC_OTA_CHUNK);
+    if (buffer == NULL) {
+        outLine("wifi: out of memory for the OTA buffer", C_RED);
+        http.end();
+        return;
+    }
+
+    esp_err_t result = esp_hosted_slave_ota_begin();
+    if (result != ESP_OK) {
+        outLine("wifi: co-processor refused OTA start: " + String(esp_err_to_name(result)), C_RED);
+        free(buffer);
+        http.end();
+        return;
+    }
+
+    WiFiClient* stream = http.getStreamPtr();
+    size_t written = 0;
+    int lastReportedPercent = -1;
+    while (http.connected() && (imageSize < 0 || written < (size_t)imageSize)) {
+        const size_t available = stream->available();
+        if (available == 0) {
+            if (!stream->connected()) {
+                break;
+            }
+            delay(1);
+            continue;
+        }
+        const int read = stream->readBytes(buffer, min(available, COPROC_OTA_CHUNK));
+        if (read <= 0) {
+            continue;
+        }
+        result = esp_hosted_slave_ota_write(buffer, (uint32_t)read);
+        if (result != ESP_OK) {
+            break;
+        }
+        written += read;
+
+        //progress on the panel: a multi-megabyte transfer over SDIO is slow enough
+        //that a silent shell reads as a hang
+        if (imageSize > 0) {
+            const int percent = (int)((written * 100) / (size_t)imageSize);
+            if (percent >= lastReportedPercent + 10) {
+                lastReportedPercent = percent - (percent % 10);
+                outLine("wifi: " + String(lastReportedPercent) + "% (" + String((unsigned)written) + " bytes)");
+                drawDisplayFrame();
+            }
+        }
+    }
+    free(buffer);
+    http.end();
+
+    if (result != ESP_OK) {
+        outLine("wifi: co-processor write failed: " + String(esp_err_to_name(result)), C_RED);
+        Serial.printf("[coproc] slave OTA write failed after %u bytes: %s\n",
+                      (unsigned)written, esp_err_to_name(result));
+        return;
+    }
+    if (imageSize > 0 && written < (size_t)imageSize) {
+        outLine("wifi: transfer truncated at " + String((unsigned)written) + "/" + String(imageSize)
+                + " bytes; co-processor left on its old firmware", C_RED);
+        return;
+    }
+
+    result = esp_hosted_slave_ota_end();
+    if (result != ESP_OK) {
+        outLine("wifi: co-processor rejected the image: " + String(esp_err_to_name(result)), C_RED);
+        Serial.printf("[coproc] slave OTA end failed: %s\n", esp_err_to_name(result));
+        return;
+    }
+
+    //activate reboots the co-processor, which drops the SDIO link out from under the
+    //host -- expect Wi-Fi to disappear here. Reboot the tablet afterwards so
+    //ESP-Hosted renegotiates the transport from a clean state.
+    outLine("wifi: image accepted (" + String((unsigned)written) + " bytes), activating...", C_GREEN);
+    result = esp_hosted_slave_ota_activate();
+    if (result != ESP_OK) {
+        outLine("wifi: activate failed: " + String(esp_err_to_name(result)), C_RED);
+        return;
+    }
+    outLine("wifi: co-processor updated. Reboot the tablet to renegotiate the link.", C_GREEN);
+    Serial.println("[coproc] slave OTA activated");
 }
 
 //Expected forms: wifi | wifi scan | wifi connect <ssid> <password> | wifi save <ssid> <password>
@@ -227,6 +424,11 @@ void handleWifiCommand(const String parts[], int partCount) {
 
     if (parts[1] == "scan") {
         scanWifiNetworks();
+        return;
+    }
+
+    if (parts[1] == "coproc-ota") {
+        wifiCoprocessorOta(partCount > 2 ? parts[2] : String(""));
         return;
     }
 

@@ -1,28 +1,34 @@
 # @dapp-format 1
 # @id files
 # @name Files
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.7.0 <2.0.0
 # @echo off
-# @summary Browse, view, copy, move, create and delete files across flash and SD
+# @summary A wide Tab5 file desk for browsing, previewing and managing storage
 # /system/apps/files.dapp
 # FLIST snapshots a directory into /files.list as D|name|size rows. Files never
 # receives a shell escape and deletion remains file-only/non-recursive.
 
 SETSTR path "/"
 SET page 0
+SETSTR status "Ready"
+CANVAS 100 40
 
 :browse
-CLEAR
+CLS
 FLIST $path "/files.list"
 IF $fok = 0 GOTO listfail
 COLOR pink
-PRINT "FILES // $path"
+PUT 3 1 "FILES // $path"
+COLOR cyan
+PUT 3 3 "#   NAME"
+PUT 76 3 "SIZE"
 COLOR white
 FOPEN "/files.list" read
 IF $fok = 0 GOTO listfail
-EXPR skip $page * 15
+# Twenty-eight entries fit between the title and the persistent action footer.
+EXPR skip $page * 28
 SET index 0
 :skiploop
 IF $index >= $skip GOTO showloop
@@ -33,25 +39,34 @@ GOTO skiploop
 :showloop
 SET shown 0
 :showone
-IF $shown >= 15 GOTO shownpage
+IF $shown >= 28 GOTO shownpage
 FREAD line
 IF $feof = 1 GOTO shownpage
 ADD index 1
 GOSUB parserow
+EXPR listrow 5 + $shown
 IFEQ $type "D" GOTO showdir
-PRINT "$index  $name  ($size bytes)"
+COLOR white
+PUT 3 $listrow "$index  $name"
+COLOR blue
+PUT 76 $listrow "$size bytes"
 GOTO shownnext
 :showdir
 COLOR cyan
-PRINT "$index  [$name]"
-COLOR white
+PUT 3 $listrow "$index  [$name]"
 :shownnext
 ADD shown 1
 GOTO showone
 :shownpage
 FCLOSE
-PRINT ""
-PRINT "number open  u up  n/p page  k mkdir  r refresh  q quit"
+EXPR pagedisp $page + 1
+COLOR pink
+PUT 3 34 "$status"
+COLOR yellow
+PUT 3 36 "PAGE $pagedisp     NUMBER open     U parent     N/P page     K mkdir"
+COLOR white
+PUT 3 38 "R refresh     Q quit     File actions: view / copy / move / delete"
+FLIP
 INPUT text "files> "
 IFEQ $text "u" GOTO up
 IFEQ $text "n" GOTO nextpage
@@ -69,21 +84,25 @@ IFEQ $type "D" GOTO enterdir
 GOTO filemenu
 :empty
 FCLOSE
-PRINT "(empty)"
+COLOR blue
+PUT 3 6 "(empty directory)"
 SET page 0
 GOTO shownpage
 :listfail
 FCLOSE
 COLOR red
-PRINT "files: cannot list $path"
-COLOR white
+PUT 3 6 "Cannot list $path"
+COLOR yellow
+PUT 3 36 "Press enter to return to the flash root"
+FLIP
 INPUT text "enter> "
 SETSTR path "/"
 SET page 0
+SETSTR status "Returned to root after a listing error"
 GOTO browse
 
 :nextpage
-IF $shown < 15 GOTO browse
+IF $shown < 28 GOTO browse
 ADD page 1
 GOTO browse
 :prevpage
@@ -95,11 +114,13 @@ GOTO browse
 :up
 GOSUB parent
 SET page 0
+SETSTR status "Moved to parent directory"
 GOTO browse
 :enterdir
 GOSUB join
 SETSTR path $target
 SET page 0
+SETSTR status "Opened $name"
 GOTO browse
 
 :mkdir
@@ -108,23 +129,30 @@ LEN n $name
 IF $n = 0 GOTO browse
 GOSUB join
 FMKDIR $target
-IF $fok = 1 GOTO browse
-PRINT "could not create $target"
-INPUT text "enter> "
+IF $fok = 1 GOTO mkdirok
+SETSTR status "Could not create $target"
+GOTO browse
+:mkdirok
+SETSTR status "Created $target"
 GOTO browse
 
 :filemenu
-CLEAR
+CLS
 COLOR pink
-PRINT "$name"
+PUT 4 2 "$name"
 COLOR white
-PRINT "$size bytes in $path"
-PRINT ""
-PRINT "o view text"
-PRINT "c copy"
-PRINT "m move"
-PRINT "d delete"
-PRINT "b back"
+PUT 4 5 "$size bytes"
+PUT 4 7 "LOCATION  $path"
+COLOR cyan
+PUT 8 13 "O  VIEW TEXT"
+PUT 8 17 "C  COPY"
+PUT 52 13 "M  MOVE"
+PUT 52 17 "D  DELETE"
+COLOR yellow
+PUT 8 25 "B or any unlisted command returns to the directory."
+COLOR white
+PUT 8 29 "Copy and move ask for a complete destination path in the command bar."
+FLIP
 INPUT text "file> "
 IFEQ $text "o" GOTO view
 IFEQ $text "c" GOTO copy
@@ -143,9 +171,11 @@ INPUT destination "copy to full path> "
 LEN n $destination
 IF $n = 0 GOTO browse
 FCOPY $source $destination
-IF $fok = 1 GOTO browse
-PRINT "copy failed"
-INPUT text "enter> "
+IF $fok = 1 GOTO copyok
+SETSTR status "Copy failed"
+GOTO browse
+:copyok
+SETSTR status "Copied $name to $destination"
 GOTO browse
 
 :move
@@ -154,9 +184,11 @@ INPUT destination "move to full path> "
 LEN n $destination
 IF $n = 0 GOTO browse
 FMOVE $source $destination
-IF $fok = 1 GOTO browse
-PRINT "move failed"
-INPUT text "enter> "
+IF $fok = 1 GOTO moveok
+SETSTR status "Move failed"
+GOTO browse
+:moveok
+SETSTR status "Moved $name to $destination"
 GOTO browse
 
 :delete
@@ -164,32 +196,59 @@ GOSUB sourcepath
 INPUT confirm "type DELETE> "
 IFNE $confirm "DELETE" GOTO browse
 FDELETE $source
+IF $fok = 0 GOTO deletefail
+SETSTR status "Deleted $name"
+GOTO browse
+:deletefail
+SETSTR status "Delete failed"
 GOTO browse
 
 :view
 GOSUB sourcepath
-CLEAR
+CLS
 FOPEN $source read
 IF $fok = 0 GOTO viewfail
 SET lines 0
+SET viewpage 1
+:viewpage
+CLS
+COLOR pink
+PUT 3 1 "TEXT PREVIEW // $name"
+COLOR cyan
+PUT 80 1 "PAGE $viewpage"
+COLOR white
+SET viewrow 5
 :viewloop
 FREAD line
 IF $feof = 1 GOTO viewdone
-PRINT "$line"
+PUT 3 $viewrow "$line"
 ADD lines 1
-IF $lines < 20 GOTO viewloop
+ADD viewrow 1
+IF $lines < 29 GOTO viewloop
 SET lines 0
-INPUT text "enter more, q stop> "
+COLOR yellow
+PUT 3 37 "ENTER next page     Q stop preview"
+FLIP
+INPUT text "preview> "
 IFEQ $text "q" GOTO viewdone
-GOTO viewloop
+IFEQ $text "Q" GOTO viewdone
+ADD viewpage 1
+GOTO viewpage
 :viewdone
 FCLOSE
-INPUT text "enter> "
+COLOR yellow
+PUT 3 37 "END OF FILE // press enter to return"
+FLIP
+INPUT text "preview> "
 GOTO filemenu
 :viewfail
 FCLOSE
-PRINT "cannot open $source as text"
-INPUT text "enter> "
+COLOR red
+PUT 3 8 "Cannot open $source as text"
+COLOR yellow
+PUT 3 12 "Press enter to return"
+FLIP
+INPUT text "preview> "
 GOTO filemenu
 
 :select
@@ -292,5 +351,6 @@ RETURN
 
 :leave
 FDELETE "/files.list"
+ENDCANVAS
 PRINT "files: done"
 EXIT

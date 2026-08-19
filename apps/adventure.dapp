@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id adventure
 # @name The Cursed Grotto
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.0.0 <2.0.0
 # @summary A branching fantasy text adventure
 # /sd/apps/adventure.dapp

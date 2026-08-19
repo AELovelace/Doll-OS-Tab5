@@ -40,11 +40,10 @@ bool ntpEnsureClock(String& error, unsigned long timeoutMs, void (*yieldFn)()) {
 }
 
 //   PSRAM allocation helpers
-//   This board's ESP32-S3 module carries external PSRAM. Internal SRAM is the scarce
-//   pool -- WiFi (AP+STA here) and mbedTLS (ssh) both want room there -- so large,
-//   long-lived buffers are pushed out to PSRAM to leave internal RAM free. TFT_eSPI
-//   already does this for the ~150KB frame sprite on its own (callocSprite prefers
-//   PSRAM, see Extensions/Sprite.cpp); these helpers do the same for our own buffers.
+//   This board's ESP32-P4 module carries external PSRAM. Internal SRAM is the scarce
+//   pool -- hosted WiFi and mbedTLS (ssh) both want room there -- so large, long-lived
+//   buffers are pushed out to PSRAM to leave internal RAM free. M5Canvas does this for
+//   the ~1.8MB full-resolution frame sprite; these helpers do the same for our own buffers.
 //   All of it is contingent on PSRAM being enabled in the Arduino board menu -- with it
 //   off, psramFound() is false, every allocation below falls back to internal RAM, and
 //   reportPsramStatus() says so loudly at boot.
@@ -91,37 +90,44 @@ void reportPsramStatus() {
                       (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram());
     } else {
         Serial.println("[psram] NOT available -- enable PSRAM in the Arduino board menu, "
-                       "or the ~150KB frame sprite + history stay in internal SRAM");
+                       "or the ~1.8MB frame sprite + history stay in internal SRAM");
     }
     Serial.printf("[psram] heap: internal free=%u, spiram free=%u\n",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
 
-static bool batteryAdcInitialized = false;
-
-static void ensureBatteryAdc() {
-    if (batteryAdcInitialized) {
-        return;
-    }
-    pinMode(BATTERY_ADC_PIN, INPUT);
-    batteryAdcInitialized = true;
-}
+//   Unlike the M5Cardputer this was ported from, the Tab5 does *not* read the pack
+//   through a divided ADC pin: M5Unified routes both calls below to an INA226 on the
+//   shared internal I2C bus (Power_Class::getBatteryLevel -> Ina226.getBusVoltage,
+//   address 0x41). That makes them bus users, so both take boardI2cLock() -- the
+//   status bar calls readBatteryPercent() on every rendered frame, which is exactly
+//   the traffic that used to interleave with Radio.ino's codec bring-up.
+//
+//   A missed reading is not worth stalling a frame for, so the timeout is short and
+//   the last good value is reused. Codec bring-up holds the bus for ~30 register
+//   writes; the display simply shows a slightly stale percentage across those.
+static int batteryPercentCached = 0;
+static float batteryVoltageCached = 0.0f;
 
 float readBatteryVoltage() {
-    ensureBatteryAdc();
-    return analogReadMilliVolts(BATTERY_ADC_PIN) * BATTERY_ADC_DIVIDER / 1000.0f;
+    if (boardI2cLock(50)) {
+        batteryVoltageCached = M5.Power.getBatteryVoltage() / 1000.0f;
+        boardI2cUnlock();
+    }
+    return batteryVoltageCached;
 }
 
-//rough linear estimate between the configured empty/full voltage points --
-//there's no fuel-gauge chip on this board, just a divided ADC pin, so this is an
-//approximation the same way DOLL-OS's own M5Cardputer battery percent was
+//rough linear estimate between the configured empty/full voltage points -- there's no
+//dedicated fuel gauge, so this is an approximation the same way DOLL-OS's own
+//M5Cardputer battery percent was
 int readBatteryPercent() {
-    float v = readBatteryVoltage();
-    float pct = (v - BATTERY_VOLTAGE_EMPTY) / (BATTERY_VOLTAGE_FULL - BATTERY_VOLTAGE_EMPTY) * 100.0f;
-    if (pct < 0) pct = 0;
-    if (pct > 100) pct = 100;
-    return (int)(pct + 0.5f);
+    if (boardI2cLock(50)) {
+        const int level = M5.Power.getBatteryLevel();
+        batteryPercentCached = level < 0 ? 0 : min(level, 100);
+        boardI2cUnlock();
+    }
+    return batteryPercentCached;
 }
 
 void handleBatteryCommand(const String parts[], int partCount) {

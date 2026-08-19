@@ -86,6 +86,7 @@ The initial version assignments are:
 | --- | --- | --- |
 | M5Cardputer DOLL-OS | `m5cardputer` | `1.3.0` |
 | Freenove FNK0104 DOLL-OS | `fnk0104` | `1.5.0` |
+| M5Stack Tab5 DOLL-OS | `m5stack-tab5` | `1.9.0` |
 
 These assignments describe the checked-in implementations summarized in
 section 4. The FNK0104 implementation contains the complete `1.0.0` command set
@@ -101,11 +102,17 @@ screen panel.
 | --- | --- |
 | `m5cardputer` | M5Cardputer using the M5Stamp-S3, 8 MB flash, no PSRAM |
 | `fnk0104` | Freenove FNK0104-series ESP32-S3 display boards, 16 MB flash and PSRAM |
+| `m5stack-tab5` | M5Stack Tab5 using the ESP32-P4, 16 MB flash, 32 MB PSRAM, and a 1280x720 display |
 
 The FNK0104AB, FNK0104N, and FNK0104S display variants share `fnk0104` because
 `.dapp` programs use the terminal and canvas abstractions rather than a panel
 driver directly. If a future DOLL-OS port has materially different AppRunner
 behavior or resource limits, it receives a new board ID.
+
+Tab5 receives its own board ID even though its initial AppRunner limits match
+FNK0104. Its board-specific artifacts can use 80-100 column by 30-40 row canvas
+layouts and longer terminal records without making the smaller FNK panels render
+those layouts illegibly.
 
 Every package artifact declares one or more supported board IDs. There is no
 wildcard board value in format 1: publishers must make compatibility explicit.
@@ -228,21 +235,22 @@ printed as strings.
 
 ### 4.3 Resource limits by board
 
-| Limit | `m5cardputer` | `fnk0104` |
-| --- | ---: | ---: |
-| Lines | 160 | 4,000 |
-| Labels | 32 | 512 |
-| Numeric variables | 16 | 128 |
-| String variables | 8 | 64 |
-| String length | 128 | 4,096 |
-| Arrays | Not supported | 32 |
-| Shared array cells | Not supported | 16,384 |
-| Nested `GOSUB` calls | Not supported | 64 |
-| Canvas size | Not supported | 120 x 60 |
-| Non-yielding step guard | 4,000 | 1,000,000 |
+| Limit | `m5cardputer` | `fnk0104` | `m5stack-tab5` |
+| --- | ---: | ---: | ---: |
+| Lines | 1,200 | 4,000 | 4,000 |
+| Labels | 192 | 512 | 512 |
+| Numeric variables | 64 | 128 | 128 |
+| String variables | 32 | 64 | 64 |
+| String length | 128 | 4,096 | 4,096 |
+| Arrays | 16 | 32 | 32 |
+| Shared array cells | 4,096 | 16,384 | 16,384 |
+| Nested `GOSUB` calls | 64 | 64 | 64 |
+| Canvas size | 40 x 22 | 120 x 60 | 120 x 60 |
+| Byte buffer | Not supported | 262,144 | 262,144 |
+| Non-yielding step guard | 250,000 | 1,000,000 | 1,000,000 |
 
 Board compatibility covers resource differences that API SemVer alone cannot
-express. For example, a 200-line app using only 1.0.0 opcodes still cannot
+express. For example, a 1,300-line app using only 1.0.0 opcodes still cannot
 declare `m5cardputer` until it is reduced below that board's line limit.
 
 ## 5. Repository protocol

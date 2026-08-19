@@ -1,10 +1,10 @@
 # @dapp-format 1
 # @id sheet
 # @name Sheet
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.1.0 <2.0.0
-# @summary A 6x20 spreadsheet with formulas, ranges and a saved file
+# @summary A full-height Tab5 spreadsheet with formulas, ranges and saved files
 # /apps/sheet.dapp
 # A spreadsheet for the DOLL-OS canvas. Arrows move, enter edits the cell,
 # typing a digit, - or = starts an entry straight away, D clears a cell,
@@ -35,7 +35,8 @@
 # starts with WAIT 1, which both keeps the panel alive and resets the
 # interpreter's runaway-loop guard.
 
-CANVAS 40 15
+# Tab5 shows all twenty rows at once and gives each cell room for eleven characters.
+CANVAS 84 34
 
 # 6 columns (A-F) x 20 rows, addressed as row * 6 + column
 DIM ctype 120
@@ -48,14 +49,14 @@ DIM nstk 32
 DIM ostk 32
 
 COLOR green
-PUT 14 4 "S H E E T"
+PUT 32 5 "S H E E T"
 COLOR white
-PUT 4 6 "arrows move    enter edits a cell"
-PUT 4 7 "= starts a formula, digits a number"
-PUT 4 8 "d clears   s saves   l loads"
-PUT 4 9 "x twice wipes the sheet"
+PUT 18 9 "ARROWS move       ENTER edits a cell"
+PUT 18 11 "= starts a formula, digits a number"
+PUT 18 13 "D clears     S saves     L loads"
+PUT 18 15 "X twice wipes the sheet"
 COLOR cyan
-PUT 4 11 "=SUM(A1:A9)*2 and friends work"
+PUT 18 19 "=SUM(A1:A9)*2 and friends work"
 FLIP
 WAIT 1800
 
@@ -132,18 +133,12 @@ GOTO hk_scroll
 IF $currow >= 19 GOTO hk_none
 ADD currow 1
 
-# eleven rows are on screen at a time; the view follows the cursor only
-# when the cursor would otherwise leave it
+# All twenty rows fit on Tab5, so navigation never needs to move a viewport.
 :hk_scroll
-IF $currow < $top GOTO hk_scroll_up
-EXPR v $top + 10
-IF $currow > $v GOTO hk_scroll_down
 RETURN
 :hk_scroll_up
-SET top $currow
 RETURN
 :hk_scroll_down
-EXPR top $currow - 10
 RETURN
 
 # enter opens the cell with what is already in it; a digit, - or = starts
@@ -819,7 +814,7 @@ PUT 10 0 $t
 COLOR cyan
 SET c 0
 :dr_head
-EXPR dx 3 + $c * 6 + 2
+EXPR dx 3 + $c * 13 + 6
 EXPR pc 65 + $c
 CHR one $pc
 COLOR cyan
@@ -843,22 +838,22 @@ SET c 0
 EXPR ci $rr * 6 + $c
 GOSUB cellstr
 GOSUB cellcolour
-EXPR dx 3 + $c * 6
+EXPR dx 3 + $c * 13
 IF $align = 0 GOTO dr_put
-EXPR dx $dx + 5 - $blen
+EXPR dx $dx + 11 - $blen
 :dr_put
 PUT $dx $dy $cs
 ADD c 1
 IF $c < 6 GOTO dr_cell
 ADD r 1
-IF $r < 11 GOTO dr_row
+IF $r < 20 GOTO dr_row
 
 :dr_done
 COLOR green
-PUT 0 13 $msg
+PUT 0 29 $msg
 IF $editing = 1 GOTO dr_edit
 COLOR yellow
-PUT 0 14 "ent edit  d del  s save  l load  esc"
+PUT 0 32 "ENTER edit   D delete   S save   L load   X wipe   ESC quit"
 FLIP
 RETURN
 
@@ -867,11 +862,11 @@ SET r $currow
 SET c $curcol
 GOSUB refof
 COLOR yellow
-PUT 0 14 $ref
+PUT 0 32 $ref
 COLOR white
 SETSTR cs $buf
 APPEND cs "_"
-PUT 4 14 $cs
+PUT 5 32 $cs
 FLIP
 RETURN
 
@@ -879,7 +874,7 @@ RETURN
 COLOR yellow
 RETURN
 
-# in: ci -- out: cs (up to 5 characters), blen, align (1 = right)
+# in: ci -- out: cs (up to 11 characters), blen, align (1 = right)
 :cellstr
 SET ct $ctype[$ci]
 SETSTR cs ""
@@ -906,12 +901,12 @@ GOTO cs_measure
 :cs_label
 SET idx $ci
 GOSUB getcelltext
-SUBSTR cs $t 0 5
+SUBSTR cs $t 0 11
 :cs_measure
 LEN blen $cs
-IF $blen <= 5 GOTO cs_done
-SETSTR cs "#####"
-SET blen 5
+IF $blen <= 11 GOTO cs_done
+SETSTR cs "###########"
+SET blen 11
 :cs_done
 RETURN
 

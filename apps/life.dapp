@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id life
 # @name Life
-# @version 1.0.1
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.4.1 <2.0.0
 # @summary Conway's Game of Life with a cursor editor and pattern library
 # /apps/life.dapp
@@ -24,7 +24,7 @@
 # at a fixed corner for the 36-cell glider gun, which is far too wide to
 # stamp wherever the cursor happens to be without checking it fits.
 
-CANVAS 40 24
+CANVAS 80 36
 DIM cur 760
 DIM nxt 760
 
@@ -319,19 +319,25 @@ ADD y 1
 IF $y < 20 GOTO dr_row
 
 COLOR pink
-PUT 1 22 "LIFE"
+PUT 46 3 "CONWAY'S LIFE"
 COLOR cyan
-PUT 8 22 "gen"
+PUT 46 7 "generation"
 COLOR white
-PUT 12 22 $gen
+PUT 60 7 $gen
 COLOR cyan
-PUT 20 22 "speed"
+PUT 46 10 "speed (ms)"
 COLOR white
-PUT 26 22 $stepms
+PUT 60 10 $stepms
 COLOR green
-PUT 34 22 $msg
+PUT 46 13 $msg
 COLOR yellow
-PUT 0 23 "spc toggle  ent run  +/- speed  c clr  r rand  1-5 stamp  g/l  esc"
+PUT 46 18 "SPACE       toggle cell"
+PUT 46 20 "ENTER       run/pause"
+PUT 46 22 "+/-         speed"
+PUT 46 24 "C / R       clear/random"
+PUT 46 26 "1-5         stamp"
+PUT 46 28 "G / L       save/load"
+PUT 46 30 "ESC         quit"
 FLIP
 RETURN
 

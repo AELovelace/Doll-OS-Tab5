@@ -1475,6 +1475,13 @@ void handleEditCommand(const String parts[], int partCount) {
         editPathLogical = parts[1];
     }
 
+    // The inherited full-screen editor still owns a native landscape grid and
+    // has no touch controls. Do not strand a keyboard-less tablet user inside it.
+    if (displayIsPortrait()) {
+        outLine("edit: tap LAND before opening the full-screen editor", C_YELLOW);
+        return;
+    }
+
     if (!editAlloc()) {
         outLine("edit: out of memory", C_RED);
         if (loadingFromRepo) {
@@ -1488,7 +1495,7 @@ void handleEditCommand(const String parts[], int partCount) {
     //geometry from the panel -- both surfaces render this grid (see the header:
     //there is no NAWS negotiation to ask a telnet client its real size)
     editCharW = max(1, (int)frameSprite.textWidth("M"));
-    editLineH = max(frameSprite.fontHeight() + 2, 8);
+    editLineH = max((int)frameSprite.fontHeight() + 2, 8);
     editCols = max(8, (DISPLAY_WIDTH - 2 * DISPLAY_PADDING) / editCharW);
     editRows = max(1, (DISPLAY_HEIGHT - EDIT_TITLE_H - EDIT_HINT_H - 4) / editLineH);
 

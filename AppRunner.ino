@@ -1,4 +1,4 @@
-﻿//   AppRunner.ino
+//   AppRunner.ino
 //   tiny executable script runtime for DOLL-OS. Apps are plain text .dapp files stored
 //   in /apps on LittleFS or /sd/apps on the FTP-served SD card, then launched from
 //   the shell with "run". The format is intentionally small: a few display/shell
@@ -10,7 +10,6 @@
 #include <WiFiClientSecure.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
-#include <esp_task_wdt.h>
 #include <new>
 #include <time.h>
 //EXPR hands whole arithmetic expressions to the same evaluator the "calc" shell command
@@ -72,7 +71,7 @@ const int DAPP_CANVAS_MAX_ROWS = 60;
 //runaway-loop backstop. Generous now that it isn't standing in for a memory limit, but a
 //tight GOTO loop at this cap runs for minutes, and the interpreter only services the
 //display/radio inside WAIT and INPUT -- so appExecute yields every DAPP_STEPS_PER_YIELD
-//steps to keep the scheduler and watchdog fed through a long compute loop.
+//steps to keep board services responsive through a long compute loop.
 //
 //The counter resets whenever the script blocks on purpose (a WAIT with a real duration, or
 //an INPUT), because "runaway" means *not yielding*: a game loop that paces itself with
@@ -83,27 +82,10 @@ const int DAPP_STEPS_PER_YIELD = 256;
 
 static void appPollAbortChord();
 
-//How often the bulk-work yield below is allowed to actually sleep. Paced by the clock
-//rather than by a character or cell count, which is what the callers can cheaply count but
-//has no relationship to how long the work took.
-const unsigned long DAPP_YIELD_INTERVAL_MS = 20;
-static unsigned long dappLastYieldMs = 0;
-
 static void appRuntimeYield(bool serviceUi) {
-    esp_task_wdt_reset();
     if (!serviceUi) {
-        //Bulk-work callers -- text expansion, canvas fill, telnet frame building -- reach
-        //here every 128 characters or 256 cells. The watchdog reset above is the entire
-        //point of those calls. The unconditional delay(1) that used to follow cost a
-        //millisecond per 128 characters, so an 800-cell FLIP spent ~3ms asleep before
-        //drawing anything, and a long PRINT stalled proportionally to its length -- all of
-        //it latency with no scheduling benefit, since it is esp_task_wdt_reset that feeds
-        //the watchdog. A real yield still happens, just on a clock.
-        unsigned long now = millis();
-        if (now - dappLastYieldMs >= DAPP_YIELD_INTERVAL_MS) {
-            dappLastYieldMs = now;
-            delay(1);
-        }
+        //Bulk-work checkpoints no longer feed or sleep for the task watchdog. Keep the
+        //call sites as cheap checkpoints so the diagnostic can be reverted cleanly.
         return;
     }
 
@@ -117,8 +99,6 @@ static void appRuntimeYield(bool serviceUi) {
     if (!dappCanvasActive) {
         drawDisplayFrame();
     }
-    dappLastYieldMs = millis();
-    delay(1);
 }
 
 static void appRuntimeYield() {
@@ -1071,6 +1051,7 @@ static void appCanvasClear() {
 //renderer in Display.ino can never follow a dangling pointer.
 static void appCanvasEnd() {
     bool wasActive = dappCanvasActive;
+    displayInvalidateDappCanvas();
     dappCanvasActive = false;
     dappCanvasCols = 0;
     dappCanvasRows = 0;
@@ -2942,7 +2923,7 @@ static bool appExecute(DappProgram& program) {
             return false;
         }
         if (steps % DAPP_STEPS_PER_YIELD == 0) {
-            appRuntimeYield();   //service the board so a long loop can't starve the watchdog
+            appRuntimeYield();   //service the board during a long compute loop
         }
 
         //   All of this -- trim, split, uppercase, match -- happened at load. What is left

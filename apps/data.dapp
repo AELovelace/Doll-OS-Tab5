@@ -1,8 +1,8 @@
 # @dapp-format 1
 # @id data
 # @name Data
-# @version 1.0.0
-# @boards fnk0104
+# @version 1.1.0
+# @boards m5stack-tab5
 # @runtime >=1.5.0 <2.0.0
 # @echo off
 # @summary Preview and profile delimited local or HTTP datasets up to 256KB
@@ -94,7 +94,7 @@ IF $ch = 10 GOTO newline
 IF $ch = $delimiter GOTO separator
 BUFSUB one $pos 1
 LEN n $line
-IF $n >= 76 GOTO advance
+IF $n >= 94 GOTO advance
 APPEND line $one
 :advance
 ADD pos 1

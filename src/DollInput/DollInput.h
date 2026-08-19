@@ -102,5 +102,36 @@ private:
                              size_t capacity, size_t offset);
 };
 
+class HidGamepadCodec {
+public:
+    static constexpr size_t kMaxEncodedBytes = 18;
+
+    HidGamepadCodec();
+
+    size_t reset(uint8_t* output, size_t capacity, bool emitReleases);
+    size_t encode(const KeyEvent& event, uint8_t* output, size_t capacity);
+    static bool isToggleEvent(const KeyEvent& event);
+
+private:
+    struct SourceState {
+        uint8_t mask{0};
+        uint8_t modifiers{0};
+        bool quitKeyDown{false};
+    };
+
+    SourceState states_[static_cast<size_t>(KeyboardSource::Count)]{};
+    uint8_t mergedMask_{0};
+    bool mergedQuit_{false};
+
+    static size_t sourceIndex(KeyboardSource source);
+    static uint8_t gamepadBitForUsage(uint8_t usage);
+    static bool hasControl(uint8_t modifiers);
+    static size_t appendByte(uint8_t byte, uint8_t* output,
+                             size_t capacity, size_t offset);
+    static size_t appendPair(uint8_t prefix, uint8_t value, uint8_t* output,
+                             size_t capacity, size_t offset);
+    size_t emitMerged(bool menuPressed, uint8_t* output, size_t capacity);
+};
+
 }  // namespace input
 }  // namespace doll
