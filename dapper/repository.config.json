@@ -6,6 +6,8 @@
   "catalog": "catalog-v1.ndjson",
   "compatibility": "compatibility-v1.json",
   "package_roots": [
-    "../apps"
+    "../apps",
+    "../../Doll-OS-Tab5/apps",
+    "../../Doll-OS-P4/apps"
   ]
 }

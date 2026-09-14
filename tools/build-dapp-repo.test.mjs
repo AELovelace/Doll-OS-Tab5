@@ -14,6 +14,15 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const projectConfig = path.join(projectRoot, "dapper", "repository.config.json");
 const projectCompatibility = path.join(projectRoot, "dapper", "compatibility-v1.json");
 const m5AppRunner = path.resolve(projectRoot, "..", "DOLL-OS", "AppRunner.ino");
+const tab5AppRunner = path.resolve(projectRoot, "..", "Doll-OS-Tab5", "AppRunner.ino");
+const p4AppRunner = path.resolve(
+  projectRoot,
+  "..",
+  "Doll-OS-P4",
+  "firmware",
+  "DollOS_P4",
+  "AppRunner.ino",
+);
 
 function resolvedRuntimeOpcodes(compatibility, version) {
   const runtime = compatibility.runtimes[version];
@@ -66,7 +75,7 @@ function packageText({
   id = "hello",
   name = "Hello",
   version = "1.0.0",
-  boards = "m5cardputer,fnk0104",
+  boards = "m5cardputer,fnk0104,m5stack-tab5,crowpanel-p4",
   runtime = ">=1.0.0 <2.0.0",
   body = 'PRINT "hello"',
 } = {}) {
@@ -132,6 +141,30 @@ test("current repository sources validate", async () => {
 
   const universal = result.records.find((record) => record.id === "decide");
   assert.deepEqual(universal.boards, ["fnk0104", "m5cardputer"]);
+  const tab5Edition = result.records.find(
+    (record) => record.id === "decide" && record.boards.includes("m5stack-tab5"),
+  );
+  assert.deepEqual(tab5Edition.boards, ["m5stack-tab5"]);
+  const p4Edition = result.records.find(
+    (record) => record.id === "decide" && record.boards.includes("crowpanel-p4"),
+  );
+  assert.deepEqual(p4Edition.boards, ["crowpanel-p4"]);
+
+  // Every FNK package needs matching widescreen artifacts; comparing the IDs keeps
+  // this invariant current as packages are added instead of baking in a stale count.
+  const idsForBoard = (board) => result.records
+    .filter((record) => record.boards.includes(board))
+    .map((record) => record.id)
+    .sort((left, right) => left.localeCompare(right, "en"));
+  const fnkIds = idsForBoard("fnk0104");
+  const tab5Ids = idsForBoard("m5stack-tab5");
+  const p4Ids = idsForBoard("crowpanel-p4");
+  assert.deepEqual(p4Ids, tab5Ids, "all widescreen apps have both Tab5 and P4 editions");
+  assert.deepEqual(
+    fnkIds.filter((id) => !p4Ids.includes(id)),
+    [],
+    "every FNK app has a P4 edition",
+  );
 });
 
 test("FNK0104 compatibility contract matches AppRunner source", async () => {
@@ -177,6 +210,48 @@ test("M5Cardputer compatibility contract matches sibling AppRunner when availabl
     DAPP_MAX_STRING_VARS: "string_variables",
     DAPP_MAX_STRING_LEN: "string_length",
     DAPP_MAX_STEPS: "steps",
+  });
+});
+
+test("Tab5 compatibility contract matches sibling AppRunner", async () => {
+  const compatibility = JSON.parse(await readFile(projectCompatibility, "utf8"));
+  const source = await readFile(tab5AppRunner, "utf8");
+  const declared = compatibility.boards["m5stack-tab5"].runtime;
+  assert.deepEqual(sourceOpcodes(source), resolvedRuntimeOpcodes(compatibility, declared));
+  assertLimitsMatch(source, compatibility.boards["m5stack-tab5"].limits, {
+    DAPP_MAX_LINES: "lines",
+    DAPP_MAX_LABELS: "labels",
+    DAPP_MAX_VARS: "numeric_variables",
+    DAPP_MAX_STRING_VARS: "string_variables",
+    DAPP_MAX_STRING_LEN: "string_length",
+    DAPP_MAX_ARRAYS: "arrays",
+    DAPP_ARRAY_POOL_CELLS: "array_cells",
+    DAPP_MAX_CALL_DEPTH: "call_depth",
+    DAPP_CANVAS_MAX_COLS: "canvas_columns",
+    DAPP_CANVAS_MAX_ROWS: "canvas_rows",
+    DAPP_MAX_STEPS: "steps",
+    DAPP_BUF_MAX_BYTES: "buffer_bytes",
+  });
+});
+
+test("CrowPanel P4 compatibility contract matches sibling AppRunner", async () => {
+  const compatibility = JSON.parse(await readFile(projectCompatibility, "utf8"));
+  const source = await readFile(p4AppRunner, "utf8");
+  const declared = compatibility.boards["crowpanel-p4"].runtime;
+  assert.deepEqual(sourceOpcodes(source), resolvedRuntimeOpcodes(compatibility, declared));
+  assertLimitsMatch(source, compatibility.boards["crowpanel-p4"].limits, {
+    DAPP_MAX_LINES: "lines",
+    DAPP_MAX_LABELS: "labels",
+    DAPP_MAX_VARS: "numeric_variables",
+    DAPP_MAX_STRING_VARS: "string_variables",
+    DAPP_MAX_STRING_LEN: "string_length",
+    DAPP_MAX_ARRAYS: "arrays",
+    DAPP_ARRAY_POOL_CELLS: "array_cells",
+    DAPP_MAX_CALL_DEPTH: "call_depth",
+    DAPP_CANVAS_MAX_COLS: "canvas_columns",
+    DAPP_CANVAS_MAX_ROWS: "canvas_rows",
+    DAPP_MAX_STEPS: "steps",
+    DAPP_BUF_MAX_BYTES: "buffer_bytes",
   });
 });
 

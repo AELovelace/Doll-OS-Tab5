@@ -498,21 +498,48 @@ mechanism for shipping a default app or doc without a separate filesystem upload
 
 ### Wi-Fi (`WiFiManager.ino`)
 ```cpp
-bool connectToInternet();                                          // boot-time join; saved creds, else config.h defaults
+bool connectToInternet();                                          // boot-time join; sweeps the saved list, then config.h defaults
+bool connectToSavedNetworks(bool verbose);                         // blocking sweep of the saved list, first match wins
 void maintainInternetConnection();                                 // called each loop() tick; bounded 10s reconnect
 int  wifiIsConnected();                                            // 1 / 0
 void scanWifiNetworks();                                           // blocking scan, prints results
 void showWifiStatus();                                             // prints current connection info
 void connectWifiNetwork(const String& ssid, const String& password); // blocking, ~15s timeout
-bool saveWifiCredentials(const String& ssid, const String& password); // writes /wifi.cfg on LittleFS
+void runWifiManagerApp();                                          // the /rom/apps wifi-manager UI, blocks until the user quits
+
+// the saved-network store: /system/conf/wifi.dsys, ordered, `ssid<TAB>password` lines
+int  wifiLoadNetworks(WifiCredential networks[], int maxNetworks); // returns how many were read
+int  wifiSavedNetworkCount();
+bool wifiAddNetwork(const String& ssid, const String& password, bool& added); // adds, or updates in place
+bool wifiForgetNetwork(const String& ssid);
+bool wifiMoveNetwork(int from, int to);                            // 0-based; changes which network wins
+
+// pre-list shims: "the" credential is just the highest-priority saved network
+bool saveWifiCredentials(const String& ssid, const String& password);
 bool loadWifiCredentials(String& ssid, String& password);
 ```
+Credentials are an ordered list of up to `WIFI_MAX_SAVED_NETWORKS` (16, in
+`global.h`), not a single pair, and **file order is priority order** — every join
+path walks it top-down and stops at the first network that answers. A single
+`/wifi.cfg` left by older firmware is imported into the list on first read and
+then deleted.
+
+`connectToSavedNetworks()` scans first and tries the saved networks the scan saw
+before the ones it didn't. That second pass is not optional: a hidden SSID never
+appears in scan results at all, so dropping it would make a hidden home network
+unjoinable. Priority still decides the winner within each pass — the scan only
+decides who gets asked first, and it exists so that being out of range costs
+nothing instead of one failed 8s join per saved network.
+
 STA only — the fallback softAP is gone (it starved radio streaming on the S3's
-single radio). Two things are load-bearing and easy to undo by accident: the
+single radio). Three things are load-bearing and easy to undo by accident: the
 core's `WiFi.setAutoReconnect(false)` in `connectToInternet()` (left on, a failed
 join spins the driver on association forever and every later `scan`/`connect`
-fails), and `maintainInternetConnection()`'s use of `WiFi.reconnect()` rather
-than another `WiFi.begin()` (which the driver rejects mid-connect).
+fails); `maintainInternetConnection()`'s use of `WiFi.reconnect()` rather than
+another `WiFi.begin()` (which the driver rejects mid-connect); and the fact that
+its rotation through the saved list only calls `begin()` and never waits on the
+result — it runs inside `loop()` *and* inside `appRuntimeYield()`, where a
+blocking sweep would stall the shell and any running app.
 
 Call them directly from a new command if you need connectivity, or just check
 `WiFi.status() == WL_CONNECTED` yourself the way every existing networked
@@ -571,7 +598,7 @@ Both are real readings off the divided ADC pin (`BATTERY_ADC_PIN`, `config.h`) �
 unlike upstream's empty `batteryPercentCheck()` stubs, which don't exist here.
 The status bar and the `battery` command both read these.
 
-## 14. DS-Slave link (`KeyboardSerial.ino`, `SlaveLink.ino`)
+## 14. DS-Slave link (`KeyboardSerial.ino`, `SlaveLink.ino`, `PadButtons.ino`)
 
 DS-Slave is a companion ESP32-S3 (`../DS-Slave/`) that bridges a BLE HID
 keyboard (and optionally a controller) to a UART. Keystrokes arrive on the
@@ -579,6 +606,42 @@ keyboard (and optionally a controller) to a UART. Keystrokes arrive on the
 exactly the byte vocabulary the line editor already speaks: printable ASCII,
 CR for Enter, `0x08` for Backspace, ESC/CSI for the arrow/Home/End/Delete
 cluster, and real control codes for Ctrl+letter.
+
+Above that vocabulary sit private out-of-band bytes, consumed by
+`handleKeyboardLinkControl()` before line editing or raw forwarding ever sees them,
+so they can never land in an input buffer:
+
+| Byte | Meaning | Handled by |
+|---|---|---|
+| `0xF4` / `0xF5` | volume up / down | `radioAdjustVolume()` (§12) |
+| `0xF6` | paired sleep (rotary **Settings > Sleep**) | `enterSystemLightSleep()` |
+| `0xF7` | wake beacon after the slave reboots | consumed, no action |
+| `0xF8` `0xF9` `0xFA` `0xFB` | button bar: Start, Select, B, A — one byte per press edge | `padButtonPost()` |
+
+The button-bar bytes are only sent while game mode is off; with `GAME 1` those
+buttons are folded into the held-button bitmap below instead. What a press *means* is
+not decided on the wire — `PadButtons.ino` parks it in a one-slot mailbox and lets
+whoever owns the screen claim it:
+
+```cpp
+void padButtonPost(PadButton button);   // KeyboardSerial.ino, on the press edge
+bool padButtonTake(PadButton& button);  // a modal app that owns the screen, e.g. the music player
+void padButtonService();                // the shell's turn, called every loop() tick
+```
+A press goes stale after 500 ms, which is what makes an app with no button-bar
+vocabulary (`edit`, `ssh`, a `.dapp`) ignore the bar instead of firing the moment it
+exits — nothing has to opt out. Precedence in `padButtonService()` is
+`musicPadTransportBackground()` (a library track is playing) → `radioPadTransport()`
+(a stream is loaded) → launch `gb` / `radio play` / `music` through
+`commandProcessor()`. Add a context by claiming presses in your own input loop with
+`padButtonTake()`; add a *global* meaning by extending `padButtonService()`.
+
+Start and A are previous/next throughout; B is the context-sensitive one. Inside the
+open music player it is **select** — Enter on the highlighted row, so the bar alone can
+descend root → artists → albums → tracks on a build with no keyboard (the joystick's
+click sends Escape, which only goes back up). It falls back to pause/resume on the row
+that is already playing, and everywhere outside the player: pause/resume for a
+background library track, stop for a stream, `radio play` on an idle shell.
 
 Outbound commands use the paired board pin (GPIO2 on AB/S, GPIO45 on N),
 **bit-banged in software** while the spare hardware UART receives:
@@ -752,5 +815,6 @@ the sketch-local `TFT_eSPI` fork and `PartitionScheme=custom` →
 | Allocate a large buffer | `psramOrInternalCalloc(count, size, "tag")` (§13) |
 | Run something too heavy for the default stack | Dedicated FreeRTOS task, see `sshConnectAndRun`/`sshTaskEntry` (§8) |
 | Put the BLE keyboard into held-button mode | `slaveLinkSendLine("GAME 1")` … `"GAME 0"` (§14) |
+| Give the button bar a meaning inside my app | `padButtonTake()` in your input loop (§14) |
 | Take the speaker from the radio | `radioReleaseAudio()`, then `AudioOut::begin()` (§10) |
 | Add a script-level feature instead of a command | New opcode in `appExecute` + `DAPP.md` (§16) |
