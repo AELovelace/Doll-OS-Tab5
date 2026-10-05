@@ -53,6 +53,9 @@ usable with no network.
 - **ASUKA** — local LLM chat with tool calling (search / weather / URL fetch / time)
 - **BLE input bridge** — DS-Slave connects keyboard + gamepad at once and merges
   them into one UART stream
+- **Button bar** — three physical buttons that do the obvious thing for whatever
+  is playing: transport for the music player and the radio, app launchers on an
+  idle shell (see [Button bar](#button-bar))
 
 ---
 
@@ -70,6 +73,48 @@ usable with no network.
 DS-Slave always uses GPIO17 TX and GPIO18 RX on its end. On DOLL-OS, connect
 RX/TX to GPIO21/2 for FNK0104AB/S or GPIO46/45 for FNK0104N. The N move keeps
 the link clear of its audio WS (GPIO21) and SD D2 (GPIO2) lines.
+The FNK UART header also powers the companion: connect its 5V OUT and GND to
+DS-Slave 5V/VIN and GND. Disconnect that 5V wire before powering DS-Slave from
+its own programming USB connector.
+
+For the complete Reddit-ready bill of materials, power rules, and wire-by-wire
+tables for the UART, OLED, encoder, and antenna, see the
+[hardware build guide](HARDWARE_BUILD_GUIDE.md).
+
+### Button bar
+
+The three face buttons on the DS-Slave button bar are context-sensitive whenever
+game mode is **off**. DS-Slave sends one private UART byte per press —
+`0xF8` Start (left), `0xF9` Select, `0xFA` B (centre), `0xFB` A (right) — and
+DOLL-OS decides what the press means from whatever is using the audio and screen:
+
+| What's running | Start (left) | B (centre) | A (right) |
+|---|---|---|---|
+| Music player open | previous track | select (Enter) | next track |
+| A library track playing, player closed | previous track | pause / resume | next track |
+| A stream loaded (playing, paused, connecting) | previous station | stop | next station |
+| Nothing playing — plain shell | `gb` | `radio play` | `music` |
+
+Inside the player B is **select**, which is what makes the browser usable with no
+keyboard: it descends root → artists → albums → tracks and plays the highlighted
+track, while the joystick's click sends Escape to come back up. On the row that is
+already playing — where entering would only restart it — B pauses instead.
+
+Whatever is already running wins, so the launchers are only reachable from an idle
+shell; B mid-stream cannot restart the radio under itself. That is also why B **stops**
+the radio rather than pausing it — a paused stream still owns the bar, which would
+leave you unable to reach `gb` or `music` at all. Stopping releases it, so B toggles
+the radio on and off and the other two buttons go back to being launchers. The shell's
+`radio pause` is still there when a pause is what you want. Station stepping walks
+the same list `radio list` fetches, wrapping at both ends — the first press after
+boot pays for one directory fetch. Track stepping walks the `/sd/music` library.
+Any other app (`edit`, `ssh`, a `.dapp`) ignores the bar rather than misfiring, and
+`Select` is reserved with no action yet.
+
+With game mode **on** — the `gb` ROM picker and emulator turn it on themselves —
+the same buttons are part of the held-button gamepad bitmap instead (`0xF0`/`0xF1`),
+so nothing conflicts. Flash both boards when adding this feature: `0xF8`–`0xFB`
+are a paired protocol change, like `0xF6`/`0xF7` below.
 
 ### Paired sleep mode
 
@@ -94,6 +139,21 @@ AN S3
 ---
 
 ## Getting started
+
+### Sakura Flasher (initial desktop tool)
+
+The Sakura-themed Qt app can configure hardware and first-boot defaults, detect
+serial ports, build either board, and stream Arduino CLI upload logs without
+freezing. On Windows, launch it from the repository root:
+
+```powershell
+py -3 -m pip install -r python/requirements.txt
+./ps/run-sakura-flasher.ps1
+```
+
+It automatically finds the Arduino CLI bundled with a normal Arduino IDE
+installation. See [python/README.md](python/README.md) for the current workflow
+and limitations. The manual Arduino IDE path below remains supported.
 
 ### 1. Configure
 
@@ -161,11 +221,8 @@ FS at version 3.3.10
 WiFi at version 3.3.10
 Networking at version 3.3.10
 
-flash using these settings:
-- **USB Mode:** `USB-OTG (TinyUSB)`
-- **USB CDC On Boot:** `Disabled`
-- **USB MSC On Boot:** `Disabled`
-- **USB DFU On Boot:** `Disabled`
+Flash DS-Slave through the Lonely Binary board's UART/programming connector.
+Wired USB keyboard/host operation is not part of the currently supported build.
 
 ## Commands
 
@@ -193,13 +250,13 @@ Run `help` on the device for the live list.
 | `radio` | stream MP3 audio |
 | `reboot` | restart |
 | `run` | run a `.dapp` app |
-| `settings` | view/set/unset runtime overrides for config.h defaults (FTP, MQTT, radio, ASUKA), stored in `/system/conf/settings.dsys` |
+| `settings` | view/set/unset runtime overrides for config.h defaults (FTP, MQTT, radio, ASUKA); see the [complete key and rotary-control guide](docs/SETTINGS_GUIDE.md) |
 | `slave` | talk to DS-Slave |
 | `ssh` | SSH client |
 | `status` | Wi-Fi status |
 | `telnet` | telnet client |
 | `uptime` | uptime |
-| `wifi` | scan / connect / save credentials |
+| `wifi` | scan / connect / save up to 16 networks; `wifi manager` (or `run wifi-manager`) opens the ROM app |
 
 > TODO: expand the interesting ones with usage examples — `radio`, `gb`, `asuka`,
 > `ssh`, `slave`, `run`, `dapper`.
@@ -245,6 +302,7 @@ Radio.ino            audio streaming
 Asuka.ino            LLM chat        AsukaTools.ino  its tool calls
 SlaveLink.ino        outbound channel to DS-Slave
 KeyboardSerial.ino   inbound keystrokes from DS-Slave
+PadButtons.ino       what a button-bar press means per running app
 global.h  config.h   shared state / local secrets
 sketch.yaml          board profile + pinned libraries
 apps/                bundled .dapp sources

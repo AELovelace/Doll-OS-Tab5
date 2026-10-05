@@ -1,0 +1,15 @@
+default_profile: esp32s3
+profiles:
+  esp32s3:
+    fqbn: esp32:esp32:esp32s3:UploadSpeed=115200,FlashSize=16M,PartitionScheme=custom,PSRAM=opi,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default
+    platforms:
+      - platform: esp32:esp32 (3.3.10)
+    libraries:
+      - dir: ../../libraries/TFT_eSPI
+      - dir: ../../libraries/ESP32-audioI2S-master
+      - dir: ../../../libraries/ArduinoJson
+      - dir: ../../../libraries/ESP32Ping
+      - dir: ../../../libraries/esp32ARP
+      - dir: ../../../libraries/LibSSH-ESP32
+      - dir: ../../../libraries/PubSubClient
+      - dir: ../../../libraries/SimpleFTPServer

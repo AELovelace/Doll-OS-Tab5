@@ -20,7 +20,7 @@
 
 // BoardVariant.h is shared with the sketch so the panel driver cannot drift
 // from the SD, audio, battery, LED, and DS-Slave pin selection.
-#include "../../BoardVariant.h"
+#include "../../firmware/DS/BoardVariant.h"
 
 ///////////////////////////////////////////////////////
 //   User configuration selection lines are below    //

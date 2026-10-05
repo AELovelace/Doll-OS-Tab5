@@ -1,2 +1,6 @@
 config.h
 dapper/dist/
+.arduino-build/
+__pycache__/
+*.py[cod]
+.venv/
