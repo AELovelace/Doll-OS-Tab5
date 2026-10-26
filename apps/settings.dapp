@@ -1,0 +1,932 @@
+# @dapp-format 1
+# @id settings
+# @name Settings
+# @version 1.0.0
+# @boards fnk0104
+# @runtime >=1.7.0 <2.0.0
+# @echo off
+# @summary Guided editor for the persistent DOLL-OS settings store
+# /system/apps/settings.dapp
+#
+# A front end for /system/conf/settings.dsys -- the same store the shell's
+# `settings` command writes and settingsGet() reads at each point of use.
+# Every key offered here is one a subsystem actually reads, so the menus double
+# as the list of what can be overridden, and each value is checked against the
+# range the firmware will accept before it is written: a port outside 1..65535
+# or a volume outside 0..21 is refused here instead of being stored and then
+# silently ignored at boot.
+#
+# The store is loaded into the byte buffer and rewritten whole on every save,
+# in the shape settingsSaveEntries() writes: a two-line header, then one
+# key=value line per entry, through a temporary file and a rename. Keys this
+# app does not know about are carried across untouched; comments someone added
+# to the file by hand are not, exactly as the shell command drops them.
+
+SETSTR sfile "/system/conf/settings.dsys"
+SETSTR stmp "/system/conf/settings.tmp.dsys"
+BUFNEW 32768
+GOSUB reload
+
+:menu
+CLEAR
+COLOR pink
+PRINT "========================================"
+PRINT "               SETTINGS"
+PRINT "========================================"
+COLOR white
+PRINT "$ecount of 32 overrides saved"
+PRINT ""
+PRINT "1  FTP server"
+PRINT "2  Motoko MQTT client"
+PRINT "3  Internet radio"
+PRINT "4  ASUKA LLM endpoint"
+PRINT "5  ASUKA search and weather"
+PRINT "6  show every saved override"
+PRINT "7  set any key by name"
+PRINT "8  remove every override"
+PRINT "q  return to DOLL-OS"
+PRINT ""
+COLOR yellow
+PRINT "saved values apply after a reboot"
+COLOR white
+INPUT choice "settings> "
+IFEQ $choice "1" GOTO g1
+IFEQ $choice "2" GOTO g2
+IFEQ $choice "3" GOTO g3
+IFEQ $choice "4" GOTO g4
+IFEQ $choice "5" GOTO g5
+IFEQ $choice "6" GOTO showall
+IFEQ $choice "7" GOTO anykey
+IFEQ $choice "8" GOTO wipe
+IFEQ $choice "q" GOTO leave
+IFEQ $choice "Q" GOTO leave
+GOTO menu
+
+:g1
+SET gstart 0
+SET gend 1
+SETSTR gtitle "FTP SERVER"
+SETSTR gnote "Plaintext login for the ftp command. LAN only."
+GOTO group
+
+:g2
+SET gstart 2
+SET gend 3
+SETSTR gtitle "MOTOKO MQTT CLIENT"
+SETSTR gnote "Defaults for motoko launched with no arguments."
+GOTO group
+
+:g3
+SET gstart 4
+SET gend 6
+SETSTR gtitle "INTERNET RADIO"
+SETSTR gnote "Post-boot defaults, not the running session."
+GOTO group
+
+:g4
+SET gstart 7
+SET gend 9
+SETSTR gtitle "ASUKA LLM ENDPOINT"
+SETSTR gnote "The /host and /port commands change only the session."
+GOTO group
+
+:g5
+SET gstart 10
+SET gend 14
+SETSTR gtitle "ASUKA SEARCH AND WEATHER"
+SETSTR gnote "The label is descriptive; coordinates select the place."
+GOTO group
+
+# ---------------------------------------------------------------- group screen
+
+:group
+CLEAR
+COLOR cyan
+PRINT "$gtitle"
+COLOR white
+PRINT "$gnote"
+PRINT ""
+SET gi $gstart
+SET gn 0
+:g_row
+IF $gi > $gend GOTO g_prompt
+SET ki $gi
+GOSUB kinfo
+SETSTR q $k_name
+GOSUB getval
+GOSUB shownval
+ADD gn 1
+PRINT "$gn  $k_label"
+COLOR cyan
+PRINT "   $k_name = $shown"
+COLOR white
+ADD gi 1
+GOTO g_row
+:g_prompt
+PRINT ""
+INPUT choice "number to edit, b to go back> "
+IFEQ $choice "b" GOTO menu
+IFEQ $choice "B" GOTO menu
+IFEQ $choice "q" GOTO menu
+SETSTR ni_s $choice
+SET ni_min 1
+SET ni_max $gn
+GOSUB isint
+IF $ni_ok = 0 GOTO group
+SET ki $ni_val
+SUB ki 1
+ADD ki $gstart
+GOTO edit
+
+# ----------------------------------------------------------------- edit screen
+
+:edit
+CLEAR
+GOSUB kinfo
+SETSTR q $k_name
+GOSUB getval
+GOSUB shownval
+COLOR cyan
+PRINT "$k_label"
+COLOR white
+PRINT "key: $k_name"
+PRINT "now: $shown"
+PRINT ""
+COLOR yellow
+PRINT "$k_hint"
+COLOR white
+PRINT ""
+PRINT "1  set a new value"
+IF $found = 1 GOTO e_showdel
+PRINT "   (nothing saved -- the config.h default is in use)"
+GOTO e_prompt
+:e_showdel
+PRINT "2  remove this override and return to the default"
+:e_prompt
+PRINT "b  back"
+PRINT ""
+INPUT choice "> "
+IFEQ $choice "1" GOTO e_set
+IFEQ $choice "2" GOTO e_del
+IFEQ $choice "b" GOTO e_back
+IFEQ $choice "B" GOTO e_back
+GOTO edit
+
+:e_set
+PRINT ""
+IF $k_kind = 2 GOTO e_secret
+INPUT vv "new value> "
+GOTO e_check
+:e_secret
+INPUTSECRET vv "new value> "
+:e_check
+GOSUB validate
+IF $vok = 0 GOTO e_bad
+SETSTR q $k_name
+SETSTR qv $vv
+SET qdel 0
+GOSUB savekey
+IF $sok = 0 GOTO e_wait
+COLOR green
+PRINT "saved -- reboot to apply"
+:e_wait
+WAIT 1200
+GOTO edit
+
+:e_bad
+COLOR red
+PRINT "$verr"
+COLOR white
+PRINT "nothing was saved"
+WAIT 1600
+GOTO edit
+
+:e_del
+IF $found = 0 GOTO edit
+SETSTR q $k_name
+SET qdel 1
+SETSTR qv ""
+GOSUB savekey
+IF $sok = 0 GOTO e_wait
+COLOR green
+PRINT "removed -- reboot to use the config.h default"
+WAIT 1200
+GOTO edit
+
+:e_back
+IF $ki > 9 GOTO g5
+IF $ki > 6 GOTO g4
+IF $ki > 3 GOTO g3
+IF $ki > 1 GOTO g2
+GOTO g1
+
+# --------------------------------------------------------------- whole store
+
+:showall
+CLEAR
+COLOR cyan
+PRINT "SAVED OVERRIDES"
+COLOR white
+IF $ecount > 0 GOTO sa_walk
+COLOR yellow
+PRINT "(none -- every value is using its config.h default)"
+COLOR white
+GOTO sa_pause
+:sa_walk
+SET rp 0
+:sa_loop
+IF $rp >= $buflen GOTO sa_end
+GOSUB readline
+GOSUB splitline
+IF $lok = 0 GOTO sa_loop
+SETSTR is_key $lk
+GOSUB issecret
+IF $is_secret = 1 GOTO sa_masked
+PRINT "$lk = $lv"
+GOTO sa_loop
+:sa_masked
+PRINT "$lk = ****"
+GOTO sa_loop
+:sa_end
+PRINT ""
+COLOR yellow
+PRINT "passwords and API keys are masked here"
+COLOR white
+:sa_pause
+PRINT ""
+INPUT _ "enter to return> "
+GOTO menu
+
+# ------------------------------------------------------------- any key by name
+
+:anykey
+CLEAR
+COLOR cyan
+PRINT "SET ANY KEY"
+COLOR white
+PRINT "The store accepts any key name, but a key that no"
+PRINT "subsystem reads has no effect. Use this for keys"
+PRINT "added by firmware newer than this app."
+PRINT ""
+INPUT ck "key> "
+LEN ak_len $ck
+IF $ak_len = 0 GOTO menu
+GOSUB keyok
+IF $ck_ok = 0 GOTO ak_badkey
+SETSTR ak_key $ck
+SETSTR q $ak_key
+GOSUB getval
+GOSUB shownval
+PRINT "now: $shown"
+PRINT ""
+PRINT "1  set a value"
+PRINT "2  remove this key"
+PRINT "b  back"
+INPUT choice "> "
+IFEQ $choice "1" GOTO ak_set
+IFEQ $choice "2" GOTO ak_del
+GOTO menu
+
+:ak_set
+SETSTR is_key $ak_key
+GOSUB issecret
+IF $is_secret = 1 GOTO ak_secret
+INPUT vv "value> "
+GOTO ak_check
+:ak_secret
+INPUTSECRET vv "value> "
+:ak_check
+SET k_kind 1
+GOSUB validate
+IF $vok = 0 GOTO ak_bad
+SETSTR q $ak_key
+SETSTR qv $vv
+SET qdel 0
+GOSUB savekey
+IF $sok = 0 GOTO ak_wait
+COLOR green
+PRINT "saved -- reboot to apply"
+:ak_wait
+WAIT 1200
+GOTO menu
+
+:ak_del
+SETSTR q $ak_key
+SET qdel 1
+SETSTR qv ""
+GOSUB savekey
+IF $sok = 0 GOTO ak_wait
+COLOR green
+PRINT "removed -- reboot to apply"
+WAIT 1200
+GOTO menu
+
+:ak_bad
+COLOR red
+PRINT "$verr"
+WAIT 1600
+GOTO menu
+
+:ak_badkey
+COLOR red
+PRINT "a key is 1 to 32 characters and cannot contain"
+PRINT "spaces, quotes, a hash or an equals sign"
+WAIT 1800
+GOTO menu
+
+# ------------------------------------------------------- remove every override
+
+:wipe
+CLEAR
+COLOR red
+PRINT "REMOVE EVERY OVERRIDE"
+COLOR white
+PRINT "All $ecount saved values return to their config.h"
+PRINT "defaults, and any credentials stored here are lost."
+PRINT ""
+INPUT yn "type YES to confirm> "
+IFEQ $yn "YES" GOTO wipe_yes
+PRINT "cancelled"
+WAIT 800
+GOTO menu
+:wipe_yes
+FDELETE $sfile
+GOSUB reload
+COLOR green
+PRINT "store cleared -- reboot to apply"
+WAIT 1500
+GOTO menu
+
+:leave
+CLEAR
+COLOR pink
+PRINT "settings closed"
+COLOR white
+IF $ecount > 0 GOTO leave_note
+EXIT
+:leave_note
+PRINT "run reboot for saved changes to take effect"
+EXIT
+
+# ================================================================== routines
+
+# reload -- read the store into the byte buffer and count its entries
+:reload
+BUFCLEAR
+BUFLOAD $sfile
+SET storefull 0
+IF $buflen < $bufcap GOTO rl_count
+SET storefull 1
+:rl_count
+SET ecount 0
+SET rp 0
+:rl_loop
+IF $rp >= $buflen GOTO rl_done
+GOSUB readline
+GOSUB splitline
+IF $lok = 0 GOTO rl_loop
+ADD ecount 1
+GOTO rl_loop
+:rl_done
+RETURN
+
+# readline -- the buffer line at $rp into $line, leaving $rp past its newline.
+# CHR cannot build a control character, so a stop set of newlines is impossible:
+# this takes whitespace-delimited tokens instead and puts the line back together
+# from the byte each one stopped on. A tab inside a value becomes a space.
+:readline
+SETSTR line ""
+:rd_next
+IF $rp >= $buflen GOTO rd_done
+BUFTAKE rd_piece rp $rp
+APPEND line $rd_piece
+IF $rp >= $buflen GOTO rd_done
+BUFAT rd_b $rp
+ADD rp 1
+IF $rd_b = 10 GOTO rd_done
+IF $rd_b = 13 GOTO rd_next
+APPEND line " "
+GOTO rd_next
+:rd_done
+RETURN
+
+# splitline -- $line into $lk and $lv; $lok stays 0 for comments and junk
+:splitline
+SET lok 0
+SETSTR lk ""
+SETSTR lv ""
+LEN sl_len $line
+IF $sl_len = 0 GOTO sl_done
+CHARAT sl_c $line 0
+IF $sl_c = 35 GOTO sl_done
+SET sl_i 0
+:sl_scan
+IF $sl_i >= $sl_len GOTO sl_done
+CHARAT sl_c $line $sl_i
+IF $sl_c = 61 GOTO sl_split
+ADD sl_i 1
+GOTO sl_scan
+:sl_split
+IF $sl_i = 0 GOTO sl_done
+SUBSTR tr_s $line 0 $sl_i
+GOSUB trim
+SETSTR lk $tr_o
+SET sl_rest $sl_len
+SUB sl_rest $sl_i
+SUB sl_rest 1
+ADD sl_i 1
+SUBSTR tr_s $line $sl_i $sl_rest
+GOSUB trim
+SETSTR lv $tr_o
+SETSTR ck $lk
+GOSUB keyok
+IF $ck_ok = 0 GOTO sl_done
+SET lok 1
+:sl_done
+RETURN
+
+# trim -- $tr_s into $tr_o with leading and trailing blanks removed
+:trim
+SETSTR tr_o ""
+LEN tr_len $tr_s
+SET tr_a 0
+:tr_lead
+IF $tr_a >= $tr_len GOTO tr_done
+CHARAT tr_c $tr_s $tr_a
+IF $tr_c > 32 GOTO tr_tail
+ADD tr_a 1
+GOTO tr_lead
+:tr_tail
+SET tr_b $tr_len
+SUB tr_b 1
+:tr_tloop
+IF $tr_b <= $tr_a GOTO tr_cut
+CHARAT tr_c $tr_s $tr_b
+IF $tr_c > 32 GOTO tr_cut
+SUB tr_b 1
+GOTO tr_tloop
+:tr_cut
+SET tr_n $tr_b
+SUB tr_n $tr_a
+ADD tr_n 1
+SUBSTR tr_o $tr_s $tr_a $tr_n
+:tr_done
+RETURN
+
+# getval -- value of key $q into $val; $found says whether one is stored
+:getval
+SET found 0
+SETSTR val ""
+SET rp 0
+:gv_loop
+IF $rp >= $buflen GOTO gv_done
+GOSUB readline
+GOSUB splitline
+IF $lok = 0 GOTO gv_loop
+IFNE $lk $q GOTO gv_loop
+SETSTR val $lv
+SET found 1
+:gv_done
+RETURN
+
+# shownval -- printable form of $val for key $q, masking secrets
+:shownval
+SETSTR shown "(default)"
+IF $found = 0 GOTO sv_done
+SETSTR is_key $q
+GOSUB issecret
+IF $is_secret = 1 GOTO sv_mask
+LEN sv_len $val
+IF $sv_len > 26 GOTO sv_trunc
+SETSTR shown $val
+GOTO sv_done
+:sv_trunc
+SUBSTR shown $val 0 24
+APPEND shown ".."
+GOTO sv_done
+:sv_mask
+SETSTR shown "**** (set)"
+:sv_done
+RETURN
+
+# savekey -- rewrite the store with $q set to $qv, or removed when $qdel is 1
+:savekey
+SET sok 0
+IF $storefull = 1 GOTO sk_toobig
+SET sk_n 0
+SET rp 0
+:sk_count
+IF $rp >= $buflen GOTO sk_counted
+GOSUB readline
+GOSUB splitline
+IF $lok = 0 GOTO sk_count
+IFEQ $lk $q GOTO sk_count
+ADD sk_n 1
+GOTO sk_count
+:sk_counted
+IF $qdel = 1 GOTO sk_room
+ADD sk_n 1
+:sk_room
+IF $sk_n > 32 GOTO sk_full
+FMKDIR "/system"
+FMKDIR "/system/conf"
+FOPEN $stmp write
+IF $fok = 0 GOTO sk_noopen
+FWRITE "# DOLL-OS runtime settings -- overrides config.h defaults"
+FWRITE "# Format: key=value"
+SET rp 0
+:sk_copy
+IF $rp >= $buflen GOTO sk_tail
+GOSUB readline
+GOSUB splitline
+IF $lok = 0 GOTO sk_copy
+IFEQ $lk $q GOTO sk_copy
+FWRITE "$lk=$lv"
+GOTO sk_copy
+:sk_tail
+IF $qdel = 1 GOTO sk_close
+FWRITE "$q=$qv"
+:sk_close
+FCLOSE
+FDELETE $sfile
+FMOVE $stmp $sfile
+IF $fok = 0 GOTO sk_norename
+SET sok 1
+GOSUB reload
+RETURN
+
+:sk_norename
+COLOR red
+PRINT "could not replace the settings file"
+PRINT "the rewritten store is still at $stmp"
+COLOR white
+RETURN
+
+:sk_noopen
+COLOR red
+PRINT "could not open $stmp for writing"
+COLOR white
+RETURN
+
+:sk_full
+COLOR red
+PRINT "the store already holds 32 keys"
+PRINT "remove one before adding another"
+COLOR white
+RETURN
+
+:sk_toobig
+COLOR red
+PRINT "the settings file is larger than this app can rewrite"
+PRINT "use the shell settings command instead"
+COLOR white
+RETURN
+
+# validate -- $vv against $k_kind, $k_min and $k_max; $vok and $verr report
+:validate
+SET vok 0
+SETSTR verr ""
+LEN v_len $vv
+IF $v_len = 0 GOTO v_empty
+IF $v_len > 160 GOTO v_long
+IF $k_kind = 3 GOTO v_int
+IF $k_kind = 7 GOTO v_dec
+IF $k_kind = 4 GOTO v_host
+IF $k_kind = 5 GOTO v_url
+IF $k_kind = 6 GOTO v_path
+GOTO v_ok
+
+:v_int
+SETSTR ni_s $vv
+SET ni_min $k_min
+SET ni_max $k_max
+GOSUB isint
+IF $ni_ok = 1 GOTO v_ok
+SETSTR verr "needs a whole number from $k_min to $k_max"
+GOTO v_done
+
+:v_dec
+SETSTR nd_s $vv
+SET nd_max $k_max
+GOSUB isdec
+IF $nd_ok = 1 GOTO v_ok
+SETSTR verr "needs decimal degrees no further than $k_max from 0"
+GOTO v_done
+
+:v_host
+SETSTR hw_s $vv
+SETSTR hw_w "://"
+GOSUB hasword
+IF $hw_found = 1 GOTO v_scheme
+SETSTR hw_w " "
+GOSUB hasword
+IF $hw_found = 1 GOTO v_space
+GOTO v_ok
+:v_scheme
+SETSTR verr "a host is a name or address with no scheme prefix"
+GOTO v_done
+:v_space
+SETSTR verr "a host cannot contain a space"
+GOTO v_done
+
+:v_url
+SUBSTR v_pre $vv 0 7
+IFEQ $v_pre "http://" GOTO v_ok
+SUBSTR v_pre $vv 0 8
+IFEQ $v_pre "https://" GOTO v_ok
+SETSTR verr "a URL must start with http:// or https://"
+GOTO v_done
+
+:v_path
+CHARAT v_c $vv 0
+IF $v_c = 47 GOTO v_ok
+SETSTR verr "a request path must start with /"
+GOTO v_done
+
+:v_empty
+SETSTR verr "an empty value is not stored -- remove the key instead"
+GOTO v_done
+:v_long
+SETSTR verr "a value is at most 160 characters"
+GOTO v_done
+:v_ok
+SET vok 1
+:v_done
+RETURN
+
+# isint -- $ni_s as a whole number within $ni_min..$ni_max into $ni_val
+:isint
+SET ni_ok 0
+SET ni_val 0
+LEN ni_len $ni_s
+IF $ni_len = 0 GOTO ii_done
+IF $ni_len > 9 GOTO ii_done
+SET ni_i 0
+:ii_loop
+IF $ni_i >= $ni_len GOTO ii_range
+CHARAT ni_c $ni_s $ni_i
+IF $ni_c < 48 GOTO ii_done
+IF $ni_c > 57 GOTO ii_done
+MUL ni_val 10
+SUB ni_c 48
+ADD ni_val $ni_c
+ADD ni_i 1
+GOTO ii_loop
+:ii_range
+IF $ni_val < $ni_min GOTO ii_done
+IF $ni_val > $ni_max GOTO ii_done
+SET ni_ok 1
+:ii_done
+RETURN
+
+# isdec -- $nd_s as a signed decimal no further from zero than $nd_max
+:isdec
+SET nd_ok 0
+SET nd_int 0
+SET nd_frac 0
+SET nd_digits 0
+SET nd_dot 0
+SET nd_i 0
+LEN nd_len $nd_s
+IF $nd_len = 0 GOTO nd_done
+CHARAT nd_c $nd_s 0
+IF $nd_c = 45 GOTO nd_sign
+IF $nd_c = 43 GOTO nd_sign
+GOTO nd_loop
+:nd_sign
+SET nd_i 1
+:nd_loop
+IF $nd_i >= $nd_len GOTO nd_check
+CHARAT nd_c $nd_s $nd_i
+IF $nd_c = 46 GOTO nd_dotchar
+IF $nd_c < 48 GOTO nd_done
+IF $nd_c > 57 GOTO nd_done
+SET nd_digits 1
+IF $nd_dot = 1 GOTO nd_fracdigit
+MUL nd_int 10
+SUB nd_c 48
+ADD nd_int $nd_c
+IF $nd_int > 100000 GOTO nd_done
+ADD nd_i 1
+GOTO nd_loop
+:nd_fracdigit
+IF $nd_c > 48 GOTO nd_fracnz
+ADD nd_i 1
+GOTO nd_loop
+:nd_fracnz
+SET nd_frac 1
+ADD nd_i 1
+GOTO nd_loop
+:nd_dotchar
+IF $nd_dot = 1 GOTO nd_done
+SET nd_dot 1
+ADD nd_i 1
+GOTO nd_loop
+:nd_check
+IF $nd_digits = 0 GOTO nd_done
+IF $nd_int > $nd_max GOTO nd_done
+IF $nd_int < $nd_max GOTO nd_ok
+IF $nd_frac = 1 GOTO nd_done
+:nd_ok
+SET nd_ok 1
+:nd_done
+RETURN
+
+# keyok -- whether $ck is a key name the store will accept
+:keyok
+SET ck_ok 0
+LEN ck_len $ck
+IF $ck_len = 0 GOTO ck_done
+IF $ck_len > 32 GOTO ck_done
+SET ck_i 0
+:ck_loop
+IF $ck_i >= $ck_len GOTO ck_pass
+CHARAT ck_c $ck $ck_i
+IF $ck_c <= 32 GOTO ck_done
+IF $ck_c = 61 GOTO ck_done
+IF $ck_c = 34 GOTO ck_done
+IF $ck_c = 39 GOTO ck_done
+IF $ck_c = 35 GOTO ck_done
+ADD ck_i 1
+GOTO ck_loop
+:ck_pass
+SET ck_ok 1
+:ck_done
+RETURN
+
+# issecret -- masks $is_key the way the shell listing does
+:issecret
+SETSTR lw_in $is_key
+GOSUB lower
+SETSTR hw_s $lw_out
+SETSTR hw_w "pass"
+GOSUB hasword
+SET is_secret $hw_found
+IF $is_secret = 1 GOTO is_done
+SETSTR hw_w "key"
+GOSUB hasword
+SET is_secret $hw_found
+:is_done
+RETURN
+
+# lower -- $lw_in into $lw_out in lower case
+:lower
+SETSTR lw_out ""
+LEN lw_len $lw_in
+SET lw_i 0
+:lw_loop
+IF $lw_i >= $lw_len GOTO lw_done
+CHARAT lw_c $lw_in $lw_i
+IF $lw_c < 65 GOTO lw_put
+IF $lw_c > 90 GOTO lw_put
+ADD lw_c 32
+:lw_put
+CHR lw_ch $lw_c
+APPEND lw_out $lw_ch
+ADD lw_i 1
+GOTO lw_loop
+:lw_done
+RETURN
+
+# hasword -- whether $hw_w appears anywhere in $hw_s
+:hasword
+SET hw_found 0
+LEN hw_sl $hw_s
+LEN hw_wl $hw_w
+SET hw_last $hw_sl
+SUB hw_last $hw_wl
+IF $hw_last < 0 GOTO hw_done
+SET hw_i 0
+:hw_loop
+IF $hw_i > $hw_last GOTO hw_done
+SUBSTR hw_p $hw_s $hw_i $hw_wl
+IFEQ $hw_p $hw_w GOTO hw_hit
+ADD hw_i 1
+GOTO hw_loop
+:hw_hit
+SET hw_found 1
+:hw_done
+RETURN
+
+# kinfo -- the catalog: key $ki into $k_name, $k_label, $k_hint and its kind.
+# Kinds: 1 text, 2 secret, 3 whole number, 4 host, 5 URL, 6 path, 7 degrees.
+:kinfo
+SET k_kind 1
+SET k_min 0
+SET k_max 0
+IF $ki = 0 GOTO ki0
+IF $ki = 1 GOTO ki1
+IF $ki = 2 GOTO ki2
+IF $ki = 3 GOTO ki3
+IF $ki = 4 GOTO ki4
+IF $ki = 5 GOTO ki5
+IF $ki = 6 GOTO ki6
+IF $ki = 7 GOTO ki7
+IF $ki = 8 GOTO ki8
+IF $ki = 9 GOTO ki9
+IF $ki = 10 GOTO ki10
+IF $ki = 11 GOTO ki11
+IF $ki = 12 GOTO ki12
+IF $ki = 13 GOTO ki13
+IF $ki = 14 GOTO ki14
+SETSTR k_name ""
+SETSTR k_label "(no such key)"
+SETSTR k_hint ""
+RETURN
+
+:ki0
+SETSTR k_name "ftp.user"
+SETSTR k_label "FTP username"
+SETSTR k_hint "Login name the FTP server accepts."
+RETURN
+:ki1
+SETSTR k_name "ftp.pass"
+SETSTR k_label "FTP password"
+SETSTR k_hint "Sent in the clear. Restart ftp after changing it."
+SET k_kind 2
+RETURN
+:ki2
+SETSTR k_name "motoko.broker"
+SETSTR k_label "MQTT broker"
+SETSTR k_hint "Hostname or IPv4 address, with no mqtt:// prefix."
+SET k_kind 4
+RETURN
+:ki3
+SETSTR k_name "motoko.port"
+SETSTR k_label "MQTT port"
+SETSTR k_hint "TCP port, normally 1883."
+SET k_kind 3
+SET k_min 1
+SET k_max 65535
+RETURN
+:ki4
+SETSTR k_name "radio.url"
+SETSTR k_label "Default station"
+SETSTR k_hint "Stream used when radio play is given no URL."
+SET k_kind 5
+RETURN
+:ki5
+SETSTR k_name "radio.volume"
+SETSTR k_label "Startup volume"
+SETSTR k_hint "Volume after boot, 0 to 21."
+SET k_kind 3
+SET k_min 0
+SET k_max 21
+RETURN
+:ki6
+SETSTR k_name "radio.directory_url"
+SETSTR k_label "Station directory"
+SETSTR k_hint "Endpoint the station browser lists from."
+SET k_kind 5
+RETURN
+:ki7
+SETSTR k_name "asuka.llm_host"
+SETSTR k_label "LLM host"
+SETSTR k_hint "Host of the chat endpoint, with no scheme prefix."
+SET k_kind 4
+RETURN
+:ki8
+SETSTR k_name "asuka.llm_port"
+SETSTR k_label "LLM port"
+SETSTR k_hint "TCP port of the chat endpoint."
+SET k_kind 3
+SET k_min 1
+SET k_max 65535
+RETURN
+:ki9
+SETSTR k_name "asuka.llm_path"
+SETSTR k_label "LLM request path"
+SETSTR k_hint "Usually /v1/chat/completions."
+SET k_kind 6
+RETURN
+:ki10
+SETSTR k_name "asuka.brave_key"
+SETSTR k_label "Brave Search API key"
+SETSTR k_hint "Enables the live search tool."
+SET k_kind 2
+RETURN
+:ki11
+SETSTR k_name "asuka.owm_key"
+SETSTR k_label "OpenWeather API key"
+SETSTR k_hint "Enables the weather tool."
+SET k_kind 2
+RETURN
+:ki12
+SETSTR k_name "asuka.owm_location"
+SETSTR k_label "Weather label"
+SETSTR k_hint "Place name shown with results. Spaces are fine."
+RETURN
+:ki13
+SETSTR k_name "asuka.owm_lat"
+SETSTR k_label "Weather latitude"
+SETSTR k_hint "Decimal degrees, -90 to 90. Set longitude too."
+SET k_kind 7
+SET k_max 90
+RETURN
+:ki14
+SETSTR k_name "asuka.owm_lon"
+SETSTR k_label "Weather longitude"
+SETSTR k_hint "Decimal degrees, -180 to 180. Set latitude too."
+SET k_kind 7
+SET k_max 180
+RETURN
